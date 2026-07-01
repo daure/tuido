@@ -64,19 +64,19 @@ fn screen() -> Flex<Msg> {
         .top_left("Context command bar")
         .bottom_left(format!(
             "{}person alice • {}project launch • {}returned • {}due • simulated parser",
-            keys::COLON.label(),
-            keys::COLON.label(),
-            keys::SLASH.label(),
-            keys::SLASH.label()
+            keys::COMMAND_BAR.label(),
+            keys::COMMAND_BAR.label(),
+            keys::FILTER_PREFIX.label(),
+            keys::FILTER_PREFIX.label()
         ))
         .host(
             TextInput::new()
                 .placeholder(format!(
                     "{}person alice {}due",
-                    keys::COLON.label(),
-                    keys::SLASH.label()
+                    keys::COMMAND_BAR.label(),
+                    keys::FILTER_PREFIX.label()
                 ))
-                .hotkey(keys::COLON.hotkey())
+                .hotkey(keys::COMMAND_BAR.hotkey())
                 .max_len(120),
         );
     let filters = Panel::new().top_left("Filters").host(filter_row());
@@ -100,28 +100,28 @@ fn screen() -> Flex<Msg> {
                 .child(
                     "palette",
                     Button::new("Action palette")
-                        .hotkey(keys::A.hotkey())
+                        .hotkey(keys::ACTION_PALETTE_BUTTON.hotkey())
                         .on_press(|| Msg::OpenDialog("Action palette")),
                     FlexItem::fixed(18),
                 )
                 .child(
                     "confirm",
                     Button::new("Archive confirm")
-                        .hotkey(keys::D.hotkey())
+                        .hotkey(keys::ARCHIVE_CONFIRM_BUTTON.hotkey())
                         .on_press(|| Msg::OpenDialog("Typed archive confirmation")),
                     FlexItem::fixed(20),
                 )
                 .child(
                     "snooze",
                     Button::new("Bulk snooze")
-                        .hotkey(keys::Z.hotkey())
+                        .hotkey(keys::BULK_SNOOZE_BUTTON.hotkey())
                         .on_press(|| Msg::OpenDialog("Bulk snooze operation form")),
                     FlexItem::fixed(16),
                 )
                 .child(
                     "focus",
                     Button::new("Pull/focus")
-                        .hotkey(keys::P.hotkey())
+                        .hotkey(keys::PULL_FOCUS_BUTTON.hotkey())
                         .on_press(|| Msg::OpenDialog("Operation plan")),
                     FlexItem::fixed(14),
                 ),
@@ -151,18 +151,21 @@ fn filter_row() -> Flex<Msg> {
             "future",
             Toggle::new("show future-start")
                 .checked(true)
-                .hotkey(keys::F.hotkey()),
+                .hotkey(keys::SHOW_FUTURE_TOGGLE.hotkey()),
             FlexItem::fixed(20),
         )
         .child(
             "snoozed",
-            Toggle::new("snoozed counts only").hotkey(keys::S.hotkey()),
+            Toggle::new("snoozed counts only").hotkey(keys::SNOOZED_FILTER_TOGGLE.hotkey()),
             FlexItem::fixed(22),
         )
         .child(
             "returned",
-            Toggle::new(format!("{}returned filter active", keys::SLASH.label()))
-                .hotkey(keys::SLASH.hotkey()),
+            Toggle::new(format!(
+                "{}returned filter active",
+                keys::FILTER_PREFIX.label()
+            ))
+            .hotkey(keys::FILTER_PREFIX.hotkey()),
             FlexItem::fill(1),
         )
 }
@@ -170,7 +173,7 @@ fn filter_row() -> Flex<Msg> {
 fn context_tree() -> impl tuicore::TuiNode<Msg> {
     Panel::new()
         .top_left("Contexts")
-        .hotkey(keys::C.hotkey())
+        .hotkey(keys::CONTEXTS_PANEL.hotkey())
         .host(
             DataView::list(context_nodes(), |row| row.id, |row| row.label.to_string())
                 .selection_mode(SelectionMode::Single)
@@ -198,10 +201,10 @@ fn item_panel() -> impl tuicore::TuiNode<Msg> {
 fn preview_panel() -> impl tuicore::TuiNode<Msg> {
     Panel::new().top_left("Preview").host(
         Tabs::new(vec![
-            Tab::text("Detail", "Selected: raw Slack lead. Parsed context: Alice, Launch. Raw is untrusted and can only open clarify.").hotkey(keys::D.hotkey()),
-            Tab::text("AI Evidence", "Mock extraction found a person mention, project tag, and due phrase. Suggestion remains advisory until user confirms.").hotkey(keys::E.hotkey()),
-            Tab::text("Relationships", "Alice → Launch → CRM account. Team Sales returned item due to missing owner.").hotkey(keys::R.hotkey()),
-            Tab::text("Operation Plan", "Batch has mixed states. Plan stages valid actions and lists skipped rows with reasons before confirmation.").hotkey(keys::O.hotkey()),
+            Tab::text("Detail", "Selected: raw Slack lead. Parsed context: Alice, Launch. Raw is untrusted and can only open clarify.").hotkey(keys::DETAIL_TAB.hotkey()),
+            Tab::text("AI Evidence", "Mock extraction found a person mention, project tag, and due phrase. Suggestion remains advisory until user confirms.").hotkey(keys::AI_EVIDENCE_TAB.hotkey()),
+            Tab::text("Relationships", "Alice → Launch → CRM account. Team Sales returned item due to missing owner.").hotkey(keys::RELATIONSHIPS_TAB.hotkey()),
+            Tab::text("Operation Plan", "Batch has mixed states. Plan stages valid actions and lists skipped rows with reasons before confirmation.").hotkey(keys::OPERATION_PLAN_TAB.hotkey()),
         ])
         .variant(TabsVariant::Underline)
         .bordered(true),
@@ -211,14 +214,14 @@ fn preview_panel() -> impl tuicore::TuiNode<Msg> {
 fn modal() -> DialogHost<Tabs<Msg>, Msg> {
     Dialog::new()
         .top_left("Action palette")
-        .bottom_left(format!("{} closes", keys::ESC.label()))
+        .bottom_left(format!("{} closes", keys::DIALOG_CLOSE.label()))
         .bottom_right("valid actions only")
         .on_close(Msg::CloseDialog)
         .host(
             Tabs::new(vec![
-                Tab::new("Palette", action_palette()).hotkey(keys::A.hotkey()),
-                Tab::new("Confirm", confirm_form()).hotkey(keys::D.hotkey()),
-                Tab::new("Snooze", snooze_form()).hotkey(keys::Z.hotkey()),
+                Tab::new("Palette", action_palette()).hotkey(keys::ACTION_PALETTE_BUTTON.hotkey()),
+                Tab::new("Confirm", confirm_form()).hotkey(keys::CONFIRM_TAB.hotkey()),
+                Tab::new("Snooze", snooze_form()).hotkey(keys::SNOOZE_TAB.hotkey()),
             ])
             .variant(TabsVariant::Boxed)
             .bordered(true),
@@ -233,12 +236,12 @@ fn action_palette() -> Flex<Msg> {
             TextInput::new()
                 .placeholder(format!(
                     "{}archive {} clarify {} pull {} focus",
-                    keys::COLON.label(),
-                    keys::SLASH.label(),
-                    keys::SLASH.label(),
-                    keys::SLASH.label()
+                    keys::COMMAND_BAR.label(),
+                    keys::FILTER_PREFIX.label(),
+                    keys::FILTER_PREFIX.label(),
+                    keys::FILTER_PREFIX.label()
                 ))
-                .hotkey(keys::COLON.hotkey()),
+                .hotkey(keys::COMMAND_BAR.hotkey()),
             FlexItem::fixed(1),
         )
         .child(
@@ -257,7 +260,7 @@ fn confirm_form() -> Flex<Msg> {
             "typed",
             TextInput::new()
                 .placeholder("Type ARCHIVE to commit staged destructive operation")
-                .hotkey(keys::D.hotkey()),
+                .hotkey(keys::ARCHIVE_CONFIRM_TEXT.hotkey()),
             FlexItem::fixed(1),
         )
         .child(
@@ -282,7 +285,7 @@ fn snooze_form() -> Flex<Msg> {
             "reason",
             TextInput::new()
                 .placeholder("Reason for bulk snooze")
-                .hotkey(keys::R.hotkey()),
+                .hotkey(keys::SNOOZE_REASON_FIELD.hotkey()),
             FlexItem::fixed(1),
         )
         .child(

@@ -74,35 +74,35 @@ fn screen() -> Flex<Msg> {
                 .child(
                     "picker",
                     Button::new("Candidate picker")
-                        .hotkey(keys::P.hotkey())
+                        .hotkey(keys::CANDIDATE_PICKER_BUTTON.hotkey())
                         .on_press(|| Msg::OpenDialog("Candidate picker")),
                     FlexItem::fixed(18),
                 )
                 .child(
                     "frog",
                     Button::new("Pick frog")
-                        .hotkey(keys::F.hotkey())
+                        .hotkey(keys::PICK_FROG_BUTTON.hotkey())
                         .on_press(|| Msg::OpenDialog("Frog picker")),
                     FlexItem::fixed(14),
                 )
                 .child(
                     "swap",
                     Button::new("Mid-day swap")
-                        .hotkey(keys::S.hotkey())
+                        .hotkey(keys::MIDDAY_SWAP_BUTTON.hotkey())
                         .on_press(|| Msg::OpenDialog("Mid-day swap staging")),
                     FlexItem::fixed(16),
                 )
                 .child(
                     "done",
                     Button::new("Done → archive")
-                        .hotkey(keys::D.hotkey())
+                        .hotkey(keys::DONE_ARCHIVE_BUTTON.hotkey())
                         .on_press(|| Msg::OpenDialog("Done archives immediately")),
                     FlexItem::fixed(18),
                 )
                 .child(
                     "help",
-                    Button::new(format!("{}: commands", keys::QUESTION.label()))
-                        .hotkey(keys::QUESTION.hotkey())
+                    Button::new(format!("{}: commands", keys::COMMAND_PALETTE.label()))
+                        .hotkey(keys::COMMAND_PALETTE.hotkey())
                         .on_press(|| Msg::OpenDialog("Focus commands")),
                     FlexItem::fixed(14),
                 ),
@@ -170,19 +170,19 @@ fn control_row() -> Flex<Msg> {
             "returned",
             Toggle::new("include returned")
                 .checked(true)
-                .hotkey(keys::R.hotkey()),
+                .hotkey(keys::INCLUDE_RETURNED_TOGGLE.hotkey()),
             FlexItem::fixed(18),
         )
         .child(
             "due",
             Toggle::new("due-soon")
                 .checked(true)
-                .hotkey(keys::U.hotkey()),
+                .hotkey(keys::DUE_SOON_TOGGLE.hotkey()),
             FlexItem::fixed(12),
         )
         .child(
             "future",
-            Toggle::new("future-start visible").hotkey(keys::G.hotkey()),
+            Toggle::new("future-start visible").hotkey(keys::FUTURE_START_TOGGLE.hotkey()),
             FlexItem::fixed(24),
         );
 
@@ -196,18 +196,21 @@ fn control_row() -> Flex<Msg> {
 fn candidate_pools() -> impl tuicore::TuiNode<Msg> {
     Panel::new().top_left("Candidate pools by size").host(
         Tabs::new(vec![
-            Tab::new("Big", candidate_table(big_items()).hotkey(keys::B.hotkey()))
-                .hotkey(keys::B.hotkey()),
+            Tab::new(
+                "Big",
+                candidate_table(big_items()).hotkey(keys::BIG_CANDIDATES_TAB.hotkey()),
+            )
+            .hotkey(keys::BIG_CANDIDATES_TAB.hotkey()),
             Tab::new(
                 "Medium",
-                candidate_table(medium_items()).hotkey(keys::M.hotkey()),
+                candidate_table(medium_items()).hotkey(keys::MEDIUM_CANDIDATES_TAB.hotkey()),
             )
-            .hotkey(keys::M.hotkey()),
+            .hotkey(keys::MEDIUM_CANDIDATES_TAB.hotkey()),
             Tab::new(
                 "Small",
-                candidate_table(small_items()).hotkey(keys::S.hotkey()),
+                candidate_table(small_items()).hotkey(keys::SMALL_CANDIDATES_TAB.hotkey()),
             )
-            .hotkey(keys::S.hotkey()),
+            .hotkey(keys::SMALL_CANDIDATES_TAB.hotkey()),
         ])
         .variant(TabsVariant::Boxed)
         .bordered(true),
@@ -217,9 +220,9 @@ fn candidate_pools() -> impl tuicore::TuiNode<Msg> {
 fn plan_panel() -> impl tuicore::TuiNode<Msg> {
     Panel::new().top_left("Focus plan").bottom_left("Frog is user-confirmed • 1 big / 3 medium / 5 small advisory meter").host(
         Tabs::new(vec![
-            Tab::new("Plan", plan_table()).hotkey(keys::ONE.hotkey()),
-            Tab::text("Meter", "Current: frog 1/1, big 1/1, medium 2/3, small 4/5. Advisory mismatch: add 1 medium + 1 small or accept lighter day.").hotkey(keys::TWO.hotkey()),
-            Tab::text("Rules", "Planner suggestions never auto-commit. Removed swap items leave focus only and preserve backlog/source state.").hotkey(keys::THREE.hotkey()),
+            Tab::new("Plan", plan_table()).hotkey(keys::PLAN_TAB.hotkey()),
+            Tab::text("Meter", "Current: frog 1/1, big 1/1, medium 2/3, small 4/5. Advisory mismatch: add 1 medium + 1 small or accept lighter day.").hotkey(keys::METER_TAB.hotkey()),
+            Tab::text("Rules", "Planner suggestions never auto-commit. Removed swap items leave focus only and preserve backlog/source state.").hotkey(keys::RULES_TAB.hotkey()),
         ])
         .variant(TabsVariant::Underline)
         .bordered(true),
@@ -229,10 +232,10 @@ fn plan_panel() -> impl tuicore::TuiNode<Msg> {
 fn preview_panel() -> impl tuicore::TuiNode<Msg> {
     Panel::new().top_left("Preview").host(
         Tabs::new(vec![
-            Tab::text("Rationale", "Mock planner chose urgent renewal frog because returned marker is acknowledged and due soon. User confirmation still required.").hotkey(keys::R.hotkey()),
-            Tab::text("Swap Impact", "Incoming urgent item stages remove: draft launch email. Removed item returns unchanged to board, not snoozed, not archived.").hotkey(keys::S.hotkey()),
-            Tab::text("History", "08:55 plan created\n09:00 frog confirmed\n11:40 urgent swap staged\nNo outcome committed yet.").hotkey(keys::H.hotkey()),
-            Tab::text("Board State", "Action board has 12 active, 2 returned, 3 snoozed hidden. Done immediately archives and records outcome.").hotkey(keys::B.hotkey()),
+            Tab::text("Rationale", "Mock planner chose urgent renewal frog because returned marker is acknowledged and due soon. User confirmation still required.").hotkey(keys::RATIONALE_TAB.hotkey()),
+            Tab::text("Swap Impact", "Incoming urgent item stages remove: draft launch email. Removed item returns unchanged to board, not snoozed, not archived.").hotkey(keys::SWAP_IMPACT_TAB.hotkey()),
+            Tab::text("History", "08:55 plan created\n09:00 frog confirmed\n11:40 urgent swap staged\nNo outcome committed yet.").hotkey(keys::HISTORY_TAB.hotkey()),
+            Tab::text("Board State", "Action board has 12 active, 2 returned, 3 snoozed hidden. Done immediately archives and records outcome.").hotkey(keys::BOARD_STATE_TAB.hotkey()),
         ])
         .variant(TabsVariant::Underline)
         .bordered(true),
@@ -242,15 +245,15 @@ fn preview_panel() -> impl tuicore::TuiNode<Msg> {
 fn modal() -> DialogHost<Tabs<Msg>, Msg> {
     Dialog::new()
         .top_left("Candidate picker")
-        .bottom_left(format!("{} closes", keys::ESC.label()))
+        .bottom_left(format!("{} closes", keys::DIALOG_CLOSE.label()))
         .bottom_right("staged operations")
         .on_close(Msg::CloseDialog)
         .host(
             Tabs::new(vec![
-                Tab::new("Candidates", picker_form()).hotkey(keys::P.hotkey()),
-                Tab::new("Frog", frog_form()).hotkey(keys::F.hotkey()),
-                Tab::new("Swap", swap_form()).hotkey(keys::S.hotkey()),
-                Tab::new("Confirm", confirm_form()).hotkey(keys::C.hotkey()),
+                Tab::new("Candidates", picker_form()).hotkey(keys::CANDIDATES_TAB.hotkey()),
+                Tab::new("Frog", frog_form()).hotkey(keys::FROG_TAB.hotkey()),
+                Tab::new("Swap", swap_form()).hotkey(keys::SWAP_TAB.hotkey()),
+                Tab::new("Confirm", confirm_form()).hotkey(keys::FOCUS_CONFIRM_TAB.hotkey()),
             ])
             .variant(TabsVariant::Boxed)
             .bordered(true),
@@ -264,7 +267,7 @@ fn picker_form() -> Flex<Msg> {
             "search",
             TextInput::new()
                 .placeholder("Search candidates by person/project/context")
-                .hotkey(keys::SLASH.hotkey()),
+                .hotkey(keys::CANDIDATE_SEARCH_FIELD.hotkey()),
             FlexItem::fixed(1),
         )
         .child("list", candidate_table(all_candidates()), FlexItem::fill(1))
@@ -277,7 +280,7 @@ fn frog_form() -> Flex<Msg> {
             "search",
             TextInput::new()
                 .placeholder("Pick one frog; must confirm")
-                .hotkey(keys::F.hotkey()),
+                .hotkey(keys::FROG_SEARCH_FIELD.hotkey()),
             FlexItem::fixed(1),
         )
         .child("frog", candidate_table(big_items()), FlexItem::fill(1))
@@ -329,7 +332,7 @@ fn confirm_form() -> Flex<Msg> {
             "confirm",
             TextInput::new()
                 .placeholder("Type CONFIRM to apply staged focus change")
-                .hotkey(keys::C.hotkey()),
+                .hotkey(keys::FOCUS_CONFIRM_TAB.hotkey()),
             FlexItem::fixed(1),
         )
         .child(

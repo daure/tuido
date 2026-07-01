@@ -69,9 +69,9 @@ fn screen() -> Flex<Msg> {
             TextInput::new()
                 .placeholder(format!(
                     "{}: paste email/slack/note; AI may suggest, never commit",
-                    keys::I.label()
+                    keys::CAPTURE_RAW_LEAD.label()
                 ))
-                .hotkey(keys::I.hotkey())
+                .hotkey(keys::CAPTURE_RAW_LEAD.hotkey())
                 .max_len(180),
         );
 
@@ -87,42 +87,42 @@ fn screen() -> Flex<Msg> {
         .child(
             "accept",
             Button::new("Accept Split")
-                .hotkey(keys::A.hotkey())
+                .hotkey(keys::ACCEPT_SPLIT.hotkey())
                 .on_press(|| Msg::OpenDialog("Commit clarified action?")),
             FlexItem::fixed(16),
         )
         .child(
             "merge",
             Button::new("Merge Selected")
-                .hotkey(keys::M.hotkey())
+                .hotkey(keys::MERGE_SELECTED.hotkey())
                 .on_press(|| Msg::OpenDialog("Merge pending suggestions")),
             FlexItem::fixed(18),
         )
         .child(
             "discard",
             Button::new("Discard…")
-                .hotkey(keys::D.hotkey())
+                .hotkey(keys::DISCARD_SUGGESTION.hotkey())
                 .on_press(|| Msg::OpenDialog("Discard / archive suggestion")),
             FlexItem::fixed(12),
         )
         .child(
             "pull",
             Button::new("Pull to Board")
-                .hotkey(keys::P.hotkey())
+                .hotkey(keys::PULL_TO_BOARD.hotkey())
                 .on_press(|| Msg::OpenDialog("Pull allowed only after action item exists")),
             FlexItem::fixed(16),
         )
         .child(
             "snooze",
             Button::new("Snooze…")
-                .hotkey(keys::Z.hotkey())
+                .hotkey(keys::SNOOZE_ACTION.hotkey())
                 .on_press(|| Msg::OpenDialog("Snooze clarified action")),
             FlexItem::fixed(12),
         )
         .child(
             "palette",
-            Button::new(format!("{}: commands", keys::QUESTION.label()))
-                .hotkey(keys::QUESTION.hotkey())
+            Button::new(format!("{}: commands", keys::COMMAND_PALETTE.label()))
+                .hotkey(keys::COMMAND_PALETTE.hotkey())
                 .on_press(|| Msg::OpenDialog("Command palette")),
             FlexItem::fixed(14),
         );
@@ -146,23 +146,29 @@ fn screen() -> Flex<Msg> {
 fn left_rail() -> impl tuicore::TuiNode<Msg> {
     Panel::new()
         .top_left("Triage queues")
-        .hotkey(keys::Q.hotkey())
+        .hotkey(keys::TRIAGE_QUEUES_PANEL.hotkey())
         .host(
             Tabs::new(vec![
-                Tab::new("Raw Inbox", item_list(raw_items()).hotkey(keys::R.hotkey()))
-                    .hotkey(keys::R.hotkey()),
+                Tab::new(
+                    "Raw Inbox",
+                    item_list(raw_items()).hotkey(keys::RAW_INBOX_TAB.hotkey()),
+                )
+                .hotkey(keys::RAW_INBOX_TAB.hotkey()),
                 Tab::new(
                     "Returned",
-                    item_list(returned_items()).hotkey(keys::T.hotkey()),
+                    item_list(returned_items()).hotkey(keys::RETURNED_TAB.hotkey()),
                 )
-                .hotkey(keys::T.hotkey()),
+                .hotkey(keys::RETURNED_TAB.hotkey()),
                 Tab::new(
                     "Actions",
-                    item_table(action_items()).hotkey(keys::A.hotkey()),
+                    item_table(action_items()).hotkey(keys::ACTIONS_TAB.hotkey()),
                 )
-                .hotkey(keys::A.hotkey()),
-                Tab::new("Notes", item_list(note_items()).hotkey(keys::N.hotkey()))
-                    .hotkey(keys::N.hotkey()),
+                .hotkey(keys::ACTIONS_TAB.hotkey()),
+                Tab::new(
+                    "Notes",
+                    item_list(note_items()).hotkey(keys::NOTES_TAB.hotkey()),
+                )
+                .hotkey(keys::NOTES_TAB.hotkey()),
             ])
             .variant(TabsVariant::Boxed)
             .bordered(true),
@@ -172,11 +178,11 @@ fn left_rail() -> impl tuicore::TuiNode<Msg> {
 fn editor() -> impl tuicore::TuiNode<Msg> {
     Panel::new().top_left("Clarification workbench").host(
         Tabs::new(vec![
-            Tab::new("Clarify", clarify_tab()).hotkey(keys::C.hotkey()),
-            Tab::new("Context", context_tab()).hotkey(keys::X.hotkey()),
-            Tab::new("Dates", dates_tab()).hotkey(keys::D.hotkey()),
-            Tab::text("AI Rationale", "Mock AI split: detected ask, owner, possible due date. User must review every field before accept. Confidence is advisory, never source of truth.").hotkey(keys::I.hotkey()),
-            Tab::text("History", "09:34 raw captured\n09:35 AI suggested two actions\n09:36 returned marker detected\nNo board pull performed yet.").hotkey(keys::H.hotkey()),
+            Tab::new("Clarify", clarify_tab()).hotkey(keys::CLARIFY_TAB.hotkey()),
+            Tab::new("Context", context_tab()).hotkey(keys::CONTEXT_TAB.hotkey()),
+            Tab::new("Dates", dates_tab()).hotkey(keys::DATES_TAB.hotkey()),
+            Tab::text("AI Rationale", "Mock AI split: detected ask, owner, possible due date. User must review every field before accept. Confidence is advisory, never source of truth.").hotkey(keys::AI_RATIONALE_TAB.hotkey()),
+            Tab::text("History", "09:34 raw captured\n09:35 AI suggested two actions\n09:36 returned marker detected\nNo board pull performed yet.").hotkey(keys::HISTORY_TAB.hotkey()),
         ])
         .variant(TabsVariant::Underline)
         .bordered(true),
@@ -190,18 +196,18 @@ fn ai_rail() -> impl tuicore::TuiNode<Msg> {
             "{} selects candidates • confidence/explanation shown; uncommitted",
             tuicore::keybindings().data_view().toggle_selection_label()
         ))
-        .host(ai_table().hotkey(keys::S.hotkey()))
+        .host(ai_table().hotkey(keys::AI_SUGGESTIONS_TABLE.hotkey()))
 }
 
 fn clarify_tab() -> Flex<Msg> {
     Flex::column()
         .gap(1)
-        .child("raw", TextareaInput::new().value("Raw: Alice asks if we can chase Carter on contract redlines and maybe schedule kickoff next Tue. Returned from Sales with missing owner.").placeholder("Raw untrusted item body").hotkey(keys::B.hotkey()).max_lines(5), FlexItem::fixed(5))
-        .child("title", TextInput::new().value("Clarify contract redline follow-up").placeholder("Action title").hotkey(keys::T.hotkey()), FlexItem::fixed(1))
+        .child("raw", TextareaInput::new().value("Raw: Alice asks if we can chase Carter on contract redlines and maybe schedule kickoff next Tue. Returned from Sales with missing owner.").placeholder("Raw untrusted item body").hotkey(keys::RAW_BODY_FIELD.hotkey()).max_lines(5), FlexItem::fixed(5))
+        .child("title", TextInput::new().value("Clarify contract redline follow-up").placeholder("Action title").hotkey(keys::ACTION_TITLE_FIELD.hotkey()), FlexItem::fixed(1))
         .child("type", dropdown_single("Type", &[Choice { id: "action", label: "Action item" }, Choice { id: "note", label: "Note only" }, Choice { id: "raw", label: "Keep raw / needs clarification" }], "action"), FlexItem::fixed(3))
         .child("subtype", dropdown_single("Subtype", &[Choice { id: "email", label: "Email / follow-up" }, Choice { id: "meeting", label: "Meeting" }, Choice { id: "decision", label: "Decision needed" }], "email"), FlexItem::fixed(3))
-        .child("reviewed", Toggle::new("AI suggestion reviewed by user").checked(true).hotkey(keys::V.hotkey()), FlexItem::fixed(1))
-        .child("returned", Toggle::new("Returned marker acknowledged").checked(true).hotkey(keys::G.hotkey()), FlexItem::fixed(1))
+        .child("reviewed", Toggle::new("AI suggestion reviewed by user").checked(true).hotkey(keys::AI_REVIEWED_TOGGLE.hotkey()), FlexItem::fixed(1))
+        .child("returned", Toggle::new("Returned marker acknowledged").checked(true).hotkey(keys::RETURNED_ACK_TOGGLE.hotkey()), FlexItem::fixed(1))
         .child("guard", Panel::new().top_left("Trust guard").content(["Raw cannot snooze or pull. Only accepted action items unlock board/focus.", "Done archives immediately; snoozed hidden until return date."]), FlexItem::fill(1))
 }
 
@@ -212,7 +218,7 @@ fn context_tab() -> Flex<Msg> {
         .child("teams", dropdown_multi("Teams", &[Choice { id: "sales", label: "Sales" }, Choice { id: "legal", label: "Legal" }, Choice { id: "success", label: "Customer Success" }], ["sales", "legal"]), FlexItem::fixed(3))
         .child("systems", dropdown_multi("Systems", &[Choice { id: "crm", label: "CRM" }, Choice { id: "mail", label: "Mail" }, Choice { id: "docs", label: "Docs" }], ["crm", "docs"]), FlexItem::fixed(3))
         .child("projects", dropdown_multi("Projects", &[Choice { id: "launch", label: "Launch" }, Choice { id: "renewal", label: "Renewal" }, Choice { id: "audit", label: "Audit" }], ["renewal"]), FlexItem::fixed(3))
-        .child("note", TextareaInput::new().value("Context source remains attached to raw item. Clarified action stores user-reviewed fields only.").hotkey(keys::N.hotkey()), FlexItem::fill(1))
+        .child("note", TextareaInput::new().value("Context source remains attached to raw item. Clarified action stores user-reviewed fields only.").hotkey(keys::NOTES_TAB.hotkey()), FlexItem::fill(1))
 }
 
 fn dates_tab() -> Flex<Msg> {
@@ -298,14 +304,14 @@ fn dates_tab() -> Flex<Msg> {
 fn modal() -> DialogHost<Tabs<Msg>, Msg> {
     Dialog::new()
         .top_left("Command palette")
-        .bottom_left(format!("{} closes", keys::ESC.label()))
+        .bottom_left(format!("{} closes", keys::DIALOG_CLOSE.label()))
         .bottom_right("mock operations")
         .on_close(Msg::CloseDialog)
         .host(
             Tabs::new(vec![
-                Tab::new("Commands", command_palette()).hotkey(keys::QUESTION.hotkey()),
-                Tab::new("Snooze", snooze_form()).hotkey(keys::Z.hotkey()),
-                Tab::new("Confirm", confirm_form()).hotkey(keys::D.hotkey()),
+                Tab::new("Commands", command_palette()).hotkey(keys::COMMAND_PALETTE.hotkey()),
+                Tab::new("Snooze", snooze_form()).hotkey(keys::SNOOZE_ACTION.hotkey()),
+                Tab::new("Confirm", confirm_form()).hotkey(keys::DISCARD_SUGGESTION.hotkey()),
             ])
             .variant(TabsVariant::Boxed)
             .bordered(true),
@@ -320,11 +326,11 @@ fn command_palette() -> Flex<Msg> {
             TextInput::new()
                 .placeholder(format!(
                     "{}split {}returned {}action pull",
-                    keys::COLON.label(),
-                    keys::SLASH.label(),
-                    keys::SLASH.label()
+                    keys::COMMAND_BAR.label(),
+                    keys::FILTER_PREFIX.label(),
+                    keys::FILTER_PREFIX.label()
                 ))
-                .hotkey(keys::COLON.hotkey()),
+                .hotkey(keys::COMMAND_BAR.hotkey()),
             FlexItem::fixed(1),
         )
         .child("list", command_table(), FlexItem::fill(1))
@@ -359,7 +365,7 @@ fn snooze_form() -> Flex<Msg> {
             "reason",
             TextInput::new()
                 .placeholder("Reason required for snooze")
-                .hotkey(keys::R.hotkey()),
+                .hotkey(keys::RAW_INBOX_TAB.hotkey()),
             FlexItem::fixed(1),
         )
         .child(
@@ -379,7 +385,7 @@ fn confirm_form() -> Flex<Msg> {
             "confirm",
             TextInput::new()
                 .placeholder("Type DISCARD to archive pending suggestion")
-                .hotkey(keys::C.hotkey()),
+                .hotkey(keys::CLARIFY_TAB.hotkey()),
             FlexItem::fixed(1),
         )
         .child(

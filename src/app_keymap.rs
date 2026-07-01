@@ -8,11 +8,24 @@ static KEYMAP: OnceLock<AppKeymap> = OnceLock::new();
 pub struct AppBinding {
     name: &'static str,
     default: &'static str,
+    sequence: bool,
 }
 
 impl AppBinding {
     pub const fn new(name: &'static str, default: &'static str) -> Self {
-        Self { name, default }
+        Self {
+            name,
+            default,
+            sequence: false,
+        }
+    }
+
+    pub const fn new_sequence(name: &'static str, default: &'static str) -> Self {
+        Self {
+            name,
+            default,
+            sequence: true,
+        }
     }
 
     pub fn hotkey(self) -> String {
@@ -20,7 +33,11 @@ impl AppBinding {
     }
 
     pub fn label(self) -> String {
-        self.resolved().spec.label()
+        let resolved = self.resolved();
+        resolved
+            .spec
+            .map(|spec| spec.label())
+            .unwrap_or(resolved.raw)
     }
 
     pub fn matches(self, event: &TuiEvent) -> bool {
@@ -28,11 +45,19 @@ impl AppBinding {
             return false;
         };
 
-        self.resolved().spec.matches(*key)
+        self.resolved().spec.is_some_and(|spec| spec.matches(*key))
     }
 
-    fn spec(self) -> Result<KeySpec, AppKeymapError> {
-        parse_key(self.default).ok_or_else(|| AppKeymapError::invalid(self.name, self.default))
+    fn spec(self, raw: &str) -> Result<Option<KeySpec>, AppKeymapError> {
+        if self.sequence {
+            if raw.trim().is_empty() {
+                return Err(AppKeymapError::invalid(self.name, raw));
+            }
+            return Ok(None);
+        }
+        parse_key(raw)
+            .map(Some)
+            .ok_or_else(|| AppKeymapError::invalid(self.name, raw))
     }
 
     fn resolved(self) -> ResolvedBinding {
@@ -45,7 +70,7 @@ impl AppBinding {
         ResolvedBinding {
             raw: self.default.into(),
             spec: self
-                .spec()
+                .spec(self.default)
                 .unwrap_or_else(|error| panic!("invalid app key `{}`: {error}", self.name)),
         }
     }
@@ -106,8 +131,7 @@ impl AppKeymap {
             let raw = overrides
                 .remove(binding.name)
                 .unwrap_or_else(|| binding.default.into());
-            let spec =
-                parse_key(&raw).ok_or_else(|| AppKeymapError::invalid(binding.name, &raw))?;
+            let spec = binding.spec(&raw)?;
             bindings.insert(binding.name, ResolvedBinding { raw, spec });
         }
 
@@ -130,7 +154,7 @@ impl AppKeymap {
 #[derive(Debug, Clone)]
 struct ResolvedBinding {
     raw: String,
-    spec: KeySpec,
+    spec: Option<KeySpec>,
 }
 
 pub fn try_init() -> Result<(), AppKeymapError> {
@@ -217,66 +241,185 @@ fn single_char(value: &str) -> Option<char> {
 pub mod keys {
     use super::AppBinding;
 
-    pub const A: AppBinding = AppBinding::new("A", "a");
-    pub const B: AppBinding = AppBinding::new("B", "b");
-    pub const C: AppBinding = AppBinding::new("C", "c");
-    pub const D: AppBinding = AppBinding::new("D", "d");
-    pub const E: AppBinding = AppBinding::new("E", "e");
-    pub const F: AppBinding = AppBinding::new("F", "f");
-    pub const G: AppBinding = AppBinding::new("G", "g");
-    pub const H: AppBinding = AppBinding::new("H", "h");
-    pub const I: AppBinding = AppBinding::new("I", "i");
-    pub const M: AppBinding = AppBinding::new("M", "m");
-    pub const N: AppBinding = AppBinding::new("N", "n");
-    pub const O: AppBinding = AppBinding::new("O", "o");
-    pub const P: AppBinding = AppBinding::new("P", "p");
-    pub const Q: AppBinding = AppBinding::new("Q", "q");
-    pub const R: AppBinding = AppBinding::new("R", "r");
-    pub const S: AppBinding = AppBinding::new("S", "s");
-    pub const T: AppBinding = AppBinding::new("T", "t");
-    pub const U: AppBinding = AppBinding::new("U", "u");
-    pub const V: AppBinding = AppBinding::new("V", "v");
-    pub const X: AppBinding = AppBinding::new("X", "x");
-    pub const Z: AppBinding = AppBinding::new("Z", "z");
-    pub const ONE: AppBinding = AppBinding::new("ONE", "1");
-    pub const TWO: AppBinding = AppBinding::new("TWO", "2");
-    pub const THREE: AppBinding = AppBinding::new("THREE", "3");
-    pub const COLON: AppBinding = AppBinding::new("COLON", ":");
-    pub const SLASH: AppBinding = AppBinding::new("SLASH", "/");
-    pub const QUESTION: AppBinding = AppBinding::new("QUESTION", "?");
-    pub const ESC: AppBinding = AppBinding::new("ESC", "esc");
-    pub const CTRL_LEFT_BRACKET: AppBinding = AppBinding::new("CTRL_LEFT_BRACKET", "ctrl+[");
+    pub const APP_INBOX_TAB: AppBinding = AppBinding::new("APP_INBOX_TAB", "i");
+    pub const APP_TASKS_TAB: AppBinding = AppBinding::new("APP_TASKS_TAB", "t");
+    pub const APP_NOTES_TAB: AppBinding = AppBinding::new("APP_NOTES_TAB", "n");
+    pub const APP_CALENDAR_TAB: AppBinding = AppBinding::new("APP_CALENDAR_TAB", "c");
+    pub const APP_PROJECTS_TAB: AppBinding = AppBinding::new_sequence("APP_PROJECTS_TAB", "pr");
+    pub const APP_PEOPLE_TAB: AppBinding = AppBinding::new_sequence("APP_PEOPLE_TAB", "pe");
+    pub const INBOX_CAPTURE: AppBinding = AppBinding::new("INBOX_CAPTURE", "i");
+    pub const TASK_TITLE_FIELD: AppBinding = AppBinding::new("TASK_TITLE_FIELD", "l");
+    pub const TASK_DESCRIPTION_FIELD: AppBinding = AppBinding::new("TASK_DESCRIPTION_FIELD", "d");
+    pub const TASK_TYPE_FIELD: AppBinding = AppBinding::new("TASK_TYPE_FIELD", "y");
+    pub const TASK_STATE_FIELD: AppBinding = AppBinding::new("TASK_STATE_FIELD", "s");
+    pub const TASK_SIZE_FIELD: AppBinding = AppBinding::new("TASK_SIZE_FIELD", "z");
+    pub const TASK_PEOPLE_FIELD: AppBinding = AppBinding::new_sequence("TASK_PEOPLE_FIELD", "le");
+    pub const TASK_PROJECTS_FIELD: AppBinding =
+        AppBinding::new_sequence("TASK_PROJECTS_FIELD", "ts");
+    pub const TASK_START_DATE_FIELD: AppBinding =
+        AppBinding::new_sequence("TASK_START_DATE_FIELD", "sd");
+    pub const TASK_END_DATE_FIELD: AppBinding =
+        AppBinding::new_sequence("TASK_END_DATE_FIELD", "ed");
+    pub const DETAIL_CLOSE: AppBinding = AppBinding::new("DETAIL_CLOSE", "esc");
+    pub const DETAIL_CLOSE_ALT: AppBinding = AppBinding::new("DETAIL_CLOSE_ALT", "ctrl+[");
+
+    pub const CAPTURE_RAW_LEAD: AppBinding = AppBinding::new("CAPTURE_RAW_LEAD", "i");
+    pub const ACCEPT_SPLIT: AppBinding = AppBinding::new("ACCEPT_SPLIT", "a");
+    pub const MERGE_SELECTED: AppBinding = AppBinding::new("MERGE_SELECTED", "m");
+    pub const DISCARD_SUGGESTION: AppBinding = AppBinding::new("DISCARD_SUGGESTION", "d");
+    pub const PULL_TO_BOARD: AppBinding = AppBinding::new("PULL_TO_BOARD", "p");
+    pub const SNOOZE_ACTION: AppBinding = AppBinding::new("SNOOZE_ACTION", "z");
+    pub const COMMAND_PALETTE: AppBinding = AppBinding::new("COMMAND_PALETTE", "?");
+    pub const TRIAGE_QUEUES_PANEL: AppBinding = AppBinding::new("TRIAGE_QUEUES_PANEL", "q");
+    pub const RAW_INBOX_TAB: AppBinding = AppBinding::new("RAW_INBOX_TAB", "r");
+    pub const RETURNED_TAB: AppBinding = AppBinding::new("RETURNED_TAB", "t");
+    pub const ACTIONS_TAB: AppBinding = AppBinding::new("ACTIONS_TAB", "a");
+    pub const NOTES_TAB: AppBinding = AppBinding::new("NOTES_TAB", "n");
+    pub const CLARIFY_TAB: AppBinding = AppBinding::new("CLARIFY_TAB", "c");
+    pub const CONTEXT_TAB: AppBinding = AppBinding::new("CONTEXT_TAB", "x");
+    pub const DATES_TAB: AppBinding = AppBinding::new("DATES_TAB", "d");
+    pub const AI_RATIONALE_TAB: AppBinding = AppBinding::new("AI_RATIONALE_TAB", "i");
+    pub const HISTORY_TAB: AppBinding = AppBinding::new("HISTORY_TAB", "h");
+    pub const AI_SUGGESTIONS_TABLE: AppBinding = AppBinding::new("AI_SUGGESTIONS_TABLE", "s");
+    pub const RAW_BODY_FIELD: AppBinding = AppBinding::new("RAW_BODY_FIELD", "b");
+    pub const ACTION_TITLE_FIELD: AppBinding = AppBinding::new("ACTION_TITLE_FIELD", "t");
+    pub const AI_REVIEWED_TOGGLE: AppBinding = AppBinding::new("AI_REVIEWED_TOGGLE", "v");
+    pub const RETURNED_ACK_TOGGLE: AppBinding = AppBinding::new("RETURNED_ACK_TOGGLE", "g");
+    pub const CONTEXT_NOTE_FIELD: AppBinding = AppBinding::new("CONTEXT_NOTE_FIELD", "n");
+
+    pub const COMMAND_BAR: AppBinding = AppBinding::new("COMMAND_BAR", ":");
+    pub const FILTER_PREFIX: AppBinding = AppBinding::new("FILTER_PREFIX", "/");
+    pub const ACTION_PALETTE_BUTTON: AppBinding = AppBinding::new("ACTION_PALETTE_BUTTON", "a");
+    pub const ARCHIVE_CONFIRM_BUTTON: AppBinding = AppBinding::new("ARCHIVE_CONFIRM_BUTTON", "d");
+    pub const BULK_SNOOZE_BUTTON: AppBinding = AppBinding::new("BULK_SNOOZE_BUTTON", "z");
+    pub const PULL_FOCUS_BUTTON: AppBinding = AppBinding::new("PULL_FOCUS_BUTTON", "p");
+    pub const SHOW_FUTURE_TOGGLE: AppBinding = AppBinding::new("SHOW_FUTURE_TOGGLE", "f");
+    pub const SNOOZED_FILTER_TOGGLE: AppBinding = AppBinding::new("SNOOZED_FILTER_TOGGLE", "s");
+    pub const RETURNED_FILTER_TOGGLE: AppBinding = AppBinding::new("RETURNED_FILTER_TOGGLE", "/");
+    pub const CONTEXTS_PANEL: AppBinding = AppBinding::new("CONTEXTS_PANEL", "c");
+    pub const DETAIL_TAB: AppBinding = AppBinding::new("DETAIL_TAB", "d");
+    pub const AI_EVIDENCE_TAB: AppBinding = AppBinding::new("AI_EVIDENCE_TAB", "e");
+    pub const RELATIONSHIPS_TAB: AppBinding = AppBinding::new("RELATIONSHIPS_TAB", "r");
+    pub const OPERATION_PLAN_TAB: AppBinding = AppBinding::new("OPERATION_PLAN_TAB", "o");
+    pub const PALETTE_TAB: AppBinding = AppBinding::new("PALETTE_TAB", "a");
+    pub const CONFIRM_TAB: AppBinding = AppBinding::new("CONFIRM_TAB", "d");
+    pub const SNOOZE_TAB: AppBinding = AppBinding::new("SNOOZE_TAB", "z");
+    pub const ACTION_QUERY_FIELD: AppBinding = AppBinding::new("ACTION_QUERY_FIELD", ":");
+    pub const ARCHIVE_CONFIRM_TEXT: AppBinding = AppBinding::new("ARCHIVE_CONFIRM_TEXT", "d");
+    pub const SNOOZE_REASON_FIELD: AppBinding = AppBinding::new("SNOOZE_REASON_FIELD", "r");
+
+    pub const CANDIDATE_PICKER_BUTTON: AppBinding = AppBinding::new("CANDIDATE_PICKER_BUTTON", "p");
+    pub const PICK_FROG_BUTTON: AppBinding = AppBinding::new("PICK_FROG_BUTTON", "f");
+    pub const MIDDAY_SWAP_BUTTON: AppBinding = AppBinding::new("MIDDAY_SWAP_BUTTON", "s");
+    pub const DONE_ARCHIVE_BUTTON: AppBinding = AppBinding::new("DONE_ARCHIVE_BUTTON", "d");
+    pub const INCLUDE_RETURNED_TOGGLE: AppBinding = AppBinding::new("INCLUDE_RETURNED_TOGGLE", "r");
+    pub const DUE_SOON_TOGGLE: AppBinding = AppBinding::new("DUE_SOON_TOGGLE", "u");
+    pub const FUTURE_START_TOGGLE: AppBinding = AppBinding::new("FUTURE_START_TOGGLE", "g");
+    pub const BIG_CANDIDATES_TAB: AppBinding = AppBinding::new("BIG_CANDIDATES_TAB", "b");
+    pub const MEDIUM_CANDIDATES_TAB: AppBinding = AppBinding::new("MEDIUM_CANDIDATES_TAB", "m");
+    pub const SMALL_CANDIDATES_TAB: AppBinding = AppBinding::new("SMALL_CANDIDATES_TAB", "s");
+    pub const PLAN_TAB: AppBinding = AppBinding::new("PLAN_TAB", "1");
+    pub const METER_TAB: AppBinding = AppBinding::new("METER_TAB", "2");
+    pub const RULES_TAB: AppBinding = AppBinding::new("RULES_TAB", "3");
+    pub const RATIONALE_TAB: AppBinding = AppBinding::new("RATIONALE_TAB", "r");
+    pub const SWAP_IMPACT_TAB: AppBinding = AppBinding::new("SWAP_IMPACT_TAB", "s");
+    pub const BOARD_STATE_TAB: AppBinding = AppBinding::new("BOARD_STATE_TAB", "b");
+    pub const CANDIDATES_TAB: AppBinding = AppBinding::new("CANDIDATES_TAB", "p");
+    pub const FROG_TAB: AppBinding = AppBinding::new("FROG_TAB", "f");
+    pub const SWAP_TAB: AppBinding = AppBinding::new("SWAP_TAB", "s");
+    pub const FOCUS_CONFIRM_TAB: AppBinding = AppBinding::new("FOCUS_CONFIRM_TAB", "c");
+    pub const CANDIDATE_SEARCH_FIELD: AppBinding = AppBinding::new("CANDIDATE_SEARCH_FIELD", "/");
+    pub const FROG_SEARCH_FIELD: AppBinding = AppBinding::new("FROG_SEARCH_FIELD", "f");
+    pub const FOCUS_CONFIRM_TEXT: AppBinding = AppBinding::new("FOCUS_CONFIRM_TEXT", "c");
+
+    pub const DIALOG_CLOSE: AppBinding = AppBinding::new("DIALOG_CLOSE", "esc");
 
     pub const ALL: &[AppBinding] = &[
-        A,
-        B,
-        C,
-        D,
-        E,
-        F,
-        G,
-        H,
-        I,
-        M,
-        N,
-        O,
-        P,
-        Q,
-        R,
-        S,
-        T,
-        U,
-        V,
-        X,
-        Z,
-        ONE,
-        TWO,
-        THREE,
-        COLON,
-        SLASH,
-        QUESTION,
-        ESC,
-        CTRL_LEFT_BRACKET,
+        APP_INBOX_TAB,
+        APP_TASKS_TAB,
+        APP_NOTES_TAB,
+        APP_CALENDAR_TAB,
+        APP_PROJECTS_TAB,
+        APP_PEOPLE_TAB,
+        INBOX_CAPTURE,
+        TASK_TITLE_FIELD,
+        TASK_DESCRIPTION_FIELD,
+        TASK_TYPE_FIELD,
+        TASK_STATE_FIELD,
+        TASK_SIZE_FIELD,
+        TASK_PEOPLE_FIELD,
+        TASK_PROJECTS_FIELD,
+        TASK_START_DATE_FIELD,
+        TASK_END_DATE_FIELD,
+        DETAIL_CLOSE,
+        DETAIL_CLOSE_ALT,
+        CAPTURE_RAW_LEAD,
+        ACCEPT_SPLIT,
+        MERGE_SELECTED,
+        DISCARD_SUGGESTION,
+        PULL_TO_BOARD,
+        SNOOZE_ACTION,
+        COMMAND_PALETTE,
+        TRIAGE_QUEUES_PANEL,
+        RAW_INBOX_TAB,
+        RETURNED_TAB,
+        ACTIONS_TAB,
+        NOTES_TAB,
+        CLARIFY_TAB,
+        CONTEXT_TAB,
+        DATES_TAB,
+        AI_RATIONALE_TAB,
+        HISTORY_TAB,
+        AI_SUGGESTIONS_TABLE,
+        RAW_BODY_FIELD,
+        ACTION_TITLE_FIELD,
+        AI_REVIEWED_TOGGLE,
+        RETURNED_ACK_TOGGLE,
+        CONTEXT_NOTE_FIELD,
+        COMMAND_BAR,
+        FILTER_PREFIX,
+        ACTION_PALETTE_BUTTON,
+        ARCHIVE_CONFIRM_BUTTON,
+        BULK_SNOOZE_BUTTON,
+        PULL_FOCUS_BUTTON,
+        SHOW_FUTURE_TOGGLE,
+        SNOOZED_FILTER_TOGGLE,
+        RETURNED_FILTER_TOGGLE,
+        CONTEXTS_PANEL,
+        DETAIL_TAB,
+        AI_EVIDENCE_TAB,
+        RELATIONSHIPS_TAB,
+        OPERATION_PLAN_TAB,
+        PALETTE_TAB,
+        CONFIRM_TAB,
+        SNOOZE_TAB,
+        ACTION_QUERY_FIELD,
+        ARCHIVE_CONFIRM_TEXT,
+        SNOOZE_REASON_FIELD,
+        CANDIDATE_PICKER_BUTTON,
+        PICK_FROG_BUTTON,
+        MIDDAY_SWAP_BUTTON,
+        DONE_ARCHIVE_BUTTON,
+        INCLUDE_RETURNED_TOGGLE,
+        DUE_SOON_TOGGLE,
+        FUTURE_START_TOGGLE,
+        BIG_CANDIDATES_TAB,
+        MEDIUM_CANDIDATES_TAB,
+        SMALL_CANDIDATES_TAB,
+        PLAN_TAB,
+        METER_TAB,
+        RULES_TAB,
+        RATIONALE_TAB,
+        SWAP_IMPACT_TAB,
+        BOARD_STATE_TAB,
+        CANDIDATES_TAB,
+        FROG_TAB,
+        SWAP_TAB,
+        FOCUS_CONFIRM_TAB,
+        CANDIDATE_SEARCH_FIELD,
+        FROG_SEARCH_FIELD,
+        FOCUS_CONFIRM_TEXT,
+        DIALOG_CLOSE,
     ];
 }
 
@@ -303,9 +446,31 @@ mod tests {
 
     #[test]
     fn labels_use_configured_override_specs() {
-        let keymap = AppKeymap::from_overrides([("I".into(), "ctrl+space".into())]).unwrap();
-        assert_eq!(keymap.binding("I").unwrap().spec.label(), "⌃Space");
-        assert_eq!(keymap.binding("I").unwrap().raw, "ctrl+space");
+        let keymap =
+            AppKeymap::from_overrides([("APP_INBOX_TAB".into(), "ctrl+space".into())]).unwrap();
+        assert_eq!(
+            keymap
+                .binding("APP_INBOX_TAB")
+                .unwrap()
+                .spec
+                .unwrap()
+                .label(),
+            "⌃Space"
+        );
+        assert_eq!(keymap.binding("APP_INBOX_TAB").unwrap().raw, "ctrl+space");
+    }
+
+    #[test]
+    fn sequence_hotkeys_allow_multi_character_defaults() {
+        let keymap = AppKeymap::from_overrides(std::iter::empty::<(String, String)>()).unwrap();
+        assert_eq!(keymap.binding("TASK_START_DATE_FIELD").unwrap().raw, "sd");
+        assert!(
+            keymap
+                .binding("TASK_START_DATE_FIELD")
+                .unwrap()
+                .spec
+                .is_none()
+        );
     }
 
     #[test]
@@ -324,6 +489,8 @@ mod tests {
     #[test]
     fn override_config_rejects_unknown_and_invalid_keys() {
         assert!(AppKeymap::from_overrides([("NOPE".into(), "a".into())]).is_err());
-        assert!(AppKeymap::from_overrides([("I".into(), "ctrl+enter".into())]).is_err());
+        assert!(
+            AppKeymap::from_overrides([("APP_INBOX_TAB".into(), "ctrl+enter".into())]).is_err()
+        );
     }
 }
