@@ -18,12 +18,38 @@ use time::Date;
 use tokio::runtime::Handle;
 use tuicore::{
     ActivationMode, AnimationSettings, Button, CellContext, ChipColorRole, Column, DataView,
-    DataViewTypedEvent, DatePickerDropdown, Dropdown, DropdownCommitMode, DropdownSearchMode,
-    EventCtx, EventOutcome, EventRoute, Flex, FlexItem, FocusCtx, FocusId, FocusRequest,
-    FocusTarget, Key, KeyModifiers, LayoutCtx, LayoutResult, LifecycleCtx, Paragraph, RenderCtx,
-    SelectionMode, SelectionTrigger, Separator, Split, StatusBar, Store, Tab, Tabs, TabsVariant,
-    TextInput, TextareaInput, TickResult, TuiEvent, TuiNode,
+    DataViewTypedEvent, DatePickerDropdown, Dialog, DialogBackdrop, DialogCloseReason, DialogHost,
+    DialogLayer, Dropdown, DropdownCommitMode, DropdownSearchMode, EventCtx, EventOutcome,
+    EventRoute, Flex, FlexItem, FocusCtx, FocusId, FocusRequest, FocusTarget, LayoutCtx,
+    LayoutResult, LifecycleCtx, Paragraph, RenderCtx, SelectionMode, SelectionTrigger, Separator,
+    Split, StatusBar, StatusBarMenuItem, Store, Tab, Tabs, TabsVariant, TextInput, TextareaInput,
+    TickResult, TreeApp, TuiEvent, TuiNode,
 };
+
+const PEOPLE_MENU_ID: &str = "people";
+const PROJECTS_MENU_ID: &str = "projects";
+
+#[derive(Debug)]
+enum AppMsg {
+    Noop,
+    OpenManagementDialog(ManagementDialogKind),
+    CloseManagementDialog(DialogCloseReason),
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ManagementDialogKind {
+    People,
+    Projects,
+}
+
+impl ManagementDialogKind {
+    fn title(self) -> &'static str {
+        match self {
+            Self::People => "People",
+            Self::Projects => "Projects",
+        }
+    }
+}
 
 pub fn run() -> Result<(), Box<dyn Error>> {
     tuicore::try_init()?;
@@ -34,17 +60,26 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     let storage = runtime.block_on(Storage::connect_from_env())?;
     runtime.block_on(storage.migrate())?;
     let snapshot = runtime.block_on(storage.load_workspace())?;
-    tuicore::run(App::new(
+    TreeApp::new(App::new(
         snapshot,
         storage.pool(),
         storage.dialect(),
         runtime.handle().clone(),
-    ))?;
+    ))
+    .on_message(|app, message, ctx| match message {
+        AppMsg::Noop => {}
+        AppMsg::OpenManagementDialog(kind) => app.open_management_dialog(kind, ctx),
+        AppMsg::CloseManagementDialog(reason) => {
+            let _ = reason;
+            app.close_management_dialog(ctx);
+        }
+    })
+    .run()?;
     Ok(())
 }
 
 struct App {
-    root: Flex,
+    root: DialogLayer<Flex<AppMsg>, DialogHost<ManagementDialog, AppMsg>>,
 }
 
 impl App {
@@ -72,9 +107,6 @@ impl App {
                 .hotkey(keys::APP_NOTES_TAB.hotkey()),
             Tab::text("Calendar", "Time-aware planning comes later.")
                 .hotkey(keys::APP_CALENDAR_TAB.hotkey()),
-            Tab::new("Projects", ProjectsWorkspace::new(context.clone()))
-                .hotkey(keys::APP_PROJECTS_TAB.hotkey()),
-            Tab::new("People", PeopleWorkspace::new(context)).hotkey(keys::APP_PEOPLE_TAB.hotkey()),
         ])
         .selected(1)
         .variant(TabsVariant::Underline)
@@ -82,15 +114,58 @@ impl App {
 
         let root = Flex::column().child("tabs", tabs, FlexItem::fill(1)).child(
             "footer",
-            StatusBar::new(),
+            StatusBar::new()
+                .menu_items([
+                    StatusBarMenuItem::Custom {
+                        id: PEOPLE_MENU_ID,
+                        label: "People",
+                    },
+                    StatusBarMenuItem::Custom {
+                        id: PROJECTS_MENU_ID,
+                        label: "Projects",
+                    },
+                    StatusBarMenuItem::Theme,
+                    StatusBarMenuItem::WeatherForecast,
+                ])
+                .on_custom_menu_item(|id| match id {
+                    PEOPLE_MENU_ID => AppMsg::OpenManagementDialog(ManagementDialogKind::People),
+                    PROJECTS_MENU_ID => {
+                        AppMsg::OpenManagementDialog(ManagementDialogKind::Projects)
+                    }
+                    _ => AppMsg::OpenManagementDialog(ManagementDialogKind::People),
+                }),
             FlexItem::fixed(1),
         );
 
-        Self { root }
+        let dialog = Dialog::new()
+            .top_left(ManagementDialogKind::People.title())
+            .on_close(AppMsg::CloseManagementDialog)
+            .host(ManagementDialog::new(context));
+
+        Self {
+            root: DialogLayer::new(root, dialog)
+                .active(false)
+                .layer_percent(80)
+                .layer_cross_percent(80)
+                .backdrop(DialogBackdrop::dim().amount(0.5)),
+        }
+    }
+
+    fn open_management_dialog(&mut self, kind: ManagementDialogKind, ctx: &mut EventCtx<AppMsg>) {
+        self.root
+            .layer_mut()
+            .dialog_mut()
+            .set_top_left(kind.title());
+        self.root.layer_mut().child_mut().set_active(kind);
+        self.root.set_active_with_context(true, ctx);
+    }
+
+    fn close_management_dialog(&mut self, ctx: &mut EventCtx<AppMsg>) {
+        self.root.set_active_with_context(false, ctx);
     }
 }
 
-impl TuiNode for App {
+impl TuiNode<AppMsg> for App {
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
         self.root.layout(area, ctx)
     }
@@ -99,7 +174,7 @@ impl TuiNode for App {
         self.root.render(frame, area, ctx);
     }
 
-    fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
+    fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<AppMsg>) -> EventOutcome {
         self.root.event(event, ctx)
     }
 
@@ -107,12 +182,12 @@ impl TuiNode for App {
         &mut self,
         route: &EventRoute,
         event: &TuiEvent,
-        ctx: &mut EventCtx<()>,
+        ctx: &mut EventCtx<AppMsg>,
     ) -> EventOutcome {
         self.root.dispatch_event(route, event, ctx)
     }
 
-    fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<()>) {
+    fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<AppMsg>) {
         self.root.dispatch_focus(target, focused, ctx);
     }
 
@@ -120,25 +195,25 @@ impl TuiNode for App {
         self.root.tick(dt, settings)
     }
 
-    fn init(&mut self, ctx: &mut LifecycleCtx<()>) {
+    fn init(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
         self.root.init(ctx);
     }
 
-    fn mount(&mut self, ctx: &mut LifecycleCtx<()>) {
+    fn mount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
         self.root.mount(ctx);
     }
 
-    fn unmount(&mut self, ctx: &mut LifecycleCtx<()>) {
+    fn unmount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
         self.root.unmount(ctx);
     }
 
-    fn destroy(&mut self, ctx: &mut LifecycleCtx<()>) {
+    fn destroy(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
         self.root.destroy(ctx);
     }
 }
 
 struct InboxWorkspace {
-    root: Flex,
+    root: Flex<AppMsg>,
 }
 
 impl InboxWorkspace {
@@ -148,7 +223,7 @@ impl InboxWorkspace {
             .child("actions", Button::new("Process"), FlexItem::fixed(1))
             .child(
                 "capture",
-                TextareaInput::new()
+                TextareaInput::<AppMsg>::new()
                     .placeholder(
                         "Paste messy email, Slack note, voicemail transcript, or raw thought...",
                     )
@@ -161,7 +236,7 @@ impl InboxWorkspace {
     }
 }
 
-impl TuiNode for InboxWorkspace {
+impl TuiNode<AppMsg> for InboxWorkspace {
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
         self.root.layout(area, ctx)
     }
@@ -170,7 +245,7 @@ impl TuiNode for InboxWorkspace {
         self.root.render(frame, area, ctx);
     }
 
-    fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
+    fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<AppMsg>) -> EventOutcome {
         self.root.event(event, ctx)
     }
 
@@ -178,12 +253,12 @@ impl TuiNode for InboxWorkspace {
         &mut self,
         route: &EventRoute,
         event: &TuiEvent,
-        ctx: &mut EventCtx<()>,
+        ctx: &mut EventCtx<AppMsg>,
     ) -> EventOutcome {
         self.root.dispatch_event(route, event, ctx)
     }
 
-    fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<()>) {
+    fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<AppMsg>) {
         self.root.dispatch_focus(target, focused, ctx);
     }
 
@@ -191,19 +266,19 @@ impl TuiNode for InboxWorkspace {
         self.root.tick(dt, settings)
     }
 
-    fn init(&mut self, ctx: &mut LifecycleCtx<()>) {
+    fn init(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
         self.root.init(ctx);
     }
 
-    fn mount(&mut self, ctx: &mut LifecycleCtx<()>) {
+    fn mount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
         self.root.mount(ctx);
     }
 
-    fn unmount(&mut self, ctx: &mut LifecycleCtx<()>) {
+    fn unmount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
         self.root.unmount(ctx);
     }
 
-    fn destroy(&mut self, ctx: &mut LifecycleCtx<()>) {
+    fn destroy(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
         self.root.destroy(ctx);
     }
 }
@@ -231,6 +306,49 @@ struct SaveResult {
     field: TaskField,
     seq: u64,
     error: Option<String>,
+}
+
+const SAVED_STATUS: &str = "Saved changes update immediately.";
+
+#[derive(Clone)]
+struct SaveStatusLine {
+    value: Rc<RefCell<(String, bool)>>,
+}
+
+impl SaveStatusLine {
+    fn new(error: Option<&str>) -> Self {
+        let line = Self {
+            value: Rc::new(RefCell::new((String::new(), false))),
+        };
+        line.set_error(error);
+        line
+    }
+
+    fn set_error(&self, error: Option<&str>) {
+        *self.value.borrow_mut() = match error {
+            Some(error) => (error.to_string(), true),
+            None => (SAVED_STATUS.to_string(), false),
+        };
+    }
+}
+
+impl TuiNode<AppMsg> for SaveStatusLine {
+    fn layout(&mut self, area: Rect, _ctx: &mut LayoutCtx) -> LayoutResult {
+        LayoutResult::new(area)
+    }
+
+    fn render<'a>(&'a self, frame: &mut Frame, area: Rect, _ctx: &mut RenderCtx<'a>) {
+        let value = self.value.borrow();
+        let color = if value.1 {
+            tuicore::theme().error_fg()
+        } else {
+            tuicore::theme().muted_fg()
+        };
+        frame.render_widget(
+            ratatui::widgets::Paragraph::new(value.0.as_str()).style(Style::default().fg(color)),
+            area,
+        );
+    }
 }
 
 struct TaskWorkspace {
@@ -263,14 +381,26 @@ impl TaskWorkspace {
     }
 
     fn sync_store_version(&mut self) {
-        let version = self.context.store.borrow().state().version;
+        let store = self.context.store.borrow();
+        let state = store.state();
+        let version = state.version;
         if self.observed_version != version {
-            self.split = task_split(&self.context.store);
+            let rows = state.tasks.clone();
+            let save_error = state
+                .selected_task_id
+                .as_deref()
+                .and_then(|id| state.task_save_error(id))
+                .map(str::to_string);
+            drop(store);
+            self.split.first_mut().set_rows(rows);
+            self.split
+                .second_mut()
+                .set_save_error(save_error.as_deref());
             self.observed_version = version;
         }
     }
 
-    fn sync_table_events(&mut self, ctx: &mut EventCtx<()>) {
+    fn sync_table_events(&mut self, ctx: &mut EventCtx<AppMsg>) {
         let events = self.split.first_mut().take_events();
         let mut focus_detail = false;
         let mut selected_changed = false;
@@ -279,7 +409,7 @@ impl TaskWorkspace {
             match &event {
                 DataViewTypedEvent::HighlightChanged { row_id: Some(id) }
                 | DataViewTypedEvent::Activated { row_id: id } => {
-                    selected_changed |= self.select_task(&id);
+                    selected_changed |= self.select_task(&id, ctx);
                     if matches!(event, DataViewTypedEvent::Activated { .. }) {
                         focus_detail = true;
                     }
@@ -301,7 +431,7 @@ impl TaskWorkspace {
         }
     }
 
-    fn select_task(&mut self, id: &str) -> bool {
+    fn select_task(&mut self, id: &str, ctx: &mut EventCtx<AppMsg>) -> bool {
         let outcome = self
             .context
             .store
@@ -317,6 +447,7 @@ impl TaskWorkspace {
                 &state.people,
                 &state.projects,
                 save_error,
+                ctx,
             );
         }
         outcome.changed
@@ -331,14 +462,21 @@ impl TaskWorkspace {
         changed
     }
 
-    fn sync_detail_events(&mut self, ctx: &mut EventCtx<()>) {
-        if self.drain_detail_patches() {
-            let store = self.context.store.borrow();
-            let state = store.state();
-            self.split.first_mut().set_rows(state.tasks.clone());
-            self.observed_version = state.version;
-            ctx.request_redraw();
+    fn sync_detail_changes(&mut self) -> bool {
+        if !self.drain_detail_patches() {
+            return false;
         }
+        let store = self.context.store.borrow();
+        let state = store.state();
+        self.split.first_mut().set_rows(state.tasks.clone());
+        self.split.second_mut().set_save_error(
+            state
+                .selected_task_id
+                .as_deref()
+                .and_then(|id| state.task_save_error(id)),
+        );
+        self.observed_version = state.version;
+        true
     }
 
     fn apply_patch(&mut self, task_id: String, patch: TaskPatch) -> bool {
@@ -403,20 +541,21 @@ impl TaskWorkspace {
                 changed = true;
                 continue;
             }
-            self.context
+            let outcome = self
+                .context
                 .store
                 .borrow_mut()
                 .dispatch(AppEvent::SaveCompleted {
                     target: SaveTarget::task(result.task_id, result.field),
                     error: result.error,
                 });
-            changed = true;
+            changed |= outcome.changed;
         }
         changed
     }
 }
 
-impl TuiNode for TaskWorkspace {
+impl TuiNode<AppMsg> for TaskWorkspace {
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
         self.sync_store_version();
         self.split.layout(area, ctx)
@@ -426,9 +565,11 @@ impl TuiNode for TaskWorkspace {
         self.split.render(frame, area, ctx);
     }
 
-    fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
+    fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<AppMsg>) -> EventOutcome {
         let outcome = self.split.event(event, ctx);
-        self.sync_detail_events(ctx);
+        if self.sync_detail_changes() {
+            ctx.request_redraw();
+        }
         self.sync_table_events(ctx);
         outcome
     }
@@ -437,17 +578,19 @@ impl TuiNode for TaskWorkspace {
         &mut self,
         route: &EventRoute,
         event: &TuiEvent,
-        ctx: &mut EventCtx<()>,
+        ctx: &mut EventCtx<AppMsg>,
     ) -> EventOutcome {
         let outcome = self.split.dispatch_event(route, event, ctx);
-        self.sync_detail_events(ctx);
+        if self.sync_detail_changes() {
+            ctx.request_redraw();
+        }
         self.sync_table_events(ctx);
         outcome
     }
 
-    fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<()>) {
+    fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<AppMsg>) {
         self.split.dispatch_focus(target, focused, ctx);
-        if self.drain_detail_patches() {
+        if self.sync_detail_changes() {
             ctx.request_redraw();
         }
     }
@@ -455,6 +598,7 @@ impl TuiNode for TaskWorkspace {
     fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
         let mut result = self.split.tick(dt, settings);
         if self.poll_save_results() {
+            self.sync_store_version();
             result = result.merge(TickResult::CHANGED);
         }
         if !self.latest_save_seq.is_empty() {
@@ -463,19 +607,19 @@ impl TuiNode for TaskWorkspace {
         result
     }
 
-    fn init(&mut self, ctx: &mut LifecycleCtx<()>) {
+    fn init(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
         self.split.init(ctx);
     }
 
-    fn mount(&mut self, ctx: &mut LifecycleCtx<()>) {
+    fn mount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
         self.split.mount(ctx);
     }
 
-    fn unmount(&mut self, ctx: &mut LifecycleCtx<()>) {
+    fn unmount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
         self.split.unmount(ctx);
     }
 
-    fn destroy(&mut self, ctx: &mut LifecycleCtx<()>) {
+    fn destroy(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
         self.split.destroy(ctx);
     }
 }
@@ -528,14 +672,26 @@ impl PeopleWorkspace {
     }
 
     fn sync_store_version(&mut self) {
-        let version = self.context.store.borrow().state().version;
+        let store = self.context.store.borrow();
+        let state = store.state();
+        let version = state.version;
         if self.observed_version != version {
-            self.split = person_split(&self.context.store);
+            let rows = state.people.clone();
+            let save_error = state
+                .selected_person_id
+                .as_deref()
+                .and_then(|id| state.person_save_error(id))
+                .map(str::to_string);
+            drop(store);
+            self.split.first_mut().set_rows(rows);
+            self.split
+                .second_mut()
+                .set_save_error(save_error.as_deref());
             self.observed_version = version;
         }
     }
 
-    fn sync_table_events(&mut self, ctx: &mut EventCtx<()>) {
+    fn sync_table_events(&mut self, ctx: &mut EventCtx<AppMsg>) {
         let events = self.split.first_mut().take_events();
         let mut focus_detail = false;
         let mut selected_changed = false;
@@ -543,7 +699,7 @@ impl PeopleWorkspace {
             match &event {
                 DataViewTypedEvent::HighlightChanged { row_id: Some(id) }
                 | DataViewTypedEvent::Activated { row_id: id } => {
-                    selected_changed |= self.select_person(&id);
+                    selected_changed |= self.select_person(&id, ctx);
                     if matches!(event, DataViewTypedEvent::Activated { .. }) {
                         focus_detail = true;
                     }
@@ -563,7 +719,7 @@ impl PeopleWorkspace {
         }
     }
 
-    fn select_person(&mut self, id: &str) -> bool {
+    fn select_person(&mut self, id: &str, ctx: &mut EventCtx<AppMsg>) -> bool {
         let outcome = self
             .context
             .store
@@ -576,7 +732,7 @@ impl PeopleWorkspace {
             let save_error = selected_person.and_then(|person| state.person_save_error(&person.id));
             self.split
                 .second_mut()
-                .set_person(selected_person, save_error);
+                .set_person(selected_person, save_error, ctx);
         }
         outcome.changed
     }
@@ -590,14 +746,21 @@ impl PeopleWorkspace {
         changed
     }
 
-    fn sync_detail_events(&mut self, ctx: &mut EventCtx<()>) {
-        if self.drain_detail_patches() {
-            let store = self.context.store.borrow();
-            let state = store.state();
-            self.split.first_mut().set_rows(state.people.clone());
-            self.observed_version = state.version;
-            ctx.request_redraw();
+    fn sync_detail_changes(&mut self) -> bool {
+        if !self.drain_detail_patches() {
+            return false;
         }
+        let store = self.context.store.borrow();
+        let state = store.state();
+        self.split.first_mut().set_rows(state.people.clone());
+        self.split.second_mut().set_save_error(
+            state
+                .selected_person_id
+                .as_deref()
+                .and_then(|id| state.person_save_error(id)),
+        );
+        self.observed_version = state.version;
+        true
     }
 
     fn apply_patch(&mut self, person_id: String, patch: PersonPatch) -> bool {
@@ -662,20 +825,21 @@ impl PeopleWorkspace {
                 changed = true;
                 continue;
             }
-            self.context
+            let outcome = self
+                .context
                 .store
                 .borrow_mut()
                 .dispatch(AppEvent::SaveCompleted {
                     target: SaveTarget::person(result.person_id, result.field),
                     error: result.error,
                 });
-            changed = true;
+            changed |= outcome.changed;
         }
         changed
     }
 }
 
-impl TuiNode for PeopleWorkspace {
+impl TuiNode<AppMsg> for PeopleWorkspace {
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
         self.sync_store_version();
         self.split.layout(area, ctx)
@@ -685,9 +849,11 @@ impl TuiNode for PeopleWorkspace {
         self.split.render(frame, area, ctx);
     }
 
-    fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
+    fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<AppMsg>) -> EventOutcome {
         let outcome = self.split.event(event, ctx);
-        self.sync_detail_events(ctx);
+        if self.sync_detail_changes() {
+            ctx.request_redraw();
+        }
         self.sync_table_events(ctx);
         outcome
     }
@@ -696,17 +862,19 @@ impl TuiNode for PeopleWorkspace {
         &mut self,
         route: &EventRoute,
         event: &TuiEvent,
-        ctx: &mut EventCtx<()>,
+        ctx: &mut EventCtx<AppMsg>,
     ) -> EventOutcome {
         let outcome = self.split.dispatch_event(route, event, ctx);
-        self.sync_detail_events(ctx);
+        if self.sync_detail_changes() {
+            ctx.request_redraw();
+        }
         self.sync_table_events(ctx);
         outcome
     }
 
-    fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<()>) {
+    fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<AppMsg>) {
         self.split.dispatch_focus(target, focused, ctx);
-        if self.drain_detail_patches() {
+        if self.sync_detail_changes() {
             ctx.request_redraw();
         }
     }
@@ -714,6 +882,7 @@ impl TuiNode for PeopleWorkspace {
     fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
         let mut result = self.split.tick(dt, settings);
         if self.poll_save_results() {
+            self.sync_store_version();
             result = result.merge(TickResult::CHANGED);
         }
         if !self.latest_save_seq.is_empty() {
@@ -722,19 +891,19 @@ impl TuiNode for PeopleWorkspace {
         result
     }
 
-    fn init(&mut self, ctx: &mut LifecycleCtx<()>) {
+    fn init(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
         self.split.init(ctx);
     }
 
-    fn mount(&mut self, ctx: &mut LifecycleCtx<()>) {
+    fn mount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
         self.split.mount(ctx);
     }
 
-    fn unmount(&mut self, ctx: &mut LifecycleCtx<()>) {
+    fn unmount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
         self.split.unmount(ctx);
     }
 
-    fn destroy(&mut self, ctx: &mut LifecycleCtx<()>) {
+    fn destroy(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
         self.split.destroy(ctx);
     }
 }
@@ -768,14 +937,26 @@ impl ProjectsWorkspace {
     }
 
     fn sync_store_version(&mut self) {
-        let version = self.context.store.borrow().state().version;
+        let store = self.context.store.borrow();
+        let state = store.state();
+        let version = state.version;
         if self.observed_version != version {
-            self.split = project_split(&self.context.store);
+            let rows = state.projects.clone();
+            let save_error = state
+                .selected_project_id
+                .as_deref()
+                .and_then(|id| state.project_save_error(id))
+                .map(str::to_string);
+            drop(store);
+            self.split.first_mut().set_rows(rows);
+            self.split
+                .second_mut()
+                .set_save_error(save_error.as_deref());
             self.observed_version = version;
         }
     }
 
-    fn sync_table_events(&mut self, ctx: &mut EventCtx<()>) {
+    fn sync_table_events(&mut self, ctx: &mut EventCtx<AppMsg>) {
         let events = self.split.first_mut().take_events();
         let mut focus_detail = false;
         let mut selected_changed = false;
@@ -783,7 +964,7 @@ impl ProjectsWorkspace {
             match &event {
                 DataViewTypedEvent::HighlightChanged { row_id: Some(id) }
                 | DataViewTypedEvent::Activated { row_id: id } => {
-                    selected_changed |= self.select_project(&id);
+                    selected_changed |= self.select_project(&id, ctx);
                     if matches!(event, DataViewTypedEvent::Activated { .. }) {
                         focus_detail = true;
                     }
@@ -803,7 +984,7 @@ impl ProjectsWorkspace {
         }
     }
 
-    fn select_project(&mut self, id: &str) -> bool {
+    fn select_project(&mut self, id: &str, ctx: &mut EventCtx<AppMsg>) -> bool {
         let outcome = self
             .context
             .store
@@ -817,7 +998,7 @@ impl ProjectsWorkspace {
                 selected_project.and_then(|project| state.project_save_error(&project.id));
             self.split
                 .second_mut()
-                .set_project(selected_project, &state.people, save_error);
+                .set_project(selected_project, &state.people, save_error, ctx);
         }
         outcome.changed
     }
@@ -831,14 +1012,21 @@ impl ProjectsWorkspace {
         changed
     }
 
-    fn sync_detail_events(&mut self, ctx: &mut EventCtx<()>) {
-        if self.drain_detail_patches() {
-            let store = self.context.store.borrow();
-            let state = store.state();
-            self.split.first_mut().set_rows(state.projects.clone());
-            self.observed_version = state.version;
-            ctx.request_redraw();
+    fn sync_detail_changes(&mut self) -> bool {
+        if !self.drain_detail_patches() {
+            return false;
         }
+        let store = self.context.store.borrow();
+        let state = store.state();
+        self.split.first_mut().set_rows(state.projects.clone());
+        self.split.second_mut().set_save_error(
+            state
+                .selected_project_id
+                .as_deref()
+                .and_then(|id| state.project_save_error(id)),
+        );
+        self.observed_version = state.version;
+        true
     }
 
     fn apply_patch(&mut self, project_id: String, patch: ProjectPatch) -> bool {
@@ -904,20 +1092,21 @@ impl ProjectsWorkspace {
                 changed = true;
                 continue;
             }
-            self.context
+            let outcome = self
+                .context
                 .store
                 .borrow_mut()
                 .dispatch(AppEvent::SaveCompleted {
                     target: SaveTarget::project(result.project_id, result.field),
                     error: result.error,
                 });
-            changed = true;
+            changed |= outcome.changed;
         }
         changed
     }
 }
 
-impl TuiNode for ProjectsWorkspace {
+impl TuiNode<AppMsg> for ProjectsWorkspace {
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
         self.sync_store_version();
         self.split.layout(area, ctx)
@@ -927,9 +1116,11 @@ impl TuiNode for ProjectsWorkspace {
         self.split.render(frame, area, ctx);
     }
 
-    fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
+    fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<AppMsg>) -> EventOutcome {
         let outcome = self.split.event(event, ctx);
-        self.sync_detail_events(ctx);
+        if self.sync_detail_changes() {
+            ctx.request_redraw();
+        }
         self.sync_table_events(ctx);
         outcome
     }
@@ -938,17 +1129,19 @@ impl TuiNode for ProjectsWorkspace {
         &mut self,
         route: &EventRoute,
         event: &TuiEvent,
-        ctx: &mut EventCtx<()>,
+        ctx: &mut EventCtx<AppMsg>,
     ) -> EventOutcome {
         let outcome = self.split.dispatch_event(route, event, ctx);
-        self.sync_detail_events(ctx);
+        if self.sync_detail_changes() {
+            ctx.request_redraw();
+        }
         self.sync_table_events(ctx);
         outcome
     }
 
-    fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<()>) {
+    fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<AppMsg>) {
         self.split.dispatch_focus(target, focused, ctx);
-        if self.drain_detail_patches() {
+        if self.sync_detail_changes() {
             ctx.request_redraw();
         }
     }
@@ -956,6 +1149,7 @@ impl TuiNode for ProjectsWorkspace {
     fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
         let mut result = self.split.tick(dt, settings);
         if self.poll_save_results() {
+            self.sync_store_version();
             result = result.merge(TickResult::CHANGED);
         }
         if !self.latest_save_seq.is_empty() {
@@ -964,27 +1158,116 @@ impl TuiNode for ProjectsWorkspace {
         result
     }
 
-    fn init(&mut self, ctx: &mut LifecycleCtx<()>) {
+    fn init(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
         self.split.init(ctx);
     }
 
-    fn mount(&mut self, ctx: &mut LifecycleCtx<()>) {
+    fn mount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
         self.split.mount(ctx);
     }
 
-    fn unmount(&mut self, ctx: &mut LifecycleCtx<()>) {
+    fn unmount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
         self.split.unmount(ctx);
     }
 
-    fn destroy(&mut self, ctx: &mut LifecycleCtx<()>) {
+    fn destroy(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
         self.split.destroy(ctx);
     }
 }
 
+struct ManagementDialog {
+    people: PeopleWorkspace,
+    projects: ProjectsWorkspace,
+    active: ManagementDialogKind,
+}
+
+impl ManagementDialog {
+    fn new(context: AppContext) -> Self {
+        Self {
+            people: PeopleWorkspace::new(context.clone()),
+            projects: ProjectsWorkspace::new(context),
+            active: ManagementDialogKind::People,
+        }
+    }
+
+    fn set_active(&mut self, active: ManagementDialogKind) {
+        self.active = active;
+    }
+}
+
+impl TuiNode<AppMsg> for ManagementDialog {
+    fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
+        match self.active {
+            ManagementDialogKind::People => self.people.layout(area, ctx),
+            ManagementDialogKind::Projects => self.projects.layout(area, ctx),
+        }
+    }
+
+    fn render<'a>(&'a self, frame: &mut Frame, area: Rect, ctx: &mut RenderCtx<'a>) {
+        match self.active {
+            ManagementDialogKind::People => self.people.render(frame, area, ctx),
+            ManagementDialogKind::Projects => self.projects.render(frame, area, ctx),
+        }
+    }
+
+    fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<AppMsg>) -> EventOutcome {
+        match self.active {
+            ManagementDialogKind::People => self.people.event(event, ctx),
+            ManagementDialogKind::Projects => self.projects.event(event, ctx),
+        }
+    }
+
+    fn dispatch_event(
+        &mut self,
+        route: &EventRoute,
+        event: &TuiEvent,
+        ctx: &mut EventCtx<AppMsg>,
+    ) -> EventOutcome {
+        match self.active {
+            ManagementDialogKind::People => self.people.dispatch_event(route, event, ctx),
+            ManagementDialogKind::Projects => self.projects.dispatch_event(route, event, ctx),
+        }
+    }
+
+    fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<AppMsg>) {
+        match self.active {
+            ManagementDialogKind::People => self.people.dispatch_focus(target, focused, ctx),
+            ManagementDialogKind::Projects => self.projects.dispatch_focus(target, focused, ctx),
+        }
+    }
+
+    fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
+        self.people
+            .tick(dt, settings)
+            .merge(self.projects.tick(dt, settings))
+    }
+
+    fn init(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
+        self.people.init(ctx);
+        self.projects.init(ctx);
+    }
+
+    fn mount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
+        self.people.mount(ctx);
+        self.projects.mount(ctx);
+    }
+
+    fn unmount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
+        self.people.unmount(ctx);
+        self.projects.unmount(ctx);
+    }
+
+    fn destroy(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
+        self.people.destroy(ctx);
+        self.projects.destroy(ctx);
+    }
+}
+
 struct TaskDetailForm {
-    root: Flex,
+    root: Flex<AppMsg>,
     task_id: Option<String>,
     patches: PatchSink,
+    save_status: SaveStatusLine,
 }
 
 impl TaskDetailForm {
@@ -995,10 +1278,22 @@ impl TaskDetailForm {
         save_error: Option<&str>,
     ) -> Self {
         let patches = Rc::new(RefCell::new(Vec::new()));
+        let save_status = SaveStatusLine::new(save_error);
         Self {
-            root: detail_form(task, people, projects, Rc::clone(&patches), save_error),
+            root: Flex::column().child(
+                "form",
+                detail_form(
+                    task,
+                    people,
+                    projects,
+                    Rc::clone(&patches),
+                    save_status.clone(),
+                ),
+                FlexItem::content(),
+            ),
             task_id: task.map(|task| task.id.clone()),
             patches,
+            save_status,
         }
     }
 
@@ -1020,14 +1315,33 @@ impl TaskDetailForm {
         people: &[Person],
         projects: &[Project],
         save_error: Option<&str>,
+        ctx: &mut EventCtx<AppMsg>,
     ) {
         self.patches = Rc::new(RefCell::new(Vec::new()));
         self.task_id = task.map(|task| task.id.clone());
-        self.root = detail_form(task, people, projects, Rc::clone(&self.patches), save_error);
+        self.save_status = SaveStatusLine::new(save_error);
+        self.root
+            .replace(
+                "form",
+                detail_form(
+                    task,
+                    people,
+                    projects,
+                    Rc::clone(&self.patches),
+                    self.save_status.clone(),
+                ),
+                FlexItem::content(),
+                ctx,
+            )
+            .expect("detail form host should contain form child");
+    }
+
+    fn set_save_error(&self, save_error: Option<&str>) {
+        self.save_status.set_error(save_error);
     }
 }
 
-impl TuiNode for TaskDetailForm {
+impl TuiNode<AppMsg> for TaskDetailForm {
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
         self.root.layout(area, ctx)
     }
@@ -1036,36 +1350,22 @@ impl TuiNode for TaskDetailForm {
         self.root.render(frame, area, ctx);
     }
 
-    fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
-        if detail_escape(event) {
-            focus_task_table(ctx);
-            return EventOutcome::Handled;
-        }
-        if tab_navigation_event(event) {
-            return EventOutcome::Ignored;
-        }
+    fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<AppMsg>) -> EventOutcome {
         let outcome = self.root.event(event, ctx);
-        outcome
+        detail_outcome_or_escape(outcome, event, ctx)
     }
 
     fn dispatch_event(
         &mut self,
         route: &EventRoute,
         event: &TuiEvent,
-        ctx: &mut EventCtx<()>,
+        ctx: &mut EventCtx<AppMsg>,
     ) -> EventOutcome {
-        if detail_escape(event) {
-            focus_task_table(ctx);
-            return EventOutcome::Handled;
-        }
-        if tab_navigation_event(event) {
-            return EventOutcome::Ignored;
-        }
         let outcome = self.root.dispatch_event(route, event, ctx);
-        outcome
+        detail_outcome_or_escape(outcome, event, ctx)
     }
 
-    fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<()>) {
+    fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<AppMsg>) {
         self.root.dispatch_focus(target, focused, ctx);
     }
 
@@ -1073,36 +1373,43 @@ impl TuiNode for TaskDetailForm {
         self.root.tick(dt, settings)
     }
 
-    fn init(&mut self, ctx: &mut LifecycleCtx<()>) {
+    fn init(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
         self.root.init(ctx);
     }
 
-    fn mount(&mut self, ctx: &mut LifecycleCtx<()>) {
+    fn mount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
         self.root.mount(ctx);
     }
 
-    fn unmount(&mut self, ctx: &mut LifecycleCtx<()>) {
+    fn unmount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
         self.root.unmount(ctx);
     }
 
-    fn destroy(&mut self, ctx: &mut LifecycleCtx<()>) {
+    fn destroy(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
         self.root.destroy(ctx);
     }
 }
 
 struct PersonDetailForm {
-    root: Flex,
+    root: Flex<AppMsg>,
     person_id: Option<String>,
     patches: PersonPatchSink,
+    save_status: SaveStatusLine,
 }
 
 impl PersonDetailForm {
     fn new(person: Option<&Person>, save_error: Option<&str>) -> Self {
         let patches = Rc::new(RefCell::new(Vec::new()));
+        let save_status = SaveStatusLine::new(save_error);
         Self {
-            root: person_detail_form(person, Rc::clone(&patches), save_error),
+            root: Flex::column().child(
+                "form",
+                person_detail_form(person, Rc::clone(&patches), save_status.clone()),
+                FlexItem::content(),
+            ),
             person_id: person.map(|person| person.id.clone()),
             patches,
+            save_status,
         }
     }
 
@@ -1118,14 +1425,31 @@ impl PersonDetailForm {
             .collect()
     }
 
-    fn set_person(&mut self, person: Option<&Person>, save_error: Option<&str>) {
+    fn set_person(
+        &mut self,
+        person: Option<&Person>,
+        save_error: Option<&str>,
+        ctx: &mut EventCtx<AppMsg>,
+    ) {
         self.patches = Rc::new(RefCell::new(Vec::new()));
         self.person_id = person.map(|person| person.id.clone());
-        self.root = person_detail_form(person, Rc::clone(&self.patches), save_error);
+        self.save_status = SaveStatusLine::new(save_error);
+        self.root
+            .replace(
+                "form",
+                person_detail_form(person, Rc::clone(&self.patches), self.save_status.clone()),
+                FlexItem::content(),
+                ctx,
+            )
+            .expect("person detail form host should contain form child");
+    }
+
+    fn set_save_error(&self, save_error: Option<&str>) {
+        self.save_status.set_error(save_error);
     }
 }
 
-impl TuiNode for PersonDetailForm {
+impl TuiNode<AppMsg> for PersonDetailForm {
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
         self.root.layout(area, ctx)
     }
@@ -1134,36 +1458,22 @@ impl TuiNode for PersonDetailForm {
         self.root.render(frame, area, ctx);
     }
 
-    fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
-        if detail_escape(event) {
-            focus_task_table(ctx);
-            return EventOutcome::Handled;
-        }
-        if tab_navigation_event(event) {
-            return EventOutcome::Ignored;
-        }
+    fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<AppMsg>) -> EventOutcome {
         let outcome = self.root.event(event, ctx);
-        outcome
+        detail_outcome_or_escape(outcome, event, ctx)
     }
 
     fn dispatch_event(
         &mut self,
         route: &EventRoute,
         event: &TuiEvent,
-        ctx: &mut EventCtx<()>,
+        ctx: &mut EventCtx<AppMsg>,
     ) -> EventOutcome {
-        if detail_escape(event) {
-            focus_task_table(ctx);
-            return EventOutcome::Handled;
-        }
-        if tab_navigation_event(event) {
-            return EventOutcome::Ignored;
-        }
         let outcome = self.root.dispatch_event(route, event, ctx);
-        outcome
+        detail_outcome_or_escape(outcome, event, ctx)
     }
 
-    fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<()>) {
+    fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<AppMsg>) {
         self.root.dispatch_focus(target, focused, ctx);
     }
 
@@ -1171,36 +1481,43 @@ impl TuiNode for PersonDetailForm {
         self.root.tick(dt, settings)
     }
 
-    fn init(&mut self, ctx: &mut LifecycleCtx<()>) {
+    fn init(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
         self.root.init(ctx);
     }
 
-    fn mount(&mut self, ctx: &mut LifecycleCtx<()>) {
+    fn mount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
         self.root.mount(ctx);
     }
 
-    fn unmount(&mut self, ctx: &mut LifecycleCtx<()>) {
+    fn unmount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
         self.root.unmount(ctx);
     }
 
-    fn destroy(&mut self, ctx: &mut LifecycleCtx<()>) {
+    fn destroy(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
         self.root.destroy(ctx);
     }
 }
 
 struct ProjectDetailForm {
-    root: Flex,
+    root: Flex<AppMsg>,
     project_id: Option<String>,
     patches: ProjectPatchSink,
+    save_status: SaveStatusLine,
 }
 
 impl ProjectDetailForm {
     fn new(project: Option<&Project>, people: &[Person], save_error: Option<&str>) -> Self {
         let patches = Rc::new(RefCell::new(Vec::new()));
+        let save_status = SaveStatusLine::new(save_error);
         Self {
-            root: project_detail_form(project, people, Rc::clone(&patches), save_error),
+            root: Flex::column().child(
+                "form",
+                project_detail_form(project, people, Rc::clone(&patches), save_status.clone()),
+                FlexItem::content(),
+            ),
             project_id: project.map(|project| project.id.clone()),
             patches,
+            save_status,
         }
     }
 
@@ -1221,14 +1538,32 @@ impl ProjectDetailForm {
         project: Option<&Project>,
         people: &[Person],
         save_error: Option<&str>,
+        ctx: &mut EventCtx<AppMsg>,
     ) {
         self.patches = Rc::new(RefCell::new(Vec::new()));
         self.project_id = project.map(|project| project.id.clone());
-        self.root = project_detail_form(project, people, Rc::clone(&self.patches), save_error);
+        self.save_status = SaveStatusLine::new(save_error);
+        self.root
+            .replace(
+                "form",
+                project_detail_form(
+                    project,
+                    people,
+                    Rc::clone(&self.patches),
+                    self.save_status.clone(),
+                ),
+                FlexItem::content(),
+                ctx,
+            )
+            .expect("project detail form host should contain form child");
+    }
+
+    fn set_save_error(&self, save_error: Option<&str>) {
+        self.save_status.set_error(save_error);
     }
 }
 
-impl TuiNode for ProjectDetailForm {
+impl TuiNode<AppMsg> for ProjectDetailForm {
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
         self.root.layout(area, ctx)
     }
@@ -1237,36 +1572,22 @@ impl TuiNode for ProjectDetailForm {
         self.root.render(frame, area, ctx);
     }
 
-    fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
-        if detail_escape(event) {
-            focus_task_table(ctx);
-            return EventOutcome::Handled;
-        }
-        if tab_navigation_event(event) {
-            return EventOutcome::Ignored;
-        }
+    fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<AppMsg>) -> EventOutcome {
         let outcome = self.root.event(event, ctx);
-        outcome
+        detail_outcome_or_escape(outcome, event, ctx)
     }
 
     fn dispatch_event(
         &mut self,
         route: &EventRoute,
         event: &TuiEvent,
-        ctx: &mut EventCtx<()>,
+        ctx: &mut EventCtx<AppMsg>,
     ) -> EventOutcome {
-        if detail_escape(event) {
-            focus_task_table(ctx);
-            return EventOutcome::Handled;
-        }
-        if tab_navigation_event(event) {
-            return EventOutcome::Ignored;
-        }
         let outcome = self.root.dispatch_event(route, event, ctx);
-        outcome
+        detail_outcome_or_escape(outcome, event, ctx)
     }
 
-    fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<()>) {
+    fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<AppMsg>) {
         self.root.dispatch_focus(target, focused, ctx);
     }
 
@@ -1274,19 +1595,19 @@ impl TuiNode for ProjectDetailForm {
         self.root.tick(dt, settings)
     }
 
-    fn init(&mut self, ctx: &mut LifecycleCtx<()>) {
+    fn init(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
         self.root.init(ctx);
     }
 
-    fn mount(&mut self, ctx: &mut LifecycleCtx<()>) {
+    fn mount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
         self.root.mount(ctx);
     }
 
-    fn unmount(&mut self, ctx: &mut LifecycleCtx<()>) {
+    fn unmount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
         self.root.unmount(ctx);
     }
 
-    fn destroy(&mut self, ctx: &mut LifecycleCtx<()>) {
+    fn destroy(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
         self.root.destroy(ctx);
     }
 }
@@ -1410,47 +1731,57 @@ fn project_table(
 fn person_detail_form(
     person: Option<&Person>,
     patch_sink: PersonPatchSink,
-    save_error: Option<&str>,
-) -> Flex {
+    save_status: SaveStatusLine,
+) -> Flex<AppMsg> {
     let Some(person) = person else {
-        return Flex::column().child(
+        return Flex::<AppMsg>::column().child(
             "empty",
             Paragraph::new("No person selected."),
             FlexItem::fixed(1),
         );
     };
-    let status = save_error.unwrap_or("Saved changes update immediately.");
-
-    Flex::column()
+    Flex::<AppMsg>::column()
         .gap(0)
-        .child("save-status", Paragraph::new(status), FlexItem::fixed(1))
+        .child("save-status", save_status, FlexItem::fixed(1))
         .child(
             "name",
-            TextInput::new()
+            TextInput::<AppMsg>::new()
                 .value(person.name.clone())
                 .panel("Name")
                 .on_submit({
                     let patch_sink = Rc::clone(&patch_sink);
-                    move |value| patch_sink.borrow_mut().push(PersonPatch::Name(value))
+                    move |value| {
+                        patch_sink.borrow_mut().push(PersonPatch::Name(value));
+                        AppMsg::Noop
+                    }
                 })
                 .on_blur({
                     let patch_sink = Rc::clone(&patch_sink);
-                    move |value| patch_sink.borrow_mut().push(PersonPatch::Name(value))
+                    move |value| {
+                        patch_sink.borrow_mut().push(PersonPatch::Name(value));
+                        AppMsg::Noop
+                    }
                 }),
             FlexItem::fixed(3),
         )
         .child(
             "email",
-            TextInput::new()
+            TextInput::<AppMsg>::new()
                 .value(person.email.clone())
                 .panel("Email")
                 .on_submit({
                     let patch_sink = Rc::clone(&patch_sink);
-                    move |value| patch_sink.borrow_mut().push(PersonPatch::Email(value))
+                    move |value| {
+                        patch_sink.borrow_mut().push(PersonPatch::Email(value));
+                        AppMsg::Noop
+                    }
                 })
                 .on_blur({
                     let patch_sink = Rc::clone(&patch_sink);
-                    move |value| patch_sink.borrow_mut().push(PersonPatch::Email(value))
+                    move |value| {
+                        patch_sink.borrow_mut().push(PersonPatch::Email(value));
+                        AppMsg::Noop
+                    }
                 }),
             FlexItem::fixed(3),
         )
@@ -1477,53 +1808,63 @@ fn project_detail_form(
     project: Option<&Project>,
     people: &[Person],
     patch_sink: ProjectPatchSink,
-    save_error: Option<&str>,
-) -> Flex {
+    save_status: SaveStatusLine,
+) -> Flex<AppMsg> {
     let Some(project) = project else {
-        return Flex::column().child(
+        return Flex::<AppMsg>::column().child(
             "empty",
             Paragraph::new("No project selected."),
             FlexItem::fixed(1),
         );
     };
-    let status = save_error.unwrap_or("Saved changes update immediately.");
-
-    Flex::column()
+    Flex::<AppMsg>::column()
         .gap(0)
-        .child("save-status", Paragraph::new(status), FlexItem::fixed(1))
+        .child("save-status", save_status, FlexItem::fixed(1))
         .child(
             "key",
-            TextInput::new()
+            TextInput::<AppMsg>::new()
                 .value(project.key.clone())
                 .panel("Key")
                 .on_submit({
                     let patch_sink = Rc::clone(&patch_sink);
-                    move |value| patch_sink.borrow_mut().push(ProjectPatch::Key(value))
+                    move |value| {
+                        patch_sink.borrow_mut().push(ProjectPatch::Key(value));
+                        AppMsg::Noop
+                    }
                 })
                 .on_blur({
                     let patch_sink = Rc::clone(&patch_sink);
-                    move |value| patch_sink.borrow_mut().push(ProjectPatch::Key(value))
+                    move |value| {
+                        patch_sink.borrow_mut().push(ProjectPatch::Key(value));
+                        AppMsg::Noop
+                    }
                 }),
             FlexItem::fixed(3),
         )
         .child(
             "name",
-            TextInput::new()
+            TextInput::<AppMsg>::new()
                 .value(project.name.clone())
                 .panel("Name")
                 .on_submit({
                     let patch_sink = Rc::clone(&patch_sink);
-                    move |value| patch_sink.borrow_mut().push(ProjectPatch::Name(value))
+                    move |value| {
+                        patch_sink.borrow_mut().push(ProjectPatch::Name(value));
+                        AppMsg::Noop
+                    }
                 })
                 .on_blur({
                     let patch_sink = Rc::clone(&patch_sink);
-                    move |value| patch_sink.borrow_mut().push(ProjectPatch::Name(value))
+                    move |value| {
+                        patch_sink.borrow_mut().push(ProjectPatch::Name(value));
+                        AppMsg::Noop
+                    }
                 }),
             FlexItem::fixed(3),
         )
         .child(
             "description",
-            TextareaInput::new()
+            TextareaInput::<AppMsg>::new()
                 .value(project.description.clone())
                 .panel("Description")
                 .on_submit({
@@ -1531,7 +1872,8 @@ fn project_detail_form(
                     move |value| {
                         patch_sink
                             .borrow_mut()
-                            .push(ProjectPatch::Description(value))
+                            .push(ProjectPatch::Description(value));
+                        AppMsg::Noop
                     }
                 })
                 .on_blur({
@@ -1539,7 +1881,8 @@ fn project_detail_form(
                     move |value| {
                         patch_sink
                             .borrow_mut()
-                            .push(ProjectPatch::Description(value))
+                            .push(ProjectPatch::Description(value));
+                        AppMsg::Noop
                     }
                 })
                 .min_rows(4)
@@ -1658,55 +2001,84 @@ fn detail_form(
     people: &[Person],
     projects: &[Project],
     patch_sink: PatchSink,
-    save_error: Option<&str>,
-) -> Flex {
+    save_status: SaveStatusLine,
+) -> Flex<AppMsg> {
     let Some(task) = task else {
-        return Flex::column().child(
+        return Flex::<AppMsg>::column().child(
             "empty",
             Paragraph::new("No task selected."),
             FlexItem::fixed(1),
         );
     };
 
-    let status = save_error.unwrap_or("Saved changes update immediately.");
+    let focus_status = format!(
+        "Focus today: {} • Frog candidate: {}",
+        yes_no(task.focus_today),
+        yes_no(task.frog_candidate)
+    );
+    let ai_rationale = format!("AI rationale: {}", task.ai_rationale);
+    let swap_note = format!("Swap note: {}", task.swap_note);
 
-    Flex::column()
+    Flex::<AppMsg>::column()
         .gap(0)
-        .child("save-status", Paragraph::new(status), FlexItem::fixed(1))
+        .child("save-status", save_status, FlexItem::fixed(1))
+        .child(
+            "focus-status",
+            Paragraph::new(focus_status),
+            FlexItem::fixed(1),
+        )
         .child(
             "title",
-            TextInput::new()
+            TextInput::<AppMsg>::new()
                 .value(task.title.clone())
                 .panel("Title")
                 .hotkey(keys::TASK_TITLE_FIELD.hotkey())
                 .on_submit({
                     let patch_sink = Rc::clone(&patch_sink);
-                    move |value| patch_sink.borrow_mut().push(TaskPatch::Title(value))
+                    move |value| {
+                        patch_sink.borrow_mut().push(TaskPatch::Title(value));
+                        AppMsg::Noop
+                    }
                 })
                 .on_blur({
                     let patch_sink = Rc::clone(&patch_sink);
-                    move |value| patch_sink.borrow_mut().push(TaskPatch::Title(value))
+                    move |value| {
+                        patch_sink.borrow_mut().push(TaskPatch::Title(value));
+                        AppMsg::Noop
+                    }
                 }),
             FlexItem::fixed(3),
         )
         .child(
             "description",
-            TextareaInput::new()
+            TextareaInput::<AppMsg>::new()
                 .value(task.detail.clone())
                 .panel("Description")
                 .hotkey(keys::TASK_DESCRIPTION_FIELD.hotkey())
                 .on_submit({
                     let patch_sink = Rc::clone(&patch_sink);
-                    move |value| patch_sink.borrow_mut().push(TaskPatch::Detail(value))
+                    move |value| {
+                        patch_sink.borrow_mut().push(TaskPatch::Detail(value));
+                        AppMsg::Noop
+                    }
                 })
                 .on_blur({
                     let patch_sink = Rc::clone(&patch_sink);
-                    move |value| patch_sink.borrow_mut().push(TaskPatch::Detail(value))
+                    move |value| {
+                        patch_sink.borrow_mut().push(TaskPatch::Detail(value));
+                        AppMsg::Noop
+                    }
                 })
                 .min_rows(4)
                 .max_rows(8),
             FlexItem::fixed(6),
         )
+        .child(
+            "ai-rationale",
+            Paragraph::new(ai_rationale),
+            FlexItem::fixed(1),
+        )
+        .child("swap-note", Paragraph::new(swap_note), FlexItem::fixed(1))
         .child(
             "type",
             dropdown_single("Type", type_choices(), task.task_type.id(), {
@@ -1770,7 +2142,7 @@ fn detail_form(
         )
         .child(
             "start-date",
-            DatePickerDropdown::new()
+            DatePickerDropdown::<AppMsg>::new()
                 .value(parse_date(task.start_date.as_deref()))
                 .panel("Start date")
                 .hotkey(keys::TASK_START_DATE_FIELD.hotkey())
@@ -1780,13 +2152,14 @@ fn detail_form(
                         patch_sink
                             .borrow_mut()
                             .push(TaskPatch::StartDate(Some(date.to_string())));
+                        AppMsg::Noop
                     }
                 }),
             FlexItem::fixed(3),
         )
         .child(
             "end-date",
-            DatePickerDropdown::new()
+            DatePickerDropdown::<AppMsg>::new()
                 .value(parse_date(task.due_date.as_deref()))
                 .panel("End date")
                 .hotkey(keys::TASK_END_DATE_FIELD.hotkey())
@@ -1796,10 +2169,15 @@ fn detail_form(
                         patch_sink
                             .borrow_mut()
                             .push(TaskPatch::EndDate(Some(date.to_string())));
+                        AppMsg::Noop
                     }
                 }),
             FlexItem::fixed(3),
         )
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
 }
 
 fn parse_date(value: Option<&str>) -> Option<Date> {
@@ -1829,14 +2207,22 @@ fn detail_escape(event: &TuiEvent) -> bool {
     app_keymap::matches_any(event, &[keys::DETAIL_CLOSE, keys::DETAIL_CLOSE_ALT])
 }
 
-fn tab_navigation_event(event: &TuiEvent) -> bool {
-    let TuiEvent::Key(key) = event else {
-        return false;
-    };
-    key.modifiers == KeyModifiers::NONE && matches!(key.code, Key::Char('[' | ']'))
+fn detail_outcome_or_escape(
+    outcome: EventOutcome,
+    event: &TuiEvent,
+    ctx: &mut EventCtx<AppMsg>,
+) -> EventOutcome {
+    if outcome.handled() {
+        return outcome;
+    }
+    if detail_escape(event) {
+        focus_task_table(ctx);
+        return EventOutcome::Handled;
+    }
+    outcome
 }
 
-fn focus_task_table(ctx: &mut EventCtx<()>) {
+fn focus_task_table(ctx: &mut EventCtx<AppMsg>) {
     ctx.focus(FocusRequest::Target(FocusId::new("data-view")));
     ctx.stop_propagation();
     ctx.request_redraw();
@@ -2058,4 +2444,543 @@ fn project_choices(projects: &[Project]) -> Vec<Choice> {
             label: project.name.clone(),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::{Terminal, backend::TestBackend};
+    use sqlx::any::AnyPoolOptions;
+    use tuicore::{FocusManager, HotkeyEvent, Key, TreeDispatcher};
+
+    fn test_task() -> Task {
+        Task {
+            id: "task-1".to_string(),
+            title: "Original".to_string(),
+            task_type: TaskType::Action,
+            subtype: TaskSubtype::Task,
+            state: TaskState::Todo,
+            size: TaskSize::Small,
+            start_date: None,
+            due_date: None,
+            people_ids: Vec::new(),
+            project_ids: Vec::new(),
+            entity_labels: Vec::new(),
+            focus_today: false,
+            frog_candidate: false,
+            detail: "Existing detail".to_string(),
+            ai_rationale: String::new(),
+            swap_note: String::new(),
+        }
+    }
+
+    fn test_context(
+        snapshot: WorkspaceSnapshot,
+    ) -> (tokio::runtime::Runtime, AppContext, AppStore) {
+        sqlx::any::install_default_drivers();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime should build");
+        let pool = {
+            let _runtime_guard = runtime.enter();
+            AnyPoolOptions::new()
+                .connect_lazy("sqlite::memory:")
+                .expect("lazy pool should build")
+        };
+        let store = Rc::new(RefCell::new(Store::new(
+            AppState::from_snapshot(snapshot),
+            reduce_app_state as fn(&mut AppState, AppEvent) -> tuicore::DispatchOutcome,
+        )));
+        let context = AppContext {
+            store: Rc::clone(&store),
+            pool,
+            dialect: SqlDialect::Sqlite,
+            runtime: runtime.handle().clone(),
+        };
+        (runtime, context, store)
+    }
+
+    fn rendered_text(node: &impl TuiNode<AppMsg>, area: Rect) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height))
+            .expect("terminal should build");
+        terminal
+            .draw(|frame| node.render(frame, area, &mut RenderCtx::new()))
+            .expect("node should render");
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    fn rendered_area_has_focus_style(
+        node: &impl TuiNode<AppMsg>,
+        canvas: Rect,
+        area: Rect,
+    ) -> bool {
+        let mut terminal = Terminal::new(TestBackend::new(canvas.width, canvas.height))
+            .expect("terminal should build");
+        terminal
+            .draw(|frame| node.render(frame, canvas, &mut RenderCtx::new()))
+            .expect("node should render");
+        let buffer = terminal.backend().buffer();
+        let theme = tuicore::theme();
+        (area.y..area.bottom()).any(|y| {
+            (area.x..area.right()).any(|x| {
+                let cell = buffer.cell((x, y)).expect("focused area cell should exist");
+                cell.fg == theme.highlight_fg() && cell.bg == theme.highlight_bg()
+            })
+        })
+    }
+
+    #[test]
+    fn focused_detail_input_receives_tab_navigation_characters_before_ancestor_tabs() {
+        let person = Person {
+            id: "person-1".to_string(),
+            name: "Ada".to_string(),
+            email: "ada@example.com".to_string(),
+            active: true,
+        };
+        let detail = PersonDetailForm::new(Some(&person), None);
+        let patches = Rc::clone(&detail.patches);
+        let mut tabs = Tabs::new(vec![
+            Tab::new("Details", detail),
+            Tab::text("Other", "Other tab"),
+        ]);
+        let mut layout = LayoutCtx::new();
+        tabs.layout(Rect::new(0, 0, 80, 24), &mut layout);
+        let target = layout
+            .focus_targets()
+            .iter()
+            .find(|target| target.id.as_str() == "input")
+            .expect("detail name input should be focusable")
+            .clone();
+        tabs.dispatch_focus(&target, true, &mut FocusCtx::default());
+        let route = EventRoute::new(target.path);
+
+        for key in [Key::Enter, Key::Char('['), Key::Char(']'), Key::Enter] {
+            let outcome =
+                tabs.dispatch_event(&route, &TuiEvent::Key(key.into()), &mut EventCtx::default());
+            assert_eq!(outcome, EventOutcome::Handled);
+            assert_eq!(tabs.selected_index(), 0);
+        }
+
+        let patches = patches.borrow();
+        let [PersonPatch::Name(value)] = patches.as_slice() else {
+            panic!("expected one submitted name patch, got {patches:?}");
+        };
+        assert_eq!(value, "Ada[]");
+    }
+
+    #[test]
+    fn title_blur_during_description_hotkey_preserves_description_focus() {
+        sqlx::any::install_default_drivers();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime should build");
+        let _runtime_guard = runtime.enter();
+        let pool = AnyPoolOptions::new()
+            .connect_lazy("sqlite::memory:")
+            .expect("lazy pool should build");
+        let store = Rc::new(RefCell::new(Store::new(
+            AppState::from_snapshot(WorkspaceSnapshot {
+                tasks: vec![Task {
+                    id: "task-1".to_string(),
+                    title: "Original".to_string(),
+                    task_type: TaskType::Action,
+                    subtype: TaskSubtype::Task,
+                    state: TaskState::Todo,
+                    size: TaskSize::Small,
+                    start_date: None,
+                    due_date: None,
+                    people_ids: Vec::new(),
+                    project_ids: Vec::new(),
+                    entity_labels: Vec::new(),
+                    focus_today: false,
+                    frog_candidate: false,
+                    detail: "Existing detail".to_string(),
+                    ai_rationale: String::new(),
+                    swap_note: String::new(),
+                }],
+                people: Vec::new(),
+                projects: Vec::new(),
+            }),
+            reduce_app_state as fn(&mut AppState, AppEvent) -> tuicore::DispatchOutcome,
+        )));
+        let mut workspace = TaskWorkspace::new(AppContext {
+            store: Rc::clone(&store),
+            pool,
+            dialect: SqlDialect::Sqlite,
+            runtime: runtime.handle().clone(),
+        });
+        let area = Rect::new(0, 0, 120, 40);
+        let mut layout = LayoutCtx::new();
+        workspace.layout(area, &mut layout);
+        let title = layout
+            .focus_targets()
+            .iter()
+            .find(|target| {
+                target.id.as_str() == "input"
+                    && target.path.keys().iter().any(|key| key.as_str() == "title")
+            })
+            .expect("title input should be focusable")
+            .clone();
+        let description = layout
+            .focus_targets()
+            .iter()
+            .find(|target| {
+                target.id.as_str() == "textarea"
+                    && target
+                        .path
+                        .keys()
+                        .iter()
+                        .any(|key| key.as_str() == "description")
+            })
+            .expect("description input should be focusable")
+            .clone();
+        let mut focus = FocusManager::new();
+        let mut dispatcher = TreeDispatcher::new();
+        let transition = focus
+            .apply_request(
+                &FocusRequest::TargetAt {
+                    path: title.path.clone(),
+                    id: title.id.clone(),
+                },
+                layout.focus_targets(),
+            )
+            .expect("title focus should change");
+        dispatcher.dispatch_focus(&mut workspace, transition, AnimationSettings::default());
+
+        let title_route = EventRoute::new(title.path);
+        for key in [Key::Enter, Key::Char('!'), Key::Esc] {
+            let effects = dispatcher.dispatch_event(
+                &mut workspace,
+                &title_route,
+                &TuiEvent::Key(key.into()),
+                AnimationSettings::default(),
+            );
+            assert_eq!(effects.outcome, EventOutcome::Handled);
+        }
+
+        let description_route = EventRoute::new(description.path.clone());
+        let hotkey_effects = dispatcher.dispatch_event(
+            &mut workspace,
+            &description_route,
+            &TuiEvent::Hotkey(HotkeyEvent::Commit(keys::TASK_DESCRIPTION_FIELD.hotkey())),
+            AnimationSettings::default(),
+        );
+        assert!(hotkey_effects.layout);
+
+        let mut first_transition_layout = LayoutCtx::new();
+        workspace.layout(area, &mut first_transition_layout);
+        let transition = focus
+            .apply_request(
+                &FocusRequest::TargetAt {
+                    path: description.path.clone(),
+                    id: description.id.clone(),
+                },
+                first_transition_layout.focus_targets(),
+            )
+            .expect("description focus should change");
+        let focus_effects =
+            dispatcher.dispatch_focus(&mut workspace, transition, AnimationSettings::default());
+        assert!(focus_effects.layout);
+
+        let mut post_transition_layout = LayoutCtx::new();
+        workspace.layout(area, &mut post_transition_layout);
+        assert!(
+            focus
+                .validate(post_transition_layout.focus_targets())
+                .is_none()
+        );
+
+        let store_ref = store.borrow();
+        assert_eq!(store_ref.state().tasks[0].title, "Original!");
+        drop(store_ref);
+
+        let printable_effects = dispatcher.dispatch_event(
+            &mut workspace,
+            &EventRoute::new(focus.current_path()),
+            &TuiEvent::Key(Key::Char('x').into()),
+            AnimationSettings::default(),
+        );
+        assert_eq!(printable_effects.outcome, EventOutcome::Handled);
+
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height))
+            .expect("terminal should build");
+        terminal
+            .draw(|frame| workspace.render(frame, area, &mut RenderCtx::new()))
+            .expect("workspace should render");
+        let buffer = terminal.backend().buffer();
+        let mut rendered_table = String::new();
+        for y in 0..area.height {
+            for x in 0..70 {
+                rendered_table.push_str(
+                    buffer
+                        .cell((x, y))
+                        .expect("table cell should exist")
+                        .symbol(),
+                );
+            }
+        }
+        assert!(rendered_table.contains("Original!"));
+    }
+
+    #[test]
+    fn save_failure_and_recovery_preserve_focused_task_description_state() {
+        let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+            tasks: vec![test_task()],
+            people: Vec::new(),
+            projects: Vec::new(),
+        });
+        let mut workspace = TaskWorkspace::new(context);
+        let area = Rect::new(0, 0, 120, 40);
+        let mut layout = LayoutCtx::new();
+        workspace.layout(area, &mut layout);
+        let description = layout
+            .focus_targets()
+            .iter()
+            .find(|target| {
+                target.id.as_str() == "textarea"
+                    && target
+                        .path
+                        .keys()
+                        .iter()
+                        .any(|key| key.as_str() == "description")
+            })
+            .expect("description should be focusable")
+            .clone();
+        let mut focus = FocusManager::new();
+        let mut dispatcher = TreeDispatcher::new();
+        let transition = focus
+            .apply_request(
+                &FocusRequest::TargetAt {
+                    path: description.path.clone(),
+                    id: description.id.clone(),
+                },
+                layout.focus_targets(),
+            )
+            .expect("description focus should change");
+        dispatcher.dispatch_focus(&mut workspace, transition, AnimationSettings::default());
+        let route = EventRoute::new(description.path.clone());
+        for key in [Key::Enter, Key::Char('x')] {
+            assert_eq!(
+                dispatcher
+                    .dispatch_event(
+                        &mut workspace,
+                        &EventRoute::new(focus.current_path()),
+                        &TuiEvent::Key(key.into()),
+                        AnimationSettings::default(),
+                    )
+                    .outcome,
+                EventOutcome::Handled
+            );
+        }
+        assert!(rendered_area_has_focus_style(
+            &workspace,
+            area,
+            description.area
+        ));
+
+        store.borrow_mut().dispatch(AppEvent::SaveCompleted {
+            target: SaveTarget::task("task-1".to_string(), TaskField::Detail),
+            error: Some("offline".to_string()),
+        });
+        let mut failed_layout = LayoutCtx::new();
+        workspace.layout(area, &mut failed_layout);
+        assert!(focus.validate(failed_layout.focus_targets()).is_none());
+        assert!(rendered_text(&workspace, area).contains("Save failed for task-1"));
+        assert!(rendered_area_has_focus_style(
+            &workspace,
+            area,
+            description.area
+        ));
+
+        let after_failure = dispatcher.dispatch_event(
+            &mut workspace,
+            &EventRoute::new(focus.current_path()),
+            &TuiEvent::Key(Key::Char('y').into()),
+            AnimationSettings::default(),
+        );
+        assert_eq!(after_failure.outcome, EventOutcome::Handled);
+
+        store.borrow_mut().dispatch(AppEvent::SaveCompleted {
+            target: SaveTarget::task("task-1".to_string(), TaskField::Detail),
+            error: None,
+        });
+        let mut recovered_layout = LayoutCtx::new();
+        workspace.layout(area, &mut recovered_layout);
+        assert!(focus.validate(recovered_layout.focus_targets()).is_none());
+        assert!(rendered_text(&workspace, area).contains(SAVED_STATUS));
+        assert!(rendered_area_has_focus_style(
+            &workspace,
+            area,
+            description.area
+        ));
+
+        let tab = dispatcher.dispatch_event(
+            &mut workspace,
+            &EventRoute::new(focus.current_path()),
+            &TuiEvent::Key(Key::Tab.into()),
+            AnimationSettings::default(),
+        );
+        let transition = focus
+            .apply_request(
+                tab.focus_request.as_ref().unwrap_or(&FocusRequest::Next),
+                recovered_layout.focus_targets(),
+            )
+            .expect("tab should move focus");
+        dispatcher.dispatch_focus(&mut workspace, transition, AnimationSettings::default());
+        let back_tab = dispatcher.dispatch_event(
+            &mut workspace,
+            &EventRoute::new(focus.current_path()),
+            &TuiEvent::Key(Key::BackTab.into()),
+            AnimationSettings::default(),
+        );
+        let transition = focus
+            .apply_request(
+                back_tab
+                    .focus_request
+                    .as_ref()
+                    .unwrap_or(&FocusRequest::Previous),
+                recovered_layout.focus_targets(),
+            )
+            .expect("shift-tab should restore description focus");
+        dispatcher.dispatch_focus(&mut workspace, transition, AnimationSettings::default());
+        assert_eq!(
+            focus
+                .current()
+                .expect("focus should remain set")
+                .id
+                .as_str(),
+            "textarea"
+        );
+        for key in [Key::Enter, Key::Char('z')] {
+            assert_eq!(
+                dispatcher
+                    .dispatch_event(
+                        &mut workspace,
+                        &EventRoute::new(focus.current_path()),
+                        &TuiEvent::Key(key.into()),
+                        AnimationSettings::default(),
+                    )
+                    .outcome,
+                EventOutcome::Handled
+            );
+        }
+    }
+
+    #[test]
+    fn task_dropdown_save_completion_tabs_to_next_control_without_reset() {
+        let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+            tasks: vec![test_task()],
+            people: Vec::new(),
+            projects: Vec::new(),
+        });
+        let mut workspace = TaskWorkspace::new(context);
+        let area = Rect::new(0, 0, 120, 40);
+        let mut layout = LayoutCtx::new();
+        workspace.layout(area, &mut layout);
+        let task_type = layout
+            .focus_targets()
+            .iter()
+            .find(|target| {
+                target.id.as_str() == "field"
+                    && target.path.keys().iter().any(|key| key.as_str() == "type")
+            })
+            .expect("task type should be focusable")
+            .clone();
+        let mut focus = FocusManager::new();
+        let mut dispatcher = TreeDispatcher::new();
+        let transition = focus
+            .apply_request(
+                &FocusRequest::TargetAt {
+                    path: task_type.path.clone(),
+                    id: task_type.id.clone(),
+                },
+                layout.focus_targets(),
+            )
+            .expect("type focus should change");
+        dispatcher.dispatch_focus(&mut workspace, transition, AnimationSettings::default());
+        workspace
+            .split
+            .second_mut()
+            .patches
+            .borrow_mut()
+            .push(TaskPatch::Type(TaskType::Note));
+        assert!(workspace.sync_detail_changes());
+        assert_eq!(store.borrow().state().tasks[0].task_type, TaskType::Note);
+
+        store.borrow_mut().dispatch(AppEvent::SaveCompleted {
+            target: SaveTarget::task("task-1".to_string(), TaskField::Type),
+            error: Some("offline".to_string()),
+        });
+        let mut post_save_layout = LayoutCtx::new();
+        workspace.layout(area, &mut post_save_layout);
+        assert!(focus.validate(post_save_layout.focus_targets()).is_none());
+
+        let tab = dispatcher.dispatch_event(
+            &mut workspace,
+            &EventRoute::new(focus.current_path()),
+            &TuiEvent::Key(Key::Tab.into()),
+            AnimationSettings::default(),
+        );
+        let transition = focus
+            .apply_request(
+                tab.focus_request.as_ref().unwrap_or(&FocusRequest::Next),
+                post_save_layout.focus_targets(),
+            )
+            .expect("tab should move to subtype");
+        dispatcher.dispatch_focus(&mut workspace, transition, AnimationSettings::default());
+        assert!(
+            focus
+                .current()
+                .expect("next control should be focused")
+                .path
+                .keys()
+                .iter()
+                .any(|key| key.as_str() == "subtype")
+        );
+        assert_eq!(store.borrow().state().tasks[0].task_type, TaskType::Note);
+    }
+
+    #[test]
+    fn people_save_status_reconciliation_keeps_pending_detail_changes() {
+        let person = Person {
+            id: "person-1".to_string(),
+            name: "Ada".to_string(),
+            email: "ada@example.com".to_string(),
+            active: true,
+        };
+        let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+            tasks: Vec::new(),
+            people: vec![person],
+            projects: Vec::new(),
+        });
+        let mut workspace = PeopleWorkspace::new(context);
+        workspace
+            .split
+            .second_mut()
+            .patches
+            .borrow_mut()
+            .push(PersonPatch::Name("Ada Lovelace".to_string()));
+
+        store.borrow_mut().dispatch(AppEvent::SaveCompleted {
+            target: SaveTarget::person("person-1".to_string(), PersonField::Email),
+            error: Some("offline".to_string()),
+        });
+        workspace.layout(Rect::new(0, 0, 100, 30), &mut LayoutCtx::new());
+
+        let patches = workspace.split.second_mut().take_patches();
+        let [(person_id, PersonPatch::Name(name))] = patches.as_slice() else {
+            panic!("expected pending person name patch, got {patches:?}");
+        };
+        assert_eq!(person_id, "person-1");
+        assert_eq!(name, "Ada Lovelace");
+        assert!(rendered_text(&workspace, Rect::new(0, 0, 100, 30)).contains("Save failed"));
+    }
 }

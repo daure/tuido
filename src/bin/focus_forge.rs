@@ -41,7 +41,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             Msg::OpenDialog(title) => {
                 root.layer_mut().dialog_mut().set_top_left(title);
                 root.set_backdrop(DialogBackdrop::dim().amount(0.5));
-                root.set_active_with_dialog_focus(true, ctx);
+                root.set_active_with_context(true, ctx);
             }
             Msg::CloseDialog(reason) => {
                 let _ = reason;

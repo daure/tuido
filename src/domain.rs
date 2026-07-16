@@ -193,19 +193,24 @@ pub fn reduce_app_state(state: &mut AppState, event: AppEvent) -> DispatchOutcom
             DispatchOutcome::layout()
         }
         AppEvent::SaveCompleted { target, error } => {
-            if let Some(error) = error {
-                state.save_errors.insert(
-                    target.clone(),
-                    format!(
-                        "Save failed for {} {:?}: {error}",
-                        target.entity_id, target.field
-                    ),
+            let changed = if let Some(error) = error {
+                let message = format!(
+                    "Save failed for {} {:?}: {error}",
+                    target.entity_id, target.field
                 );
+                state.save_errors.get(&target) != Some(&message) && {
+                    state.save_errors.insert(target, message);
+                    true
+                }
             } else {
-                state.save_errors.remove(&target);
+                state.save_errors.remove(&target).is_some()
+            };
+            if changed {
+                state.version += 1;
+                DispatchOutcome::changed()
+            } else {
+                DispatchOutcome::unchanged()
             }
-            state.version += 1;
-            DispatchOutcome::changed()
         }
     }
 }
@@ -649,5 +654,55 @@ mod tests {
         );
 
         assert_eq!(state.task_save_error("T-1"), None);
+    }
+
+    #[test]
+    fn save_completion_changes_version_only_when_visible_status_changes() {
+        let mut state = AppState::from_snapshot(WorkspaceSnapshot {
+            tasks: Vec::new(),
+            people: Vec::new(),
+            projects: Vec::new(),
+        });
+        let target = SaveTarget::task("T-1".to_string(), TaskField::Detail);
+
+        let success = reduce_app_state(
+            &mut state,
+            AppEvent::SaveCompleted {
+                target: target.clone(),
+                error: None,
+            },
+        );
+        assert!(!success.changed);
+        assert_eq!(state.version, 0);
+
+        let failure = reduce_app_state(
+            &mut state,
+            AppEvent::SaveCompleted {
+                target: target.clone(),
+                error: Some("disk full".to_string()),
+            },
+        );
+        assert!(failure.changed);
+        assert_eq!(state.version, 1);
+
+        let repeated_failure = reduce_app_state(
+            &mut state,
+            AppEvent::SaveCompleted {
+                target: target.clone(),
+                error: Some("disk full".to_string()),
+            },
+        );
+        assert!(!repeated_failure.changed);
+        assert_eq!(state.version, 1);
+
+        let recovered = reduce_app_state(
+            &mut state,
+            AppEvent::SaveCompleted {
+                target,
+                error: None,
+            },
+        );
+        assert!(recovered.changed);
+        assert_eq!(state.version, 2);
     }
 }
