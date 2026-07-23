@@ -7,6 +7,7 @@ pub struct WorkspaceSnapshot {
     pub tasks: Vec<Task>,
     pub people: Vec<Person>,
     pub projects: Vec<Project>,
+    pub tags: Vec<Tag>,
 }
 
 #[derive(Debug, Clone)]
@@ -14,9 +15,11 @@ pub struct AppState {
     pub tasks: Vec<Task>,
     pub people: Vec<Person>,
     pub projects: Vec<Project>,
+    pub tags: Vec<Tag>,
     pub selected_task_id: Option<String>,
     pub selected_person_id: Option<String>,
     pub selected_project_id: Option<String>,
+    pub selected_tag_id: Option<String>,
     pub save_errors: HashMap<SaveTarget, String>,
     pub version: u64,
 }
@@ -27,9 +30,11 @@ impl AppState {
             selected_task_id: snapshot.tasks.first().map(|task| task.id.clone()),
             selected_person_id: snapshot.people.first().map(|person| person.id.clone()),
             selected_project_id: snapshot.projects.first().map(|project| project.id.clone()),
+            selected_tag_id: snapshot.tags.first().map(|tag| tag.id.clone()),
             tasks: snapshot.tasks,
             people: snapshot.people,
             projects: snapshot.projects,
+            tags: snapshot.tags,
             save_errors: HashMap::new(),
             version: 0,
         }
@@ -51,6 +56,10 @@ impl AppState {
         })
     }
 
+    pub fn tag_save_error(&self, tag_id: &str) -> Option<&str> {
+        self.save_error_for(tag_id, |field| matches!(field, SaveEntityField::Tag(_)))
+    }
+
     fn save_error_for(
         &self,
         entity_id: &str,
@@ -65,6 +74,7 @@ impl AppState {
 #[derive(Debug, Clone)]
 pub enum AppEvent {
     TaskCreated(Task),
+    TaskDeleted(String),
     SelectTask(String),
     PatchTask {
         task_id: String,
@@ -80,6 +90,11 @@ pub enum AppEvent {
         project_id: String,
         patch: ProjectPatch,
     },
+    SelectTag(String),
+    PatchTag {
+        tag_id: String,
+        patch: TagPatch,
+    },
     SaveCompleted {
         target: SaveTarget,
         error: Option<String>,
@@ -91,6 +106,7 @@ pub enum SaveEntityField {
     Task(TaskField),
     Person(PersonField),
     Project(ProjectField),
+    Tag(TagField),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -120,6 +136,13 @@ impl SaveTarget {
             field: SaveEntityField::Project(field),
         }
     }
+
+    pub fn tag(entity_id: String, field: TagField) -> Self {
+        Self {
+            entity_id,
+            field: SaveEntityField::Tag(field),
+        }
+    }
 }
 
 pub fn reduce_app_state(state: &mut AppState, event: AppEvent) -> DispatchOutcome {
@@ -127,6 +150,24 @@ pub fn reduce_app_state(state: &mut AppState, event: AppEvent) -> DispatchOutcom
         AppEvent::TaskCreated(task) => {
             state.selected_task_id = Some(task.id.clone());
             state.tasks.push(task);
+            state.version += 1;
+            DispatchOutcome::layout()
+        }
+        AppEvent::TaskDeleted(task_id) => {
+            let Some(index) = state.tasks.iter().position(|task| task.id == task_id) else {
+                return DispatchOutcome::unchanged();
+            };
+            state.tasks.remove(index);
+            state
+                .save_errors
+                .retain(|target, _| target.entity_id != task_id);
+            if state.selected_task_id.as_deref() == Some(&task_id) {
+                state.selected_task_id = state
+                    .tasks
+                    .get(index)
+                    .or_else(|| state.tasks.last())
+                    .map(|task| task.id.clone());
+            }
             state.version += 1;
             DispatchOutcome::layout()
         }
@@ -142,12 +183,7 @@ pub fn reduce_app_state(state: &mut AppState, event: AppEvent) -> DispatchOutcom
             let Some(index) = state.tasks.iter().position(|task| task.id == task_id) else {
                 return DispatchOutcome::unchanged();
             };
-            if !apply_task_patch(
-                &mut state.tasks[index],
-                &state.people,
-                &state.projects,
-                &patch,
-            ) {
+            if !apply_task_patch(&mut state.tasks[index], &mut state.tags, &patch) {
                 return DispatchOutcome::unchanged();
             }
             state.version += 1;
@@ -172,7 +208,6 @@ pub fn reduce_app_state(state: &mut AppState, event: AppEvent) -> DispatchOutcom
             if !apply_person_patch(&mut state.people[index], &patch) {
                 return DispatchOutcome::unchanged();
             }
-            refresh_task_context_labels(&mut state.tasks, &state.people, &state.projects);
             state.version += 1;
             DispatchOutcome::layout()
         }
@@ -195,7 +230,24 @@ pub fn reduce_app_state(state: &mut AppState, event: AppEvent) -> DispatchOutcom
             if !apply_project_patch(&mut state.projects[index], &patch) {
                 return DispatchOutcome::unchanged();
             }
-            refresh_task_context_labels(&mut state.tasks, &state.people, &state.projects);
+            state.version += 1;
+            DispatchOutcome::layout()
+        }
+        AppEvent::SelectTag(tag_id) => {
+            if state.selected_tag_id.as_deref() == Some(&tag_id) {
+                DispatchOutcome::unchanged()
+            } else {
+                state.selected_tag_id = Some(tag_id);
+                DispatchOutcome::layout()
+            }
+        }
+        AppEvent::PatchTag { tag_id, patch } => {
+            let Some(index) = state.tags.iter().position(|tag| tag.id == tag_id) else {
+                return DispatchOutcome::unchanged();
+            };
+            if !apply_tag_patch(&mut state.tags[index], &patch) {
+                return DispatchOutcome::unchanged();
+            }
             state.version += 1;
             DispatchOutcome::layout()
         }
@@ -226,41 +278,31 @@ pub fn reduce_app_state(state: &mut AppState, event: AppEvent) -> DispatchOutcom
 pub struct Task {
     pub id: String,
     pub title: String,
-    pub task_type: TaskType,
-    pub subtype: TaskSubtype,
     pub state: TaskState,
     pub size: TaskSize,
+    pub priority: TaskPriority,
     pub start_date: Option<String>,
     pub due_date: Option<String>,
     pub people_ids: Vec<String>,
     pub project_ids: Vec<String>,
-    pub entity_labels: Vec<String>,
-    pub focus_today: bool,
-    pub frog_candidate: bool,
+    pub tag_ids: Vec<String>,
     pub detail: String,
-    pub ai_rationale: String,
-    pub swap_note: String,
 }
 
 impl Task {
-    pub fn quick_capture(id: String, title: String) -> Self {
+    pub fn quick_capture(id: String, title: String, detail: String, size: TaskSize) -> Self {
         Self {
             id,
             title: title.trim().to_string(),
-            task_type: TaskType::Action,
-            subtype: TaskSubtype::Task,
             state: TaskState::Todo,
-            size: TaskSize::Small,
+            size,
+            priority: TaskPriority::Medium,
             start_date: None,
             due_date: None,
             people_ids: Vec::new(),
             project_ids: Vec::new(),
-            entity_labels: Vec::new(),
-            focus_today: false,
-            frog_candidate: false,
-            detail: String::new(),
-            ai_rationale: String::new(),
-            swap_note: String::new(),
+            tag_ids: Vec::new(),
+            detail,
         }
     }
 }
@@ -282,18 +324,24 @@ pub struct Project {
     pub lead_person_id: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tag {
+    pub id: String,
+    pub label: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TaskField {
     Title,
     Detail,
-    Type,
-    Subtype,
     State,
     Size,
+    Priority,
     StartDate,
     EndDate,
     People,
     Projects,
+    Tags,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -311,18 +359,23 @@ pub enum ProjectField {
     LeadPerson,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TagField {
+    Label,
+}
+
 #[derive(Debug, Clone)]
 pub enum TaskPatch {
     Title(String),
     Detail(String),
-    Type(TaskType),
-    Subtype(TaskSubtype),
     State(TaskState),
     Size(TaskSize),
+    Priority(TaskPriority),
     StartDate(Option<String>),
     EndDate(Option<String>),
     People(Vec<String>),
     Projects(Vec<String>),
+    Tags(Vec<Tag>),
 }
 
 impl TaskPatch {
@@ -330,14 +383,14 @@ impl TaskPatch {
         match self {
             Self::Title(_) => TaskField::Title,
             Self::Detail(_) => TaskField::Detail,
-            Self::Type(_) => TaskField::Type,
-            Self::Subtype(_) => TaskField::Subtype,
             Self::State(_) => TaskField::State,
             Self::Size(_) => TaskField::Size,
+            Self::Priority(_) => TaskField::Priority,
             Self::StartDate(_) => TaskField::StartDate,
             Self::EndDate(_) => TaskField::EndDate,
             Self::People(_) => TaskField::People,
             Self::Projects(_) => TaskField::Projects,
+            Self::Tags(_) => TaskField::Tags,
         }
     }
 }
@@ -367,6 +420,19 @@ pub enum ProjectPatch {
     LeadPerson(Option<String>),
 }
 
+#[derive(Debug, Clone)]
+pub enum TagPatch {
+    Label(String),
+}
+
+impl TagPatch {
+    pub fn field(&self) -> TagField {
+        match self {
+            Self::Label(_) => TagField::Label,
+        }
+    }
+}
+
 impl ProjectPatch {
     pub fn field(&self) -> ProjectField {
         match self {
@@ -379,72 +445,12 @@ impl ProjectPatch {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TaskType {
-    Action,
-    Note,
-}
-
-impl TaskType {
-    pub fn id(self) -> &'static str {
-        match self {
-            Self::Action => "action",
-            Self::Note => "note",
-        }
-    }
-
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "action" => Some(Self::Action),
-            "note" => Some(Self::Note),
-            "waiting" | "follow_up" | "task" | "artifact_update" => Some(Self::Action),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TaskSubtype {
-    Task,
-    Waiting,
-    FollowUp,
-    ArtifactUpdate,
-}
-
-impl TaskSubtype {
-    pub fn id(self) -> &'static str {
-        match self {
-            Self::Task => "task",
-            Self::Waiting => "waiting",
-            Self::FollowUp => "follow_up",
-            Self::ArtifactUpdate => "artifact_update",
-        }
-    }
-
-    pub fn workflow_kind(self) -> &'static str {
-        match self {
-            Self::Waiting => "waiting",
-            Self::FollowUp => "follow_up",
-            Self::Task | Self::ArtifactUpdate => "action",
-        }
-    }
-
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "task" | "action" => Some(Self::Task),
-            "waiting" => Some(Self::Waiting),
-            "follow_up" => Some(Self::FollowUp),
-            "artifact_update" => Some(Self::ArtifactUpdate),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskState {
     Todo,
     InProgress,
     Done,
     Snoozed,
+    Rejected,
 }
 
 impl TaskState {
@@ -454,6 +460,7 @@ impl TaskState {
             Self::InProgress => "in_progress",
             Self::Done => "done",
             Self::Snoozed => "snoozed",
+            Self::Rejected => "rejected",
         }
     }
 
@@ -463,14 +470,7 @@ impl TaskState {
             Self::InProgress => "IN-PROGRESS",
             Self::Done => "DONE",
             Self::Snoozed => "SNOOZED",
-        }
-    }
-
-    pub fn role(self) -> ChipColorRole {
-        match self {
-            Self::Todo => ChipColorRole::Accent,
-            Self::InProgress | Self::Done => ChipColorRole::Success,
-            Self::Snoozed => ChipColorRole::Muted,
+            Self::Rejected => "REJECTED",
         }
     }
 
@@ -480,6 +480,7 @@ impl TaskState {
             "in_progress" | "doing" => Some(Self::InProgress),
             "done" => Some(Self::Done),
             "snoozed" => Some(Self::Snoozed),
+            "rejected" => Some(Self::Rejected),
             _ => None,
         }
     }
@@ -527,12 +528,41 @@ impl TaskSize {
     }
 }
 
-fn apply_task_patch(
-    task: &mut Task,
-    people: &[Person],
-    projects: &[Project],
-    patch: &TaskPatch,
-) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskPriority {
+    Low,
+    Medium,
+    High,
+}
+
+impl TaskPriority {
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Low => "Low",
+            Self::Medium => "Medium",
+            Self::High => "High",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            _ => None,
+        }
+    }
+}
+
+fn apply_task_patch(task: &mut Task, available_tags: &mut Vec<Tag>, patch: &TaskPatch) -> bool {
     match patch {
         TaskPatch::Title(title) if task.title != title.trim() && !title.trim().is_empty() => {
             task.title = title.trim().to_string();
@@ -542,20 +572,16 @@ fn apply_task_patch(
             task.detail = detail.clone();
             true
         }
-        TaskPatch::Type(value) if task.task_type != *value => {
-            task.task_type = *value;
-            true
-        }
-        TaskPatch::Subtype(value) if task.subtype != *value => {
-            task.subtype = *value;
-            true
-        }
         TaskPatch::State(value) if task.state != *value => {
             task.state = *value;
             true
         }
         TaskPatch::Size(value) if task.size != *value => {
             task.size = *value;
+            true
+        }
+        TaskPatch::Priority(value) if task.priority != *value => {
+            task.priority = *value;
             true
         }
         TaskPatch::StartDate(value) if task.start_date != *value => {
@@ -568,13 +594,43 @@ fn apply_task_patch(
         }
         TaskPatch::People(ids) if task.people_ids != *ids => {
             task.people_ids = ids.clone();
-            task.entity_labels = task_context_labels(task, people, projects);
             true
         }
         TaskPatch::Projects(ids) if task.project_ids != *ids => {
             task.project_ids = ids.clone();
-            task.entity_labels = task_context_labels(task, people, projects);
             true
+        }
+        TaskPatch::Tags(tags) => {
+            let mut next_tag_ids = Vec::new();
+            for tag in tags {
+                let label = tag.label.trim();
+                if label.is_empty() {
+                    continue;
+                }
+                let id = if let Some(existing) = available_tags
+                    .iter()
+                    .find(|existing| existing.label == label)
+                {
+                    existing.id.clone()
+                } else {
+                    let tag = Tag {
+                        id: tag.id.clone(),
+                        label: label.to_string(),
+                    };
+                    let id = tag.id.clone();
+                    available_tags.push(tag);
+                    id
+                };
+                if !next_tag_ids.contains(&id) {
+                    next_tag_ids.push(id);
+                }
+            }
+            if task.tag_ids == next_tag_ids {
+                false
+            } else {
+                task.tag_ids = next_tag_ids;
+                true
+            }
         }
         _ => false,
     }
@@ -622,24 +678,14 @@ fn apply_project_patch(project: &mut Project, patch: &ProjectPatch) -> bool {
     }
 }
 
-fn refresh_task_context_labels(tasks: &mut [Task], people: &[Person], projects: &[Project]) {
-    for task in tasks {
-        task.entity_labels = task_context_labels(task, people, projects);
+fn apply_tag_patch(tag: &mut Tag, patch: &TagPatch) -> bool {
+    match patch {
+        TagPatch::Label(label) if tag.label != label.trim() && !label.trim().is_empty() => {
+            tag.label = label.trim().to_string();
+            true
+        }
+        _ => false,
     }
-}
-
-pub fn task_context_labels(task: &Task, people: &[Person], projects: &[Project]) -> Vec<String> {
-    task.people_ids
-        .iter()
-        .filter_map(|id| people.iter().find(|person| &person.id == id))
-        .map(|person| person.name.clone())
-        .chain(
-            task.project_ids
-                .iter()
-                .filter_map(|id| projects.iter().find(|project| &project.id == id))
-                .map(|project| project.name.clone()),
-        )
-        .collect()
 }
 
 #[cfg(test)]
@@ -652,6 +698,7 @@ mod tests {
             tasks: Vec::new(),
             people: Vec::new(),
             projects: Vec::new(),
+            tags: Vec::new(),
         });
 
         reduce_app_state(
@@ -692,6 +739,7 @@ mod tests {
             tasks: Vec::new(),
             people: Vec::new(),
             projects: Vec::new(),
+            tags: Vec::new(),
         });
         let target = SaveTarget::task("T-1".to_string(), TaskField::Detail);
 
@@ -734,5 +782,86 @@ mod tests {
         );
         assert!(recovered.changed);
         assert_eq!(state.version, 2);
+    }
+
+    #[test]
+    fn deleting_selected_task_selects_next_available_task() {
+        let first = Task::quick_capture(
+            "first".to_string(),
+            "First".to_string(),
+            String::new(),
+            TaskSize::Small,
+        );
+        let second = Task::quick_capture(
+            "second".to_string(),
+            "Second".to_string(),
+            String::new(),
+            TaskSize::Small,
+        );
+        let mut state = AppState::from_snapshot(WorkspaceSnapshot {
+            tasks: vec![first, second],
+            people: Vec::new(),
+            projects: Vec::new(),
+            tags: Vec::new(),
+        });
+
+        let outcome = reduce_app_state(&mut state, AppEvent::TaskDeleted("first".to_string()));
+
+        assert!(outcome.changed);
+        assert_eq!(state.tasks.len(), 1);
+        assert_eq!(state.selected_task_id.as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn newly_created_tags_become_available_to_other_tasks() {
+        let first = Task::quick_capture(
+            "first".to_string(),
+            "First".to_string(),
+            String::new(),
+            TaskSize::Small,
+        );
+        let second = Task::quick_capture(
+            "second".to_string(),
+            "Second".to_string(),
+            String::new(),
+            TaskSize::Small,
+        );
+        let mut state = AppState::from_snapshot(WorkspaceSnapshot {
+            tasks: vec![first, second],
+            people: Vec::new(),
+            projects: Vec::new(),
+            tags: Vec::new(),
+        });
+
+        reduce_app_state(
+            &mut state,
+            AppEvent::PatchTask {
+                task_id: "first".to_string(),
+                patch: TaskPatch::Tags(vec![Tag {
+                    id: "backend-id".to_string(),
+                    label: "backend".to_string(),
+                }]),
+            },
+        );
+        reduce_app_state(
+            &mut state,
+            AppEvent::PatchTask {
+                task_id: "second".to_string(),
+                patch: TaskPatch::Tags(vec![Tag {
+                    id: "duplicate-id".to_string(),
+                    label: "backend".to_string(),
+                }]),
+            },
+        );
+
+        assert_eq!(
+            state.tags,
+            vec![Tag {
+                id: "backend-id".to_string(),
+                label: "backend".to_string(),
+            }]
+        );
+        assert_eq!(state.tasks[0].tag_ids, vec!["backend-id"]);
+        assert_eq!(state.tasks[1].tag_ids, vec!["backend-id"]);
     }
 }

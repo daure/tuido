@@ -1,19 +1,14 @@
 CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY,
   title TEXT NOT NULL,
-  task_type TEXT NOT NULL CHECK (task_type IN ('action', 'note')),
-  subtype TEXT NOT NULL CHECK (subtype IN ('task', 'waiting', 'follow_up', 'artifact_update')),
   state TEXT NOT NULL CHECK (state IN ('clarify', 'next', 'doing', 'waiting', 'snoozed', 'done')),
-  task_kind TEXT NOT NULL DEFAULT 'action' CHECK (task_kind IN ('action', 'waiting', 'follow_up')),
   workflow_state TEXT NOT NULL DEFAULT 'todo' CHECK (workflow_state IN ('todo', 'in_progress', 'done', 'snoozed')),
+  rejected BOOLEAN NOT NULL DEFAULT FALSE,
   size TEXT NOT NULL CHECK (size IN ('small', 'medium', 'big')),
+  priority TEXT NOT NULL DEFAULT 'medium' CHECK (priority IN ('low', 'medium', 'high')),
   start_date TEXT,
   due_date TEXT,
-  focus_today BOOLEAN NOT NULL DEFAULT FALSE,
-  frog_candidate BOOLEAN NOT NULL DEFAULT FALSE,
   detail TEXT NOT NULL DEFAULT '',
-  ai_rationale TEXT NOT NULL DEFAULT '',
-  swap_note TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -55,19 +50,18 @@ CREATE TABLE IF NOT EXISTS task_projects (
 CREATE INDEX IF NOT EXISTS idx_task_projects_project_id
   ON task_projects(project_id);
 
-CREATE TABLE IF NOT EXISTS entities (
+CREATE TABLE IF NOT EXISTS tags (
   id TEXT PRIMARY KEY,
-  label TEXT NOT NULL,
-  entity_type TEXT NOT NULL DEFAULT 'other',
+  label TEXT NOT NULL UNIQUE,
   sort_order INTEGER NOT NULL DEFAULT 0
 );
 
-CREATE TABLE IF NOT EXISTS task_entities (
+CREATE TABLE IF NOT EXISTS task_tags (
   task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-  entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE RESTRICT,
+  tag_id TEXT NOT NULL REFERENCES tags(id) ON DELETE RESTRICT,
   sort_order INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY (task_id, entity_id)
+  PRIMARY KEY (task_id, tag_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_task_entities_entity_id
-  ON task_entities(entity_id);
+CREATE INDEX IF NOT EXISTS idx_task_tags_tag_id
+  ON task_tags(tag_id);

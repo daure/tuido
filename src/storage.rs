@@ -3,8 +3,8 @@ use std::{env, fs, path::PathBuf};
 use sqlx::{AnyPool, AssertSqlSafe, Row, any::AnyPoolOptions, migrate::Migrator};
 
 use crate::domain::{
-    Person, PersonPatch, Project, ProjectPatch, Task, TaskField, TaskPatch, TaskSize, TaskState,
-    TaskSubtype, TaskType, WorkspaceSnapshot, task_context_labels,
+    Person, PersonPatch, Project, ProjectPatch, Tag, TagPatch, Task, TaskField, TaskPatch,
+    TaskPriority, TaskSize, TaskState, WorkspaceSnapshot,
 };
 
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
@@ -84,7 +84,7 @@ pub async fn create_task(
     task: Task,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let query = format!(
-        "INSERT INTO tasks (id, title, task_type, subtype, state, task_kind, workflow_state, size, start_date, due_date, focus_today, frog_candidate, detail, ai_rationale, swap_note, created_at, updated_at) VALUES ({}, {}, {}, {}, 'next', {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
+        "INSERT INTO tasks (id, title, state, workflow_state, rejected, size, priority, start_date, due_date, detail, created_at, updated_at) VALUES ({}, {}, 'next', {}, {}, {}, {}, {}, {}, {}, {}, {})",
         dialect.placeholder(1),
         dialect.placeholder(2),
         dialect.placeholder(3),
@@ -95,31 +95,34 @@ pub async fn create_task(
         dialect.placeholder(8),
         dialect.placeholder(9),
         dialect.placeholder(10),
-        dialect.placeholder(11),
-        dialect.placeholder(12),
-        dialect.placeholder(13),
-        dialect.placeholder(14),
-        dialect.placeholder(15),
-        dialect.placeholder(16)
+        dialect.placeholder(11)
     );
     let now = now_text();
     sqlx::query(AssertSqlSafe(query.as_str()))
         .bind(task.id)
         .bind(task.title)
-        .bind(task.task_type.id())
-        .bind(task.subtype.id())
-        .bind(task.subtype.workflow_kind())
-        .bind(task.state.id())
+        .bind(storage_state_id(task.state))
+        .bind(task.state == TaskState::Rejected)
         .bind(task.size.id())
+        .bind(task.priority.id())
         .bind(task.start_date)
         .bind(task.due_date)
-        .bind(task.focus_today)
-        .bind(task.frog_candidate)
         .bind(task.detail)
-        .bind(task.ai_rationale)
-        .bind(task.swap_note)
         .bind(&now)
         .bind(&now)
+        .execute(&pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn delete_task(
+    pool: AnyPool,
+    dialect: SqlDialect,
+    task_id: String,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let query = format!("DELETE FROM tasks WHERE id = {}", dialect.placeholder(1));
+    sqlx::query(AssertSqlSafe(query.as_str()))
+        .bind(task_id)
         .execute(&pool)
         .await?;
     Ok(())
@@ -145,15 +148,12 @@ pub async fn save_patch(
         TaskPatch::Detail(value) => {
             update_task_text(pool, dialect, task_id, TaskField::Detail, value).await
         }
-        TaskPatch::Type(value) => {
-            update_task_scalar(pool, dialect, task_id, TaskField::Type, value.id()).await
-        }
-        TaskPatch::Subtype(value) => update_task_subtype(pool, dialect, task_id, value).await,
-        TaskPatch::State(value) => {
-            update_task_scalar(pool, dialect, task_id, TaskField::State, value.id()).await
-        }
+        TaskPatch::State(value) => update_task_state(pool, dialect, task_id, value).await,
         TaskPatch::Size(value) => {
             update_task_scalar(pool, dialect, task_id, TaskField::Size, value.id()).await
+        }
+        TaskPatch::Priority(value) => {
+            update_task_scalar(pool, dialect, task_id, TaskField::Priority, value.id()).await
         }
         TaskPatch::StartDate(value) => {
             update_task_optional_date(pool, dialect, task_id, TaskField::StartDate, value).await
@@ -163,6 +163,7 @@ pub async fn save_patch(
         }
         TaskPatch::People(value) => replace_task_people(pool, dialect, task_id, value).await,
         TaskPatch::Projects(value) => replace_task_projects(pool, dialect, task_id, value).await,
+        TaskPatch::Tags(value) => replace_task_tags(pool, dialect, task_id, value).await,
     }
 }
 
@@ -272,6 +273,29 @@ pub async fn save_project_patch(
     Ok(())
 }
 
+pub async fn save_tag_patch(
+    pool: AnyPool,
+    dialect: SqlDialect,
+    tag_id: String,
+    patch: TagPatch,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    match patch {
+        TagPatch::Label(value) => {
+            let query = format!(
+                "UPDATE tags SET label = {} WHERE id = {}",
+                dialect.placeholder(1),
+                dialect.placeholder(2)
+            );
+            sqlx::query(AssertSqlSafe(query.as_str()))
+                .bind(value.trim())
+                .bind(tag_id)
+                .execute(&pool)
+                .await?;
+        }
+    }
+    Ok(())
+}
+
 async fn update_task_scalar(
     pool: AnyPool,
     dialect: SqlDialect,
@@ -285,11 +309,11 @@ async fn update_task_scalar(
         | TaskField::StartDate
         | TaskField::EndDate
         | TaskField::People
-        | TaskField::Projects => return Ok(()),
-        TaskField::Type => "task_type",
-        TaskField::Subtype => "subtype",
-        TaskField::State => "workflow_state",
+        | TaskField::Projects
+        | TaskField::Tags => return Ok(()),
+        TaskField::State => return Ok(()),
         TaskField::Size => "size",
+        TaskField::Priority => "priority",
     };
     let query = update_task_column_sql(dialect, column);
     sqlx::query(AssertSqlSafe(query.as_str()))
@@ -301,27 +325,34 @@ async fn update_task_scalar(
     Ok(())
 }
 
-async fn update_task_subtype(
+async fn update_task_state(
     pool: AnyPool,
     dialect: SqlDialect,
     task_id: String,
-    value: TaskSubtype,
+    value: TaskState,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let query = format!(
-        "UPDATE tasks SET subtype = {}, task_kind = {}, updated_at = {} WHERE id = {}",
+        "UPDATE tasks SET workflow_state = {}, rejected = {}, updated_at = {} WHERE id = {}",
         dialect.placeholder(1),
         dialect.placeholder(2),
         dialect.placeholder(3),
         dialect.placeholder(4)
     );
     sqlx::query(AssertSqlSafe(query.as_str()))
-        .bind(value.id())
-        .bind(value.workflow_kind())
+        .bind(storage_state_id(value))
+        .bind(value == TaskState::Rejected)
         .bind(now_text())
         .bind(task_id)
         .execute(&pool)
         .await?;
     Ok(())
+}
+
+fn storage_state_id(value: TaskState) -> &'static str {
+    match value {
+        TaskState::Rejected => TaskState::Snoozed.id(),
+        _ => value.id(),
+    }
 }
 
 async fn update_task_text(
@@ -448,6 +479,74 @@ async fn replace_task_projects(
     Ok(())
 }
 
+async fn replace_task_tags(
+    pool: AnyPool,
+    dialect: SqlDialect,
+    task_id: String,
+    tags: Vec<Tag>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let select_query = format!(
+        "SELECT id FROM tags WHERE label = {}",
+        dialect.placeholder(1)
+    );
+    let insert_tag_query = format!(
+        "INSERT INTO tags (id, label, sort_order) VALUES ({}, {}, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM tags)) ON CONFLICT(label) DO NOTHING",
+        dialect.placeholder(1),
+        dialect.placeholder(2)
+    );
+    let delete_query = format!(
+        "DELETE FROM task_tags WHERE task_id = {}",
+        dialect.placeholder(1)
+    );
+    let insert_link_query = format!(
+        "INSERT INTO task_tags (task_id, tag_id, sort_order) VALUES ({}, {}, {})",
+        dialect.placeholder(1),
+        dialect.placeholder(2),
+        dialect.placeholder(3)
+    );
+    let touch_query = update_task_timestamp_sql(dialect);
+    let mut tx = pool.begin().await?;
+    let mut tag_ids = Vec::new();
+    for tag in tags {
+        let label = tag.label.trim();
+        if label.is_empty() {
+            continue;
+        }
+        sqlx::query(AssertSqlSafe(insert_tag_query.as_str()))
+            .bind(&tag.id)
+            .bind(label)
+            .execute(&mut *tx)
+            .await?;
+        let row = sqlx::query(AssertSqlSafe(select_query.as_str()))
+            .bind(label)
+            .fetch_one(&mut *tx)
+            .await?;
+        let id: String = row.try_get("id")?;
+        if !tag_ids.contains(&id) {
+            tag_ids.push(id);
+        }
+    }
+    sqlx::query(AssertSqlSafe(delete_query.as_str()))
+        .bind(&task_id)
+        .execute(&mut *tx)
+        .await?;
+    for (index, tag_id) in tag_ids.iter().enumerate() {
+        sqlx::query(AssertSqlSafe(insert_link_query.as_str()))
+            .bind(&task_id)
+            .bind(tag_id)
+            .bind(index as i64)
+            .execute(&mut *tx)
+            .await?;
+    }
+    sqlx::query(AssertSqlSafe(touch_query.as_str()))
+        .bind(now_text())
+        .bind(task_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
 async fn validate_existing_ids(
     pool: &AnyPool,
     dialect: SqlDialect,
@@ -494,9 +593,10 @@ async fn load_workspace(
 ) -> Result<WorkspaceSnapshot, Box<dyn std::error::Error>> {
     let people = load_people(pool).await?;
     let projects = load_projects(pool).await?;
+    let tags = load_tags(pool).await?;
     let mut tasks = Vec::new();
     let rows = sqlx::query(
-        "SELECT id, title, task_type, subtype, workflow_state, size, start_date, due_date, CAST(CASE WHEN focus_today THEN 1 ELSE 0 END AS BIGINT) AS focus_today, CAST(CASE WHEN frog_candidate THEN 1 ELSE 0 END AS BIGINT) AS frog_candidate, detail, ai_rationale, swap_note FROM tasks ORDER BY id",
+        "SELECT id, title, workflow_state, CAST(CASE WHEN rejected THEN 1 ELSE 0 END AS BIGINT) AS rejected, size, priority, start_date, due_date, detail FROM tasks ORDER BY id",
     )
     .fetch_all(pool)
     .await?;
@@ -505,28 +605,25 @@ async fn load_workspace(
         let id: String = row.try_get("id")?;
         let people_ids = load_task_people(pool, dialect, &id).await?;
         let project_ids = load_task_projects(pool, dialect, &id).await?;
-        let generic_entity_labels = load_task_generic_entity_labels(pool, dialect, &id).await?;
+        let tag_ids = load_task_tags(pool, dialect, &id).await?;
 
-        let mut task = Task {
+        let task = Task {
             id,
             title: row.try_get("title")?,
-            task_type: parse_task_type(row.try_get::<String, _>("task_type")?)?,
-            subtype: parse_subtype(row.try_get::<String, _>("subtype")?)?,
-            state: parse_state(row.try_get::<String, _>("workflow_state")?)?,
+            state: if row.try_get::<i64, _>("rejected")? != 0 {
+                TaskState::Rejected
+            } else {
+                parse_state(row.try_get::<String, _>("workflow_state")?)?
+            },
             size: parse_size(row.try_get::<String, _>("size")?)?,
+            priority: parse_priority(row.try_get::<String, _>("priority")?)?,
             start_date: row.try_get("start_date")?,
             due_date: row.try_get("due_date")?,
             people_ids,
             project_ids,
-            entity_labels: Vec::new(),
-            focus_today: row.try_get::<i64, _>("focus_today")? != 0,
-            frog_candidate: row.try_get::<i64, _>("frog_candidate")? != 0,
+            tag_ids,
             detail: row.try_get("detail")?,
-            ai_rationale: row.try_get("ai_rationale")?,
-            swap_note: row.try_get("swap_note")?,
         };
-        task.entity_labels = task_context_labels(&task, &people, &projects);
-        task.entity_labels.extend(generic_entity_labels);
         tasks.push(task);
     }
 
@@ -534,6 +631,7 @@ async fn load_workspace(
         tasks,
         people,
         projects,
+        tags,
     })
 }
 
@@ -610,13 +708,27 @@ async fn load_task_projects(
         .collect()
 }
 
-async fn load_task_generic_entity_labels(
+async fn load_tags(pool: &AnyPool) -> Result<Vec<Tag>, Box<dyn std::error::Error>> {
+    let rows = sqlx::query("SELECT id, label FROM tags ORDER BY sort_order, label")
+        .fetch_all(pool)
+        .await?;
+    rows.into_iter()
+        .map(|row| {
+            Ok(Tag {
+                id: row.try_get("id")?,
+                label: row.try_get("label")?,
+            })
+        })
+        .collect()
+}
+
+async fn load_task_tags(
     pool: &AnyPool,
     dialect: SqlDialect,
     task_id: &str,
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let query = format!(
-        "SELECT e.label FROM task_entities te INNER JOIN entities e ON e.id = te.entity_id WHERE te.task_id = {} AND e.entity_type NOT IN ('person', 'project') ORDER BY te.sort_order, e.label",
+        "SELECT tag_id FROM task_tags WHERE task_id = {} ORDER BY sort_order, tag_id",
         dialect.placeholder(1)
     );
     let rows = sqlx::query(AssertSqlSafe(query.as_str()))
@@ -624,7 +736,7 @@ async fn load_task_generic_entity_labels(
         .fetch_all(pool)
         .await?;
     rows.into_iter()
-        .map(|row| Ok(row.try_get("label")?))
+        .map(|row| Ok(row.try_get("tag_id")?))
         .collect()
 }
 
@@ -722,7 +834,7 @@ async fn seed_tasks(pool: &AnyPool, dialect: SqlDialect) -> Result<(), Box<dyn s
     let now = now_text();
     let tasks = seed_task_rows();
     let task_query = format!(
-        "INSERT INTO tasks (id, title, task_type, subtype, state, task_kind, workflow_state, size, start_date, due_date, focus_today, frog_candidate, detail, ai_rationale, swap_note, created_at, updated_at) VALUES ({}, {}, {}, {}, 'next', {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
+        "INSERT INTO tasks (id, title, state, workflow_state, rejected, size, priority, start_date, due_date, detail, created_at, updated_at) VALUES ({}, {}, 'next', {}, {}, {}, {}, {}, {}, {}, {}, {})",
         dialect.placeholder(1),
         dialect.placeholder(2),
         dialect.placeholder(3),
@@ -733,12 +845,7 @@ async fn seed_tasks(pool: &AnyPool, dialect: SqlDialect) -> Result<(), Box<dyn s
         dialect.placeholder(8),
         dialect.placeholder(9),
         dialect.placeholder(10),
-        dialect.placeholder(11),
-        dialect.placeholder(12),
-        dialect.placeholder(13),
-        dialect.placeholder(14),
-        dialect.placeholder(15),
-        dialect.placeholder(16)
+        dialect.placeholder(11)
     );
     let task_people_query = format!(
         "INSERT INTO task_people (task_id, person_id, sort_order) VALUES ({}, {}, {})",
@@ -756,18 +863,13 @@ async fn seed_tasks(pool: &AnyPool, dialect: SqlDialect) -> Result<(), Box<dyn s
         sqlx::query(AssertSqlSafe(task_query.as_str()))
             .bind(task.id)
             .bind(task.title)
-            .bind(task.task_type)
-            .bind(task.subtype)
-            .bind(seed_workflow_kind(task.subtype))
             .bind(task.state)
+            .bind(false)
             .bind(task.size)
+            .bind(task.priority)
             .bind(task.start_date)
             .bind(task.due_date)
-            .bind(task.focus_today)
-            .bind(task.frog_candidate)
             .bind(task.detail)
-            .bind(task.ai_rationale)
-            .bind(task.swap_note)
             .bind(&now)
             .bind(&now)
             .execute(pool)
@@ -815,20 +917,16 @@ fn default_sqlite_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
         .join("tuido.sqlite"))
 }
 
-fn parse_task_type(value: String) -> Result<TaskType, Box<dyn std::error::Error>> {
-    TaskType::parse(&value).ok_or_else(|| format!("unknown task type: {value}").into())
-}
-
-fn parse_subtype(value: String) -> Result<TaskSubtype, Box<dyn std::error::Error>> {
-    TaskSubtype::parse(&value).ok_or_else(|| format!("unknown task subtype: {value}").into())
-}
-
 fn parse_state(value: String) -> Result<TaskState, Box<dyn std::error::Error>> {
     TaskState::parse(&value).ok_or_else(|| format!("unknown task state: {value}").into())
 }
 
 fn parse_size(value: String) -> Result<TaskSize, Box<dyn std::error::Error>> {
     TaskSize::parse(&value).ok_or_else(|| format!("unknown task size: {value}").into())
+}
+
+fn parse_priority(value: String) -> Result<TaskPriority, Box<dyn std::error::Error>> {
+    TaskPriority::parse(&value).ok_or_else(|| format!("unknown task priority: {value}").into())
 }
 
 fn now_text() -> String {
@@ -838,30 +936,17 @@ fn now_text() -> String {
     now.as_secs().to_string()
 }
 
-fn seed_workflow_kind(subtype: &str) -> &'static str {
-    match subtype {
-        "waiting" => "waiting",
-        "follow_up" => "follow_up",
-        _ => "action",
-    }
-}
-
 struct SeedTask<'a> {
     id: &'a str,
     title: &'a str,
-    task_type: &'a str,
-    subtype: &'a str,
     state: &'a str,
     size: &'a str,
+    priority: &'a str,
     start_date: Option<&'a str>,
     due_date: Option<&'a str>,
     person_ids: &'a [&'a str],
     project_ids: &'a [&'a str],
-    focus_today: bool,
-    frog_candidate: bool,
     detail: &'a str,
-    ai_rationale: &'a str,
-    swap_note: &'a str,
 }
 
 fn seed_task_rows() -> Vec<SeedTask<'static>> {
@@ -869,87 +954,38 @@ fn seed_task_rows() -> Vec<SeedTask<'static>> {
         SeedTask {
             id: "T-101",
             title: "Email Carter for contract redlines",
-            task_type: "action",
-            subtype: "follow_up",
             state: "todo",
             size: "small",
-            start_date: Some("today"),
-            due_date: Some("Fri"),
+            priority: "high",
+            start_date: None,
+            due_date: None,
             person_ids: &["carter"],
             project_ids: &["renewal"],
-            focus_today: true,
-            frog_candidate: false,
             detail: "Clarified from a messy Sales note. Needs one concise email asking Carter for redline status and blockers.",
-            ai_rationale: "Due date plus named person makes this a concrete follow-up, not a reference note.",
-            swap_note: "Small enough to add without removing a big item.",
         },
         SeedTask {
             id: "T-102",
             title: "Draft launch cutover checklist",
-            task_type: "action",
-            subtype: "task",
             state: "in_progress",
             size: "big",
-            start_date: Some("today"),
-            due_date: Some("Tue"),
+            priority: "high",
+            start_date: None,
+            due_date: None,
             person_ids: &["alice"],
             project_ids: &["launch"],
-            focus_today: true,
-            frog_candidate: true,
             detail: "Create the first useful checklist pass. Include owners, rollback trigger, comms, and validation steps.",
-            ai_rationale: "Large, time-relevant artifact: good frog candidate if uninterrupted time exists.",
-            swap_note: "If urgent work enters, move a medium item out rather than silently overloading today.",
         },
         SeedTask {
             id: "T-103",
             title: "Wait for owner on pricing question",
-            task_type: "action",
-            subtype: "waiting",
             state: "todo",
             size: "small",
-            start_date: Some("today"),
-            due_date: None,
-            person_ids: &[],
-            project_ids: &[],
-            focus_today: false,
-            frog_candidate: false,
-            detail: "Track dependency without letting it pollute active doing. Follow up only if no owner appears by tomorrow.",
-            ai_rationale: "Waiting is still actionable context, but not a separate top-level item type.",
-            swap_note: "Can be snoozed until follow-up date once clarified.",
-        },
-        SeedTask {
-            id: "T-104",
-            title: "Clarify voicemail about audit evidence",
-            task_type: "action",
-            subtype: "task",
-            state: "todo",
-            size: "medium",
+            priority: "low",
             start_date: None,
-            due_date: Some("next week"),
-            person_ids: &[],
-            project_ids: &["audit"],
-            focus_today: false,
-            frog_candidate: false,
-            detail: "Raw voicemail mentions evidence but lacks owner. Needs user review before board pull or snooze.",
-            ai_rationale: "Insufficient trust: it has action shape, but missing context prevents silent organization.",
-            swap_note: "Do not pull until clarified.",
-        },
-        SeedTask {
-            id: "T-105",
-            title: "Review returned docs reminder",
-            task_type: "action",
-            subtype: "task",
-            state: "snoozed",
-            size: "medium",
-            start_date: Some("tomorrow"),
             due_date: None,
             person_ids: &[],
             project_ids: &[],
-            focus_today: false,
-            frog_candidate: false,
-            detail: "Returned-from-snooze marker should appear before user decides whether this is action or reference.",
-            ai_rationale: "Snoozed clarified items return to the clarified list, not straight to the board.",
-            swap_note: "Hidden work stays safe without cluttering today's focus.",
+            detail: "Track dependency without letting it pollute active doing. Follow up only if no owner appears by tomorrow.",
         },
     ]
 }
@@ -1026,23 +1062,14 @@ mod tests {
             assert!(!seeded.tasks.is_empty());
             assert!(!seeded.people.is_empty());
             assert!(!seeded.projects.is_empty());
+            let launch = seeded
+                .tasks
+                .iter()
+                .find(|task| task.id == "T-102")
+                .expect("launch task is seeded");
+            assert_eq!(launch.start_date, None);
+            assert_eq!(launch.due_date, None);
 
-            save_patch(
-                pool.clone(),
-                SqlDialect::Sqlite,
-                "T-103".to_string(),
-                TaskPatch::Type(TaskType::Note),
-            )
-            .await
-            .expect("task type saves");
-            save_patch(
-                pool.clone(),
-                SqlDialect::Sqlite,
-                "T-103".to_string(),
-                TaskPatch::Subtype(TaskSubtype::ArtifactUpdate),
-            )
-            .await
-            .expect("task subtype saves");
             save_patch(
                 pool.clone(),
                 SqlDialect::Sqlite,
@@ -1055,7 +1082,15 @@ mod tests {
                 pool.clone(),
                 SqlDialect::Sqlite,
                 "T-103".to_string(),
-                TaskPatch::State(TaskState::Done),
+                TaskPatch::Priority(TaskPriority::High),
+            )
+            .await
+            .expect("task priority saves");
+            save_patch(
+                pool.clone(),
+                SqlDialect::Sqlite,
+                "T-103".to_string(),
+                TaskPatch::State(TaskState::Rejected),
             )
             .await
             .expect("task state saves");
@@ -1075,10 +1110,43 @@ mod tests {
             )
             .await
             .expect("task projects save");
+            save_patch(
+                pool.clone(),
+                SqlDialect::Sqlite,
+                "T-103".to_string(),
+                TaskPatch::Tags(vec![Tag {
+                    id: "tag-api".to_string(),
+                    label: "api".to_string(),
+                }]),
+            )
+            .await
+            .expect("new task tag saves");
+            save_patch(
+                pool.clone(),
+                SqlDialect::Sqlite,
+                "T-101".to_string(),
+                TaskPatch::Tags(vec![
+                    Tag {
+                        id: "different-api-id".to_string(),
+                        label: "api".to_string(),
+                    },
+                    Tag {
+                        id: "tag-backend".to_string(),
+                        label: "backend".to_string(),
+                    },
+                ]),
+            )
+            .await
+            .expect("existing and new task tags save");
             create_task(
                 pool.clone(),
                 SqlDialect::Sqlite,
-                Task::quick_capture("new-task".to_string(), "Captured task".to_string()),
+                Task::quick_capture(
+                    "new-task".to_string(),
+                    "Captured task".to_string(),
+                    "Captured details".to_string(),
+                    TaskSize::Medium,
+                ),
             )
             .await
             .expect("quick-captured task saves");
@@ -1089,20 +1157,65 @@ mod tests {
                 .iter()
                 .find(|task| task.id == "T-103")
                 .expect("edited task exists after reload");
-            assert_eq!(task.task_type, TaskType::Note);
-            assert_eq!(task.subtype, TaskSubtype::ArtifactUpdate);
             assert_eq!(task.size, TaskSize::Big);
-            assert_eq!(task.state, TaskState::Done);
+            assert_eq!(task.priority, TaskPriority::High);
+            assert_eq!(task.state, TaskState::Rejected);
             assert_eq!(task.people_ids, vec!["alice"]);
             assert_eq!(task.project_ids, vec!["audit"]);
+            assert_eq!(task.tag_ids, vec!["tag-api"]);
+            let other_task = reloaded
+                .tasks
+                .iter()
+                .find(|task| task.id == "T-101")
+                .expect("second tagged task exists after reload");
+            assert_eq!(
+                other_task.tag_ids,
+                vec!["tag-api".to_string(), "tag-backend".to_string()]
+            );
+            assert_eq!(
+                reloaded.tags,
+                vec![
+                    Tag {
+                        id: "tag-api".to_string(),
+                        label: "api".to_string(),
+                    },
+                    Tag {
+                        id: "tag-backend".to_string(),
+                        label: "backend".to_string(),
+                    },
+                ]
+            );
+            save_tag_patch(
+                pool.clone(),
+                SqlDialect::Sqlite,
+                "tag-backend".to_string(),
+                TagPatch::Label("platform".to_string()),
+            )
+            .await
+            .expect("tag label saves");
+            let renamed = storage.load_workspace().await.expect("renamed tag reloads");
+            assert!(
+                renamed
+                    .tags
+                    .iter()
+                    .any(|tag| tag.id == "tag-backend" && tag.label == "platform")
+            );
             let created = reloaded
                 .tasks
                 .iter()
                 .find(|task| task.id == "new-task")
                 .expect("quick-captured task exists after reload");
             assert_eq!(created.title, "Captured task");
+            assert_eq!(created.detail, "Captured details");
             assert_eq!(created.state, TaskState::Todo);
-            assert_eq!(created.size, TaskSize::Small);
+            assert_eq!(created.size, TaskSize::Medium);
+            assert_eq!(created.priority, TaskPriority::Medium);
+
+            delete_task(pool.clone(), SqlDialect::Sqlite, "new-task".to_string())
+                .await
+                .expect("task deletes");
+            let after_delete = storage.load_workspace().await.expect("workspace reloads");
+            assert!(after_delete.tasks.iter().all(|task| task.id != "new-task"));
 
             drop(storage);
             drop(pool);

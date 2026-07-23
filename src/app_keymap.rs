@@ -218,6 +218,8 @@ fn parse_key(value: &str) -> Option<KeySpec> {
         "esc" => Key::Esc,
         "enter" => Key::Enter,
         "tab" => Key::Tab,
+        "backspace" => Key::Backspace,
+        "delete" => Key::Delete,
         "space" => Key::Char(' '),
         text => return single_char(text).map(KeySpec::plain),
     };
@@ -226,10 +228,13 @@ fn parse_key(value: &str) -> Option<KeySpec> {
 }
 
 fn modified_key(value: &str, modifiers: KeyModifiers) -> Option<KeySpec> {
-    if value == "space" {
-        return Some(KeySpec::key_with_modifiers(Key::Char(' '), modifiers));
-    }
-    single_char(value).map(|key| KeySpec::key_with_modifiers(Key::Char(key), modifiers))
+    let code = match value {
+        "backspace" => Key::Backspace,
+        "delete" => Key::Delete,
+        "space" => Key::Char(' '),
+        text => Key::Char(single_char(text)?),
+    };
+    Some(KeySpec::key_with_modifiers(code, modifiers))
 }
 
 fn single_char(value: &str) -> Option<char> {
@@ -241,22 +246,24 @@ fn single_char(value: &str) -> Option<char> {
 pub mod keys {
     use super::AppBinding;
 
-    pub const APP_INBOX_TAB: AppBinding = AppBinding::new("APP_INBOX_TAB", "i");
     pub const APP_TASKS_TAB: AppBinding = AppBinding::new("APP_TASKS_TAB", "t");
-    pub const APP_NOTES_TAB: AppBinding = AppBinding::new("APP_NOTES_TAB", "n");
     pub const APP_CALENDAR_TAB: AppBinding = AppBinding::new("APP_CALENDAR_TAB", "c");
     pub const APP_PROJECTS_TAB: AppBinding = AppBinding::new_sequence("APP_PROJECTS_TAB", "pr");
     pub const APP_PEOPLE_TAB: AppBinding = AppBinding::new_sequence("APP_PEOPLE_TAB", "pe");
-    pub const INBOX_CAPTURE: AppBinding = AppBinding::new("INBOX_CAPTURE", "i");
     pub const TASK_QUICK_CREATE: AppBinding = AppBinding::new("TASK_QUICK_CREATE", "+");
+    pub const TASK_VIEW_MENU: AppBinding = AppBinding::new("TASK_VIEW_MENU", "f");
+    pub const TASK_DELETE: AppBinding = AppBinding::new("TASK_DELETE", "delete");
+    pub const TASK_DELETE_ALT: AppBinding = AppBinding::new("TASK_DELETE_ALT", "ctrl+backspace");
+    pub const TASK_DISPOSITION: AppBinding = AppBinding::new("TASK_DISPOSITION", "backspace");
     pub const TASK_TITLE_FIELD: AppBinding = AppBinding::new("TASK_TITLE_FIELD", "e");
     pub const TASK_DESCRIPTION_FIELD: AppBinding = AppBinding::new("TASK_DESCRIPTION_FIELD", "d");
-    pub const TASK_TYPE_FIELD: AppBinding = AppBinding::new("TASK_TYPE_FIELD", "p");
     pub const TASK_STATE_FIELD: AppBinding = AppBinding::new("TASK_STATE_FIELD", "s");
     pub const TASK_SIZE_FIELD: AppBinding = AppBinding::new("TASK_SIZE_FIELD", "x");
+    pub const TASK_PRIORITY_FIELD: AppBinding = AppBinding::new("TASK_PRIORITY_FIELD", "r");
     pub const TASK_PEOPLE_FIELD: AppBinding = AppBinding::new("TASK_PEOPLE_FIELD", "z");
     pub const TASK_PROJECTS_FIELD: AppBinding =
         AppBinding::new_sequence("TASK_PROJECTS_FIELD", "ts");
+    pub const TASK_TAGS_FIELD: AppBinding = AppBinding::new_sequence("TASK_TAGS_FIELD", "ta");
     pub const TASK_START_DATE_FIELD: AppBinding =
         AppBinding::new_sequence("TASK_START_DATE_FIELD", "sd");
     pub const TASK_END_DATE_FIELD: AppBinding =
@@ -336,21 +343,23 @@ pub mod keys {
     pub const DIALOG_CLOSE: AppBinding = AppBinding::new("DIALOG_CLOSE", "esc");
 
     pub const ALL: &[AppBinding] = &[
-        APP_INBOX_TAB,
         APP_TASKS_TAB,
-        APP_NOTES_TAB,
         APP_CALENDAR_TAB,
         APP_PROJECTS_TAB,
         APP_PEOPLE_TAB,
-        INBOX_CAPTURE,
         TASK_QUICK_CREATE,
+        TASK_VIEW_MENU,
+        TASK_DELETE,
+        TASK_DELETE_ALT,
+        TASK_DISPOSITION,
         TASK_TITLE_FIELD,
         TASK_DESCRIPTION_FIELD,
-        TASK_TYPE_FIELD,
         TASK_STATE_FIELD,
         TASK_SIZE_FIELD,
+        TASK_PRIORITY_FIELD,
         TASK_PEOPLE_FIELD,
         TASK_PROJECTS_FIELD,
+        TASK_TAGS_FIELD,
         TASK_START_DATE_FIELD,
         TASK_END_DATE_FIELD,
         DETAIL_CLOSE,
@@ -449,17 +458,17 @@ mod tests {
     #[test]
     fn labels_use_configured_override_specs() {
         let keymap =
-            AppKeymap::from_overrides([("APP_INBOX_TAB".into(), "ctrl+space".into())]).unwrap();
+            AppKeymap::from_overrides([("APP_TASKS_TAB".into(), "ctrl+space".into())]).unwrap();
         assert_eq!(
             keymap
-                .binding("APP_INBOX_TAB")
+                .binding("APP_TASKS_TAB")
                 .unwrap()
                 .spec
                 .unwrap()
                 .label(),
             "⌃Space"
         );
-        assert_eq!(keymap.binding("APP_INBOX_TAB").unwrap().raw, "ctrl+space");
+        assert_eq!(keymap.binding("APP_TASKS_TAB").unwrap().raw, "ctrl+space");
     }
 
     #[test]
@@ -492,7 +501,7 @@ mod tests {
     fn override_config_rejects_unknown_and_invalid_keys() {
         assert!(AppKeymap::from_overrides([("NOPE".into(), "a".into())]).is_err());
         assert!(
-            AppKeymap::from_overrides([("APP_INBOX_TAB".into(), "ctrl+enter".into())]).is_err()
+            AppKeymap::from_overrides([("APP_TASKS_TAB".into(), "ctrl+enter".into())]).is_err()
         );
     }
 }
