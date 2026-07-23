@@ -248,12 +248,13 @@ pub mod keys {
     pub const APP_PROJECTS_TAB: AppBinding = AppBinding::new_sequence("APP_PROJECTS_TAB", "pr");
     pub const APP_PEOPLE_TAB: AppBinding = AppBinding::new_sequence("APP_PEOPLE_TAB", "pe");
     pub const INBOX_CAPTURE: AppBinding = AppBinding::new("INBOX_CAPTURE", "i");
-    pub const TASK_TITLE_FIELD: AppBinding = AppBinding::new("TASK_TITLE_FIELD", "l");
+    pub const TASK_QUICK_CREATE: AppBinding = AppBinding::new("TASK_QUICK_CREATE", "+");
+    pub const TASK_TITLE_FIELD: AppBinding = AppBinding::new("TASK_TITLE_FIELD", "e");
     pub const TASK_DESCRIPTION_FIELD: AppBinding = AppBinding::new("TASK_DESCRIPTION_FIELD", "d");
-    pub const TASK_TYPE_FIELD: AppBinding = AppBinding::new("TASK_TYPE_FIELD", "y");
+    pub const TASK_TYPE_FIELD: AppBinding = AppBinding::new("TASK_TYPE_FIELD", "p");
     pub const TASK_STATE_FIELD: AppBinding = AppBinding::new("TASK_STATE_FIELD", "s");
-    pub const TASK_SIZE_FIELD: AppBinding = AppBinding::new("TASK_SIZE_FIELD", "z");
-    pub const TASK_PEOPLE_FIELD: AppBinding = AppBinding::new_sequence("TASK_PEOPLE_FIELD", "le");
+    pub const TASK_SIZE_FIELD: AppBinding = AppBinding::new("TASK_SIZE_FIELD", "x");
+    pub const TASK_PEOPLE_FIELD: AppBinding = AppBinding::new("TASK_PEOPLE_FIELD", "z");
     pub const TASK_PROJECTS_FIELD: AppBinding =
         AppBinding::new_sequence("TASK_PROJECTS_FIELD", "ts");
     pub const TASK_START_DATE_FIELD: AppBinding =
@@ -342,6 +343,7 @@ pub mod keys {
         APP_PROJECTS_TAB,
         APP_PEOPLE_TAB,
         INBOX_CAPTURE,
+        TASK_QUICK_CREATE,
         TASK_TITLE_FIELD,
         TASK_DESCRIPTION_FIELD,
         TASK_TYPE_FIELD,

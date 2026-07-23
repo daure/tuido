@@ -78,6 +78,53 @@ impl Storage {
     }
 }
 
+pub async fn create_task(
+    pool: AnyPool,
+    dialect: SqlDialect,
+    task: Task,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let query = format!(
+        "INSERT INTO tasks (id, title, task_type, subtype, state, task_kind, workflow_state, size, start_date, due_date, focus_today, frog_candidate, detail, ai_rationale, swap_note, created_at, updated_at) VALUES ({}, {}, {}, {}, 'next', {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
+        dialect.placeholder(1),
+        dialect.placeholder(2),
+        dialect.placeholder(3),
+        dialect.placeholder(4),
+        dialect.placeholder(5),
+        dialect.placeholder(6),
+        dialect.placeholder(7),
+        dialect.placeholder(8),
+        dialect.placeholder(9),
+        dialect.placeholder(10),
+        dialect.placeholder(11),
+        dialect.placeholder(12),
+        dialect.placeholder(13),
+        dialect.placeholder(14),
+        dialect.placeholder(15),
+        dialect.placeholder(16)
+    );
+    let now = now_text();
+    sqlx::query(AssertSqlSafe(query.as_str()))
+        .bind(task.id)
+        .bind(task.title)
+        .bind(task.task_type.id())
+        .bind(task.subtype.id())
+        .bind(task.subtype.workflow_kind())
+        .bind(task.state.id())
+        .bind(task.size.id())
+        .bind(task.start_date)
+        .bind(task.due_date)
+        .bind(task.focus_today)
+        .bind(task.frog_candidate)
+        .bind(task.detail)
+        .bind(task.ai_rationale)
+        .bind(task.swap_note)
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await?;
+    Ok(())
+}
+
 pub async fn save_patch(
     pool: AnyPool,
     dialect: SqlDialect,
@@ -1028,6 +1075,13 @@ mod tests {
             )
             .await
             .expect("task projects save");
+            create_task(
+                pool.clone(),
+                SqlDialect::Sqlite,
+                Task::quick_capture("new-task".to_string(), "Captured task".to_string()),
+            )
+            .await
+            .expect("quick-captured task saves");
 
             let reloaded = storage.load_workspace().await.expect("workspace reloads");
             let task = reloaded
@@ -1041,6 +1095,14 @@ mod tests {
             assert_eq!(task.state, TaskState::Done);
             assert_eq!(task.people_ids, vec!["alice"]);
             assert_eq!(task.project_ids, vec!["audit"]);
+            let created = reloaded
+                .tasks
+                .iter()
+                .find(|task| task.id == "new-task")
+                .expect("quick-captured task exists after reload");
+            assert_eq!(created.title, "Captured task");
+            assert_eq!(created.state, TaskState::Todo);
+            assert_eq!(created.size, TaskSize::Small);
 
             drop(storage);
             drop(pool);

@@ -8125,6 +8125,7 @@ dependencies = [
  "time",
  "tokio",
  "tuicore",
+ "uuid",
 ]
 
 [[package]]

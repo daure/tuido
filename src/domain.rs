@@ -64,6 +64,7 @@ impl AppState {
 
 #[derive(Debug, Clone)]
 pub enum AppEvent {
+    TaskCreated(Task),
     SelectTask(String),
     PatchTask {
         task_id: String,
@@ -123,6 +124,12 @@ impl SaveTarget {
 
 pub fn reduce_app_state(state: &mut AppState, event: AppEvent) -> DispatchOutcome {
     match event {
+        AppEvent::TaskCreated(task) => {
+            state.selected_task_id = Some(task.id.clone());
+            state.tasks.push(task);
+            state.version += 1;
+            DispatchOutcome::layout()
+        }
         AppEvent::SelectTask(task_id) => {
             if state.selected_task_id.as_deref() == Some(&task_id) {
                 DispatchOutcome::unchanged()
@@ -233,6 +240,29 @@ pub struct Task {
     pub detail: String,
     pub ai_rationale: String,
     pub swap_note: String,
+}
+
+impl Task {
+    pub fn quick_capture(id: String, title: String) -> Self {
+        Self {
+            id,
+            title: title.trim().to_string(),
+            task_type: TaskType::Action,
+            subtype: TaskSubtype::Task,
+            state: TaskState::Todo,
+            size: TaskSize::Small,
+            start_date: None,
+            due_date: None,
+            people_ids: Vec::new(),
+            project_ids: Vec::new(),
+            entity_labels: Vec::new(),
+            focus_today: false,
+            frog_candidate: false,
+            detail: String::new(),
+            ai_rationale: String::new(),
+            swap_note: String::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
