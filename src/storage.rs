@@ -1,5 +1,7 @@
 use std::{env, fs, path::PathBuf};
 
+#[cfg(test)]
+use sqlx::AnyConnection;
 use sqlx::{AnyPool, AssertSqlSafe, Row, any::AnyPoolOptions, migrate::Migrator};
 
 use crate::domain::{
@@ -73,8 +75,17 @@ impl Storage {
     }
 
     pub async fn load_workspace(&self) -> Result<WorkspaceSnapshot, Box<dyn std::error::Error>> {
-        seed_if_empty(&self.pool, self.dialect).await?;
         load_workspace(&self.pool, self.dialect).await
+    }
+
+    #[cfg(test)]
+    async fn initialize_demo_workspace(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let mut tx = self.pool.begin().await?;
+        seed_people(&mut tx, self.dialect).await?;
+        seed_projects(&mut tx, self.dialect).await?;
+        seed_tasks(&mut tx, self.dialect).await?;
+        tx.commit().await?;
+        Ok(())
     }
 }
 
@@ -121,10 +132,11 @@ pub async fn delete_task(
     task_id: String,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let query = format!("DELETE FROM tasks WHERE id = {}", dialect.placeholder(1));
-    sqlx::query(AssertSqlSafe(query.as_str()))
+    let result = sqlx::query(AssertSqlSafe(query.as_str()))
         .bind(task_id)
         .execute(&pool)
         .await?;
+    require_one_row(result.rows_affected(), "task delete")?;
     Ok(())
 }
 
@@ -180,11 +192,12 @@ pub async fn save_person_patch(
                 dialect.placeholder(1),
                 dialect.placeholder(2)
             );
-            sqlx::query(AssertSqlSafe(query.as_str()))
+            let result = sqlx::query(AssertSqlSafe(query.as_str()))
                 .bind(value.trim())
                 .bind(&person_id)
                 .execute(&pool)
                 .await?;
+            require_one_row(result.rows_affected(), "person update")?;
         }
         PersonPatch::Email(value) => {
             let query = format!(
@@ -192,11 +205,12 @@ pub async fn save_person_patch(
                 dialect.placeholder(1),
                 dialect.placeholder(2)
             );
-            sqlx::query(AssertSqlSafe(query.as_str()))
+            let result = sqlx::query(AssertSqlSafe(query.as_str()))
                 .bind(value.trim())
                 .bind(&person_id)
                 .execute(&pool)
                 .await?;
+            require_one_row(result.rows_affected(), "person update")?;
         }
         PersonPatch::Active(value) => {
             let query = format!(
@@ -204,11 +218,12 @@ pub async fn save_person_patch(
                 dialect.placeholder(1),
                 dialect.placeholder(2)
             );
-            sqlx::query(AssertSqlSafe(query.as_str()))
+            let result = sqlx::query(AssertSqlSafe(query.as_str()))
                 .bind(value)
                 .bind(&person_id)
                 .execute(&pool)
                 .await?;
+            require_one_row(result.rows_affected(), "person update")?;
         }
     }
     Ok(())
@@ -227,11 +242,12 @@ pub async fn save_project_patch(
                 dialect.placeholder(1),
                 dialect.placeholder(2)
             );
-            sqlx::query(AssertSqlSafe(query.as_str()))
+            let result = sqlx::query(AssertSqlSafe(query.as_str()))
                 .bind(value.trim())
                 .bind(&project_id)
                 .execute(&pool)
                 .await?;
+            require_one_row(result.rows_affected(), "project update")?;
         }
         ProjectPatch::Name(value) => {
             let query = format!(
@@ -239,11 +255,12 @@ pub async fn save_project_patch(
                 dialect.placeholder(1),
                 dialect.placeholder(2)
             );
-            sqlx::query(AssertSqlSafe(query.as_str()))
+            let result = sqlx::query(AssertSqlSafe(query.as_str()))
                 .bind(value.trim())
                 .bind(&project_id)
                 .execute(&pool)
                 .await?;
+            require_one_row(result.rows_affected(), "project update")?;
         }
         ProjectPatch::Description(value) => {
             let query = format!(
@@ -251,11 +268,12 @@ pub async fn save_project_patch(
                 dialect.placeholder(1),
                 dialect.placeholder(2)
             );
-            sqlx::query(AssertSqlSafe(query.as_str()))
+            let result = sqlx::query(AssertSqlSafe(query.as_str()))
                 .bind(value)
                 .bind(&project_id)
                 .execute(&pool)
                 .await?;
+            require_one_row(result.rows_affected(), "project update")?;
         }
         ProjectPatch::LeadPerson(value) => {
             let query = format!(
@@ -263,11 +281,12 @@ pub async fn save_project_patch(
                 dialect.placeholder(1),
                 dialect.placeholder(2)
             );
-            sqlx::query(AssertSqlSafe(query.as_str()))
+            let result = sqlx::query(AssertSqlSafe(query.as_str()))
                 .bind(value)
                 .bind(&project_id)
                 .execute(&pool)
                 .await?;
+            require_one_row(result.rows_affected(), "project update")?;
         }
     }
     Ok(())
@@ -286,11 +305,12 @@ pub async fn save_tag_patch(
                 dialect.placeholder(1),
                 dialect.placeholder(2)
             );
-            sqlx::query(AssertSqlSafe(query.as_str()))
+            let result = sqlx::query(AssertSqlSafe(query.as_str()))
                 .bind(value.trim())
                 .bind(tag_id)
                 .execute(&pool)
                 .await?;
+            require_one_row(result.rows_affected(), "tag update")?;
         }
     }
     Ok(())
@@ -316,12 +336,13 @@ async fn update_task_scalar(
         TaskField::Priority => "priority",
     };
     let query = update_task_column_sql(dialect, column);
-    sqlx::query(AssertSqlSafe(query.as_str()))
+    let result = sqlx::query(AssertSqlSafe(query.as_str()))
         .bind(value)
         .bind(now_text())
         .bind(task_id)
         .execute(&pool)
         .await?;
+    require_one_row(result.rows_affected(), "task update")?;
     Ok(())
 }
 
@@ -338,13 +359,14 @@ async fn update_task_state(
         dialect.placeholder(3),
         dialect.placeholder(4)
     );
-    sqlx::query(AssertSqlSafe(query.as_str()))
+    let result = sqlx::query(AssertSqlSafe(query.as_str()))
         .bind(storage_state_id(value))
         .bind(value == TaskState::Rejected)
         .bind(now_text())
         .bind(task_id)
         .execute(&pool)
         .await?;
+    require_one_row(result.rows_affected(), "task state update")?;
     Ok(())
 }
 
@@ -368,12 +390,13 @@ async fn update_task_text(
         _ => return Ok(()),
     };
     let query = update_task_column_sql(dialect, column);
-    sqlx::query(AssertSqlSafe(query.as_str()))
+    let result = sqlx::query(AssertSqlSafe(query.as_str()))
         .bind(value)
         .bind(now_text())
         .bind(task_id)
         .execute(&pool)
         .await?;
+    require_one_row(result.rows_affected(), "task update")?;
     Ok(())
 }
 
@@ -390,12 +413,13 @@ async fn update_task_optional_date(
         _ => return Ok(()),
     };
     let query = update_task_column_sql(dialect, column);
-    sqlx::query(AssertSqlSafe(query.as_str()))
+    let result = sqlx::query(AssertSqlSafe(query.as_str()))
         .bind(value)
         .bind(now_text())
         .bind(task_id)
         .execute(&pool)
         .await?;
+    require_one_row(result.rows_affected(), "task update")?;
     Ok(())
 }
 
@@ -430,11 +454,12 @@ async fn replace_task_people(
             .execute(&mut *tx)
             .await?;
     }
-    sqlx::query(AssertSqlSafe(touch_query.as_str()))
+    let result = sqlx::query(AssertSqlSafe(touch_query.as_str()))
         .bind(now_text())
         .bind(task_id)
         .execute(&mut *tx)
         .await?;
+    require_one_row(result.rows_affected(), "task relation update")?;
     tx.commit().await?;
     Ok(())
 }
@@ -470,11 +495,12 @@ async fn replace_task_projects(
             .execute(&mut *tx)
             .await?;
     }
-    sqlx::query(AssertSqlSafe(touch_query.as_str()))
+    let result = sqlx::query(AssertSqlSafe(touch_query.as_str()))
         .bind(now_text())
         .bind(task_id)
         .execute(&mut *tx)
         .await?;
+    require_one_row(result.rows_affected(), "task relation update")?;
     tx.commit().await?;
     Ok(())
 }
@@ -538,11 +564,12 @@ async fn replace_task_tags(
             .execute(&mut *tx)
             .await?;
     }
-    sqlx::query(AssertSqlSafe(touch_query.as_str()))
+    let result = sqlx::query(AssertSqlSafe(touch_query.as_str()))
         .bind(now_text())
         .bind(task_id)
         .execute(&mut *tx)
         .await?;
+    require_one_row(result.rows_affected(), "task relation update")?;
     tx.commit().await?;
     Ok(())
 }
@@ -740,25 +767,9 @@ async fn load_task_tags(
         .collect()
 }
 
-async fn seed_if_empty(
-    pool: &AnyPool,
-    dialect: SqlDialect,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let row = sqlx::query("SELECT COUNT(*) AS count FROM tasks")
-        .fetch_one(pool)
-        .await?;
-    let count: i64 = row.try_get("count")?;
-    if count > 0 {
-        return Ok(());
-    }
-    seed_people(pool, dialect).await?;
-    seed_projects(pool, dialect).await?;
-    seed_tasks(pool, dialect).await?;
-    Ok(())
-}
-
+#[cfg(test)]
 async fn seed_people(
-    pool: &AnyPool,
+    connection: &mut AnyConnection,
     dialect: SqlDialect,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let people = [
@@ -780,14 +791,15 @@ async fn seed_people(
             .bind(email)
             .bind(true)
             .bind(index as i64)
-            .execute(pool)
+            .execute(&mut *connection)
             .await?;
     }
     Ok(())
 }
 
+#[cfg(test)]
 async fn seed_projects(
-    pool: &AnyPool,
+    connection: &mut AnyConnection,
     dialect: SqlDialect,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let projects = [
@@ -824,13 +836,17 @@ async fn seed_projects(
             .bind(description)
             .bind(lead_person_id)
             .bind(index as i64)
-            .execute(pool)
+            .execute(&mut *connection)
             .await?;
     }
     Ok(())
 }
 
-async fn seed_tasks(pool: &AnyPool, dialect: SqlDialect) -> Result<(), Box<dyn std::error::Error>> {
+#[cfg(test)]
+async fn seed_tasks(
+    connection: &mut AnyConnection,
+    dialect: SqlDialect,
+) -> Result<(), Box<dyn std::error::Error>> {
     let now = now_text();
     let tasks = seed_task_rows();
     let task_query = format!(
@@ -872,14 +888,14 @@ async fn seed_tasks(pool: &AnyPool, dialect: SqlDialect) -> Result<(), Box<dyn s
             .bind(task.detail)
             .bind(&now)
             .bind(&now)
-            .execute(pool)
+            .execute(&mut *connection)
             .await?;
         for (index, person_id) in task.person_ids.iter().enumerate() {
             sqlx::query(AssertSqlSafe(task_people_query.as_str()))
                 .bind(task.id)
                 .bind(person_id)
                 .bind(index as i64)
-                .execute(pool)
+                .execute(&mut *connection)
                 .await?;
         }
         for (index, project_id) in task.project_ids.iter().enumerate() {
@@ -887,7 +903,7 @@ async fn seed_tasks(pool: &AnyPool, dialect: SqlDialect) -> Result<(), Box<dyn s
                 .bind(task.id)
                 .bind(project_id)
                 .bind(index as i64)
-                .execute(pool)
+                .execute(&mut *connection)
                 .await?;
         }
     }
@@ -936,6 +952,18 @@ fn now_text() -> String {
     now.as_secs().to_string()
 }
 
+fn require_one_row(
+    rows_affected: u64,
+    operation: &'static str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if rows_affected == 1 {
+        Ok(())
+    } else {
+        Err(format!("{operation} affected {rows_affected} rows; expected 1").into())
+    }
+}
+
+#[cfg(test)]
 struct SeedTask<'a> {
     id: &'a str,
     title: &'a str,
@@ -949,6 +977,7 @@ struct SeedTask<'a> {
     detail: &'a str,
 }
 
+#[cfg(test)]
 fn seed_task_rows() -> Vec<SeedTask<'static>> {
     vec![
         SeedTask {
@@ -1040,7 +1069,35 @@ mod tests {
     }
 
     #[test]
-    fn sqlite_migrations_seed_and_immediate_task_saves_reload() {
+    fn fresh_migrated_database_loads_empty() {
+        run_async(async {
+            sqlx::any::install_default_drivers();
+            let (database_url, database_path) = sqlite_test_url("fresh-empty");
+            let pool = AnyPoolOptions::new()
+                .max_connections(1)
+                .connect(&database_url)
+                .await
+                .expect("sqlite test database connects");
+            MIGRATOR.run(&pool).await.expect("migrations run");
+            let storage = Storage {
+                pool: pool.clone(),
+                dialect: SqlDialect::Sqlite,
+            };
+
+            let snapshot = storage.load_workspace().await.expect("workspace loads");
+
+            assert!(snapshot.tasks.is_empty());
+            assert!(snapshot.people.is_empty());
+            assert!(snapshot.projects.is_empty());
+            assert!(snapshot.tags.is_empty());
+            drop(storage);
+            drop(pool);
+            let _ = std::fs::remove_file(database_path);
+        });
+    }
+
+    #[test]
+    fn explicit_demo_initialization_and_immediate_task_saves_reload() {
         run_async(async {
             sqlx::any::install_default_drivers();
             let (database_url, database_path) = sqlite_test_url("round-trip");
@@ -1055,6 +1112,10 @@ mod tests {
             };
 
             MIGRATOR.run(&pool).await.expect("migrations run");
+            storage
+                .initialize_demo_workspace()
+                .await
+                .expect("demo workspace initializes");
             let seeded = storage
                 .load_workspace()
                 .await
@@ -1217,7 +1278,131 @@ mod tests {
             let after_delete = storage.load_workspace().await.expect("workspace reloads");
             assert!(after_delete.tasks.iter().all(|task| task.id != "new-task"));
 
+            for task in after_delete.tasks {
+                delete_task(pool.clone(), SqlDialect::Sqlite, task.id)
+                    .await
+                    .expect("seeded task deletes");
+            }
+            let empty = storage
+                .load_workspace()
+                .await
+                .expect("empty initialized workspace reloads");
+            assert!(empty.tasks.is_empty());
+
             drop(storage);
+            drop(pool);
+            let _ = std::fs::remove_file(database_path);
+        });
+    }
+
+    #[test]
+    fn existing_workspace_loads_without_samples() {
+        run_async(async {
+            sqlx::any::install_default_drivers();
+            let (database_url, database_path) = sqlite_test_url("existing-workspace");
+            let pool = AnyPoolOptions::new()
+                .max_connections(1)
+                .connect(&database_url)
+                .await
+                .expect("sqlite test database connects");
+            MIGRATOR.run(&pool).await.expect("migrations run");
+            create_task(
+                pool.clone(),
+                SqlDialect::Sqlite,
+                Task::quick_capture(
+                    "existing".to_string(),
+                    "Existing".to_string(),
+                    String::new(),
+                    TaskSize::Small,
+                ),
+            )
+            .await
+            .expect("existing task inserts");
+            let storage = Storage {
+                pool: pool.clone(),
+                dialect: SqlDialect::Sqlite,
+            };
+
+            let snapshot = storage.load_workspace().await.expect("workspace loads");
+
+            assert_eq!(snapshot.tasks.len(), 1);
+            assert_eq!(snapshot.tasks[0].id, "existing");
+            assert!(snapshot.people.is_empty());
+            assert!(snapshot.projects.is_empty());
+            drop(storage);
+            drop(pool);
+            let _ = std::fs::remove_file(database_path);
+        });
+    }
+
+    #[test]
+    fn writes_to_unknown_ids_fail() {
+        run_async(async {
+            sqlx::any::install_default_drivers();
+            let (database_url, database_path) = sqlite_test_url("unknown-ids");
+            let pool = AnyPoolOptions::new()
+                .max_connections(1)
+                .connect(&database_url)
+                .await
+                .expect("sqlite test database connects");
+            MIGRATOR.run(&pool).await.expect("migrations run");
+
+            assert!(
+                delete_task(pool.clone(), SqlDialect::Sqlite, "missing".to_string())
+                    .await
+                    .is_err()
+            );
+            assert!(
+                save_patch(
+                    pool.clone(),
+                    SqlDialect::Sqlite,
+                    "missing".to_string(),
+                    TaskPatch::Title("No task".to_string()),
+                )
+                .await
+                .is_err()
+            );
+            assert!(
+                save_patch(
+                    pool.clone(),
+                    SqlDialect::Sqlite,
+                    "missing".to_string(),
+                    TaskPatch::People(Vec::new()),
+                )
+                .await
+                .is_err()
+            );
+            assert!(
+                save_person_patch(
+                    pool.clone(),
+                    SqlDialect::Sqlite,
+                    "missing".to_string(),
+                    PersonPatch::Name("Nobody".to_string()),
+                )
+                .await
+                .is_err()
+            );
+            assert!(
+                save_project_patch(
+                    pool.clone(),
+                    SqlDialect::Sqlite,
+                    "missing".to_string(),
+                    ProjectPatch::Name("Nothing".to_string()),
+                )
+                .await
+                .is_err()
+            );
+            assert!(
+                save_tag_patch(
+                    pool.clone(),
+                    SqlDialect::Sqlite,
+                    "missing".to_string(),
+                    TagPatch::Label("none".to_string()),
+                )
+                .await
+                .is_err()
+            );
+
             drop(pool);
             let _ = std::fs::remove_file(database_path);
         });

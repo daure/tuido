@@ -1,22 +1,22 @@
-use std::{cell::RefCell, collections::HashMap, error::Error, rc::Rc, sync::mpsc, time::Duration};
+use std::{cell::RefCell, error::Error, rc::Rc, time::Duration};
 
 use crate::app_keymap::{self, keys};
 use crate::create_task_dialog::{CreateTaskDialog, CreateTaskDraft};
 use crate::domain::{
-    AppEvent, AppState, Person, PersonField, PersonPatch, Project, ProjectField, ProjectPatch,
-    SaveTarget, Tag, TagField, TagPatch, Task, TaskField, TaskPatch, TaskPriority, TaskSize,
-    TaskState, WorkspaceSnapshot, reduce_app_state,
+    AppEvent, AppState, Person, Project, Tag, Task, TaskPatch, TaskPriority, TaskSize, TaskState,
+    reduce_app_state,
 };
-use crate::storage::{self, SqlDialect, Storage};
+use crate::persistence_coordinator::{AppStore, PersistenceCommand, PersistenceCoordinator};
+use crate::storage::Storage;
+use crate::ui::management::{ManagementDialogKind, people, projects, tags};
+use crate::ui::save_status::SaveStatusLine;
 use ratatui::{
     Frame,
     layout::{Constraint, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
 };
-use sqlx::AnyPool;
 use time::Date;
-use tokio::runtime::Handle;
 use tuicore::{
     ActivationMode, AnimationSettings, AxisProposal, Button, CellContext, ChildKey, ChipColorRole,
     Column, ConfirmationDialog, ConfirmationDialogOutcome, CrossAlign, DataView,
@@ -24,8 +24,8 @@ use tuicore::{
     DialogLayer, Dropdown, DropdownCommitMode, DropdownSearchMode, EventCtx, EventOutcome,
     EventRoute, Flex, FlexItem, FocusCtx, FocusId, FocusRequest, FocusTarget, HotkeyLabelMode,
     KeySpec, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, Menu, MenuItem,
-    MenuSearchMode, Paragraph, RenderCtx, SelectedTag, SelectionMode, SelectionTrigger, Separator,
-    Split, StatusBar, StatusBarMenuItem, Store, Tab, Tabs, TabsVariant, TagInput, TagInputEvent,
+    MenuSearchMode, Paragraph, RenderCtx, SelectedTag, SelectionMode, SelectionTrigger, Split,
+    StatusBar, StatusBarMenuItem, Store, Tab, Tabs, TabsVariant, TagInput, TagInputEvent,
     TextInput, TextareaInput, TickResult, TreeApp, TuiEvent, TuiNode,
 };
 use uuid::Uuid;
@@ -47,23 +47,6 @@ pub(crate) enum AppMsg {
     CloseDialog,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum ManagementDialogKind {
-    People,
-    Projects,
-    Tags,
-}
-
-impl ManagementDialogKind {
-    fn title(self) -> &'static str {
-        match self {
-            Self::People => "People",
-            Self::Projects => "Projects",
-            Self::Tags => "Tags",
-        }
-    }
-}
-
 pub fn run() -> Result<(), Box<dyn Error>> {
     tuicore::try_init()?;
     app_keymap::try_init()?;
@@ -73,69 +56,46 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     let storage = runtime.block_on(Storage::connect_from_env())?;
     runtime.block_on(storage.migrate())?;
     let snapshot = runtime.block_on(storage.load_workspace())?;
-    TreeApp::new(App::new(
-        snapshot,
+    let store = Rc::new(RefCell::new(Store::new(
+        AppState::from_snapshot(snapshot),
+        reduce_app_state as fn(&mut AppState, AppEvent) -> tuicore::DispatchOutcome,
+    )));
+    let coordinator = Rc::new(RefCell::new(PersistenceCoordinator::new(
+        Rc::clone(&store),
         storage.pool(),
         storage.dialect(),
         runtime.handle().clone(),
-    ))
-    .initial_focus(FocusRequest::Target(FocusId::new("data-view")))
-    .on_message(|app, message, ctx| match message {
-        AppMsg::Noop => {}
-        AppMsg::OpenManagementDialog(kind) => app.open_management_dialog(kind, ctx),
-        AppMsg::OpenCreateTask => app.open_create_task_dialog(ctx),
-        AppMsg::CreateTaskSubmitted(draft) => app.submit_create_task(draft, ctx),
-        AppMsg::OpenDeleteTask => app.open_delete_task_dialog(ctx),
-        AppMsg::DeleteTaskConfirmed(task_id) => app.delete_task(task_id, ctx),
-        AppMsg::OpenTaskDisposition => app.open_task_disposition_dialog(ctx),
-        AppMsg::SetTaskState { task_id, state } => app.set_task_state(task_id, state, ctx),
-        AppMsg::CloseDialog => app.close_dialog(ctx),
-    })
-    .run()?;
+    )));
+    let run_result = TreeApp::new(App::new(store, Rc::clone(&coordinator)))
+        .initial_focus(FocusRequest::Target(FocusId::new("data-view")))
+        .on_message(|app, message, ctx| match message {
+            AppMsg::Noop => {}
+            AppMsg::OpenManagementDialog(kind) => app.open_management_dialog(kind, ctx),
+            AppMsg::OpenCreateTask => app.open_create_task_dialog(ctx),
+            AppMsg::CreateTaskSubmitted(draft) => app.submit_create_task(draft, ctx),
+            AppMsg::OpenDeleteTask => app.open_delete_task_dialog(ctx),
+            AppMsg::DeleteTaskConfirmed(task_id) => app.delete_task(task_id, ctx),
+            AppMsg::OpenTaskDisposition => app.open_task_disposition_dialog(ctx),
+            AppMsg::SetTaskState { task_id, state } => app.set_task_state(task_id, state, ctx),
+            AppMsg::CloseDialog => app.close_dialog(ctx),
+        })
+        .run();
+    let drained = coordinator.borrow_mut().drain(Duration::from_secs(2));
+    run_result?;
+    if !drained {
+        return Err("timed out draining pending persistence commands".into());
+    }
     Ok(())
 }
 
 struct App {
     root: DialogLayer<Flex<AppMsg>, AppDialog>,
     context: AppContext,
-    task_operation_tx: mpsc::Sender<TaskOperationResult>,
-    task_operation_rx: mpsc::Receiver<TaskOperationResult>,
-    pending_task_operations: usize,
-}
-
-#[derive(Debug)]
-enum TaskOperationResult {
-    Created {
-        task_id: String,
-        error: Option<String>,
-    },
-    Deleted {
-        task: Box<Task>,
-        error: Option<String>,
-    },
-    StateSaved {
-        task_id: String,
-        error: Option<String>,
-    },
 }
 
 impl App {
-    fn new(
-        snapshot: WorkspaceSnapshot,
-        pool: AnyPool,
-        dialect: SqlDialect,
-        runtime: Handle,
-    ) -> Self {
-        let store = Rc::new(RefCell::new(Store::new(
-            AppState::from_snapshot(snapshot),
-            reduce_app_state as fn(&mut AppState, AppEvent) -> tuicore::DispatchOutcome,
-        )));
-        let context = AppContext {
-            store,
-            pool,
-            dialect,
-            runtime,
-        };
+    fn new(store: AppStore, coordinator: Rc<RefCell<PersistenceCoordinator>>) -> Self {
+        let context = AppContext { store, coordinator };
         let tabs = Tabs::new(vec![
             Tab::new("Tasks", TaskWorkspace::new(context.clone()))
                 .hotkey(keys::APP_TASKS_TAB.hotkey()),
@@ -176,9 +136,7 @@ impl App {
             FlexItem::fixed(1),
         );
 
-        let dialog = management_dialog(context.clone(), ManagementDialogKind::People);
-        let (task_operation_tx, task_operation_rx) = mpsc::channel();
-
+        let dialog = AppDialog::TaskDisposition(Dialog::new());
         Self {
             root: DialogLayer::new(root, dialog)
                 .active(false)
@@ -186,17 +144,15 @@ impl App {
                 .layer_cross_percent(80)
                 .backdrop(DialogBackdrop::dim().amount(0.5)),
             context,
-            task_operation_tx,
-            task_operation_rx,
-            pending_task_operations: 0,
         }
     }
 
     fn open_management_dialog(&mut self, kind: ManagementDialogKind, ctx: &mut EventCtx<AppMsg>) {
-        self.root
-            .replace_layer(management_dialog(self.context.clone(), kind), ctx);
+        let dialog = management_dialog(self.context.clone(), kind);
+        self.root.replace_layer(dialog, ctx);
         self.root.set_layer_percent(80);
         self.root.set_layer_cross_percent(80);
+        self.root.set_fit_content(false);
         self.root.set_active_immediate_with_context(true, ctx);
     }
 
@@ -228,18 +184,10 @@ impl App {
             .store
             .borrow_mut()
             .dispatch(AppEvent::TaskCreated(task.clone()));
-        let pool = self.context.pool.clone();
-        let dialect = self.context.dialect;
-        let tx = self.task_operation_tx.clone();
-        self.pending_task_operations += 1;
-        self.context.runtime.spawn(async move {
-            let task_id = task.id.clone();
-            let error = storage::create_task(pool, dialect, task)
-                .await
-                .err()
-                .map(|error| error.to_string());
-            let _ = tx.send(TaskOperationResult::Created { task_id, error });
-        });
+        self.context
+            .coordinator
+            .borrow_mut()
+            .submit(PersistenceCommand::CreateTask(task));
         self.close_dialog(ctx);
     }
 
@@ -266,20 +214,10 @@ impl App {
             .store
             .borrow_mut()
             .dispatch(AppEvent::TaskDeleted(task_id.clone()));
-        let pool = self.context.pool.clone();
-        let dialect = self.context.dialect;
-        let tx = self.task_operation_tx.clone();
-        self.pending_task_operations += 1;
-        self.context.runtime.spawn(async move {
-            let error = storage::delete_task(pool, dialect, task_id.clone())
-                .await
-                .err()
-                .map(|error| error.to_string());
-            let _ = tx.send(TaskOperationResult::Deleted {
-                task: Box::new(task),
-                error,
-            });
-        });
+        self.context
+            .coordinator
+            .borrow_mut()
+            .submit(PersistenceCommand::DeleteTask(task));
         self.close_dialog(ctx);
     }
 
@@ -302,18 +240,13 @@ impl App {
                 patch: TaskPatch::State(state),
             });
         if outcome.changed {
-            let pool = self.context.pool.clone();
-            let dialect = self.context.dialect;
-            let tx = self.task_operation_tx.clone();
-            self.pending_task_operations += 1;
-            self.context.runtime.spawn(async move {
-                let error =
-                    storage::save_patch(pool, dialect, task_id.clone(), TaskPatch::State(state))
-                        .await
-                        .err()
-                        .map(|error| error.to_string());
-                let _ = tx.send(TaskOperationResult::StateSaved { task_id, error });
-            });
+            self.context
+                .coordinator
+                .borrow_mut()
+                .submit(PersistenceCommand::PatchTask(
+                    task_id,
+                    TaskPatch::State(state),
+                ));
         }
         self.close_dialog(ctx);
     }
@@ -330,46 +263,6 @@ impl App {
 
     fn close_dialog(&mut self, ctx: &mut EventCtx<AppMsg>) {
         self.root.set_active_with_context(false, ctx);
-    }
-
-    fn poll_task_operation_results(&mut self) -> bool {
-        let mut changed = false;
-        while let Ok(result) = self.task_operation_rx.try_recv() {
-            self.pending_task_operations = self.pending_task_operations.saturating_sub(1);
-            let outcome = match result {
-                TaskOperationResult::Created { task_id, error } => self
-                    .context
-                    .store
-                    .borrow_mut()
-                    .dispatch(AppEvent::SaveCompleted {
-                        target: SaveTarget::task(task_id, TaskField::Title),
-                        error: error.map(|error| format!("Create failed: {error}")),
-                    }),
-                TaskOperationResult::Deleted { task, error } => match error {
-                    Some(error) => {
-                        let task_id = task.id.clone();
-                        let mut store = self.context.store.borrow_mut();
-                        let outcome = store.dispatch(AppEvent::TaskCreated(*task));
-                        store.dispatch(AppEvent::SaveCompleted {
-                            target: SaveTarget::task(task_id, TaskField::Title),
-                            error: Some(format!("Delete failed: {error}")),
-                        });
-                        outcome
-                    }
-                    None => tuicore::DispatchOutcome::unchanged(),
-                },
-                TaskOperationResult::StateSaved { task_id, error } => self
-                    .context
-                    .store
-                    .borrow_mut()
-                    .dispatch(AppEvent::SaveCompleted {
-                        target: SaveTarget::task(task_id, TaskField::State),
-                        error: error.map(|error| format!("State update failed: {error}")),
-                    }),
-            };
-            changed |= outcome.changed;
-        }
-        changed
     }
 }
 
@@ -401,10 +294,10 @@ impl TuiNode<AppMsg> for App {
 
     fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
         let mut result = self.root.tick(dt, settings);
-        if self.poll_task_operation_results() {
+        if self.context.coordinator.borrow_mut().poll() {
             result = result.merge(TickResult::CHANGED);
         }
-        if self.pending_task_operations > 0 {
+        if self.context.coordinator.borrow().has_pending() {
             result = result.merge(TickResult::scheduled_after(Duration::from_millis(50)));
         }
         result
@@ -435,17 +328,10 @@ type TaskWorkspaceLayout = Split<Flex<AppMsg>, TaskPane>;
 type TaskViewChange = Rc<RefCell<Option<TaskView>>>;
 type VisibleTaskSelection = Rc<RefCell<Option<String>>>;
 type PatchSink = Rc<RefCell<Vec<TaskPatch>>>;
-type PersonPatchSink = Rc<RefCell<Vec<PersonPatch>>>;
-type ProjectPatchSink = Rc<RefCell<Vec<ProjectPatch>>>;
-type AppStore =
-    Rc<RefCell<Store<AppState, AppEvent, fn(&mut AppState, AppEvent) -> tuicore::DispatchOutcome>>>;
-
 #[derive(Clone)]
-struct AppContext {
-    store: AppStore,
-    pool: AnyPool,
-    dialect: SqlDialect,
-    runtime: Handle,
+pub(crate) struct AppContext {
+    pub(crate) store: AppStore,
+    pub(crate) coordinator: Rc<RefCell<PersistenceCoordinator>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -643,61 +529,6 @@ impl TuiNode<AppMsg> for TaskViewMenu {
     }
 }
 
-#[derive(Debug)]
-struct SaveResult {
-    task_id: String,
-    field: TaskField,
-    seq: u64,
-    error: Option<String>,
-}
-
-#[derive(Clone)]
-struct SaveStatusLine {
-    value: Rc<RefCell<(String, bool)>>,
-}
-
-impl SaveStatusLine {
-    fn new(error: Option<&str>) -> Self {
-        let line = Self {
-            value: Rc::new(RefCell::new((String::new(), false))),
-        };
-        line.set_error(error);
-        line
-    }
-
-    fn set_error(&self, error: Option<&str>) {
-        *self.value.borrow_mut() = match error {
-            Some(error) => (error.to_string(), true),
-            None => (String::new(), false),
-        };
-    }
-}
-
-impl TuiNode<AppMsg> for SaveStatusLine {
-    fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
-        let value = self.value.borrow();
-        let height = u16::from(!value.0.is_empty());
-        LayoutSizeHint::content(value.0.chars().count() as u16, height).normalized(proposal)
-    }
-
-    fn layout(&mut self, area: Rect, _ctx: &mut LayoutCtx) -> LayoutResult {
-        LayoutResult::new(area)
-    }
-
-    fn render<'a>(&'a self, frame: &mut Frame, area: Rect, _ctx: &mut RenderCtx<'a>) {
-        let value = self.value.borrow();
-        let color = if value.1 {
-            tuicore::theme().error_fg()
-        } else {
-            tuicore::theme().muted_fg()
-        };
-        frame.render_widget(
-            ratatui::widgets::Paragraph::new(value.0.as_str()).style(Style::default().fg(color)),
-            area,
-        );
-    }
-}
-
 struct TaskWorkspace {
     context: AppContext,
     layout: TaskWorkspaceLayout,
@@ -707,11 +538,6 @@ struct TaskWorkspace {
     visible_selection: VisibleTaskSelection,
     table_focused: bool,
     observed_version: u64,
-    save_tx: mpsc::Sender<SaveResult>,
-    save_rx: mpsc::Receiver<SaveResult>,
-    next_save_seq: u64,
-    latest_save_seq: HashMap<(String, TaskField), u64>,
-    pending_saves: HashMap<(String, TaskField), TaskPatch>,
 }
 
 #[derive(Debug, Default)]
@@ -762,7 +588,6 @@ impl TaskWorkspace {
         let layout =
             Split::vertical(toolbar, pane).constraints(Constraint::Length(1), Constraint::Min(1));
         let observed_version = context.store.borrow().state().version;
-        let (save_tx, save_rx) = mpsc::channel();
         Self {
             context,
             layout,
@@ -772,11 +597,6 @@ impl TaskWorkspace {
             visible_selection,
             table_focused: false,
             observed_version,
-            save_tx,
-            save_rx,
-            next_save_seq: 0,
-            latest_save_seq: HashMap::new(),
-            pending_saves: HashMap::new(),
         }
     }
 
@@ -983,67 +803,11 @@ impl TaskWorkspace {
         if !outcome.changed {
             return false;
         }
-        self.spawn_save(task_id, patch);
+        self.context
+            .coordinator
+            .borrow_mut()
+            .submit(PersistenceCommand::PatchTask(task_id, patch));
         true
-    }
-
-    fn spawn_save(&mut self, task_id: String, patch: TaskPatch) {
-        let field = patch.field();
-        let key = (task_id.clone(), field);
-        if self.latest_save_seq.contains_key(&key) {
-            self.pending_saves.insert(key, patch);
-            return;
-        }
-        self.start_save(task_id, patch);
-    }
-
-    fn start_save(&mut self, task_id: String, patch: TaskPatch) {
-        let field = patch.field();
-        let seq = self.next_save_seq;
-        self.next_save_seq += 1;
-        self.latest_save_seq.insert((task_id.clone(), field), seq);
-        let pool = self.context.pool.clone();
-        let dialect = self.context.dialect;
-        let tx = self.save_tx.clone();
-        self.context.runtime.spawn(async move {
-            let error = storage::save_patch(pool, dialect, task_id.clone(), patch)
-                .await
-                .err()
-                .map(|error| error.to_string());
-            let _ = tx.send(SaveResult {
-                task_id,
-                field,
-                seq,
-                error,
-            });
-        });
-    }
-
-    fn poll_save_results(&mut self) -> bool {
-        let mut changed = false;
-        while let Ok(result) = self.save_rx.try_recv() {
-            let key = (result.task_id.clone(), result.field);
-            let latest = self.latest_save_seq.get(&key).copied();
-            if latest != Some(result.seq) {
-                continue;
-            }
-            self.latest_save_seq.remove(&key);
-            if let Some(patch) = self.pending_saves.remove(&key) {
-                self.start_save(result.task_id, patch);
-                changed = true;
-                continue;
-            }
-            let outcome = self
-                .context
-                .store
-                .borrow_mut()
-                .dispatch(AppEvent::SaveCompleted {
-                    target: SaveTarget::task(result.task_id, result.field),
-                    error: result.error,
-                });
-            changed |= outcome.changed;
-        }
-        changed
     }
 
     fn handle_workspace_event(
@@ -1145,15 +909,7 @@ impl TuiNode<AppMsg> for TaskWorkspace {
     }
 
     fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
-        let mut result = self.layout.tick(dt, settings);
-        if self.poll_save_results() {
-            self.sync_store_version();
-            result = result.merge(TickResult::CHANGED);
-        }
-        if !self.latest_save_seq.is_empty() {
-            result = result.merge(TickResult::scheduled_after(Duration::from_millis(50)));
-        }
-        result
+        self.layout.tick(dt, settings)
     }
 
     fn init(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
@@ -1173,832 +929,29 @@ impl TuiNode<AppMsg> for TaskWorkspace {
     }
 }
 
-type PersonTable = DataView<Person, String>;
-type ProjectTable = DataView<Project, String>;
-type TagTable = DataView<Tag, String>;
-type TagPatchSink = Rc<RefCell<Vec<TagPatch>>>;
-
-#[derive(Debug)]
-struct PersonSaveResult {
-    person_id: String,
-    field: PersonField,
-    seq: u64,
-    error: Option<String>,
-}
-
-#[derive(Debug)]
-struct ProjectSaveResult {
-    project_id: String,
-    field: ProjectField,
-    seq: u64,
-    error: Option<String>,
-}
-
-#[derive(Debug)]
-struct TagSaveResult {
-    tag_id: String,
-    field: TagField,
-    seq: u64,
-    error: Option<String>,
-}
-
-struct PeopleWorkspace {
-    context: AppContext,
-    split: Split<PersonTable, PersonDetailForm>,
-    observed_version: u64,
-    save_tx: mpsc::Sender<PersonSaveResult>,
-    save_rx: mpsc::Receiver<PersonSaveResult>,
-    next_save_seq: u64,
-    latest_save_seq: HashMap<(String, PersonField), u64>,
-    pending_saves: HashMap<(String, PersonField), PersonPatch>,
-}
-
-impl PeopleWorkspace {
-    fn new(context: AppContext) -> Self {
-        let split = person_split(&context.store);
-        let observed_version = context.store.borrow().state().version;
-        let (save_tx, save_rx) = mpsc::channel();
-        Self {
-            context,
-            split,
-            observed_version,
-            save_tx,
-            save_rx,
-            next_save_seq: 0,
-            latest_save_seq: HashMap::new(),
-            pending_saves: HashMap::new(),
-        }
-    }
-
-    fn sync_store_version(&mut self) {
-        let store = self.context.store.borrow();
-        let state = store.state();
-        let version = state.version;
-        if self.observed_version != version {
-            let rows = state.people.clone();
-            let save_error = state
-                .selected_person_id
-                .as_deref()
-                .and_then(|id| state.person_save_error(id))
-                .map(str::to_string);
-            drop(store);
-            self.split.first_mut().set_rows(rows);
-            self.split
-                .second_mut()
-                .set_save_error(save_error.as_deref());
-            self.observed_version = version;
-        }
-    }
-
-    fn sync_table_events(&mut self, ctx: &mut EventCtx<AppMsg>) {
-        let events = self.split.first_mut().take_events();
-        let mut focus_detail = false;
-        let mut selected_changed = false;
-        for event in events {
-            match &event {
-                DataViewTypedEvent::HighlightChanged { row_id: Some(id) }
-                | DataViewTypedEvent::Activated { row_id: id } => {
-                    selected_changed |= self.select_person(id, ctx);
-                    if matches!(event, DataViewTypedEvent::Activated { .. }) {
-                        focus_detail = true;
-                    }
-                }
-                DataViewTypedEvent::HighlightChanged { row_id: None }
-                | DataViewTypedEvent::SelectionChanged { .. }
-                | DataViewTypedEvent::TransformChanged { .. } => {}
-            }
-        }
-        if selected_changed {
-            ctx.request_layout();
-            ctx.request_redraw();
-        }
-        if focus_detail {
-            ctx.focus_next();
-            ctx.request_redraw();
-        }
-    }
-
-    fn select_person(&mut self, id: &str, ctx: &mut EventCtx<AppMsg>) -> bool {
-        let outcome = self
-            .context
-            .store
-            .borrow_mut()
-            .dispatch(AppEvent::SelectPerson(id.to_string()));
-        if outcome.changed {
-            let store = self.context.store.borrow();
-            let state = store.state();
-            let selected_person = state.people.iter().find(|person| person.id == id);
-            let save_error = selected_person.and_then(|person| state.person_save_error(&person.id));
-            self.split
-                .second_mut()
-                .set_person(selected_person, save_error, ctx);
-        }
-        outcome.changed
-    }
-
-    fn drain_detail_patches(&mut self) -> bool {
-        let patches = self.split.second_mut().take_patches();
-        let mut changed = false;
-        for (person_id, patch) in patches {
-            changed |= self.apply_patch(person_id, patch);
-        }
-        changed
-    }
-
-    fn sync_detail_changes(&mut self) -> bool {
-        if !self.drain_detail_patches() {
-            return false;
-        }
-        let store = self.context.store.borrow();
-        let state = store.state();
-        self.split.first_mut().set_rows(state.people.clone());
-        self.split.second_mut().set_save_error(
-            state
-                .selected_person_id
-                .as_deref()
-                .and_then(|id| state.person_save_error(id)),
-        );
-        self.observed_version = state.version;
-        true
-    }
-
-    fn apply_patch(&mut self, person_id: String, patch: PersonPatch) -> bool {
-        let outcome = self
-            .context
-            .store
-            .borrow_mut()
-            .dispatch(AppEvent::PatchPerson {
-                person_id: person_id.clone(),
-                patch: patch.clone(),
-            });
-        if !outcome.changed {
-            return false;
-        }
-        self.spawn_save(person_id, patch);
-        true
-    }
-
-    fn spawn_save(&mut self, person_id: String, patch: PersonPatch) {
-        let field = patch.field();
-        let key = (person_id.clone(), field);
-        if self.latest_save_seq.contains_key(&key) {
-            self.pending_saves.insert(key, patch);
-            return;
-        }
-        self.start_save(person_id, patch);
-    }
-
-    fn start_save(&mut self, person_id: String, patch: PersonPatch) {
-        let field = patch.field();
-        let seq = self.next_save_seq;
-        self.next_save_seq += 1;
-        self.latest_save_seq.insert((person_id.clone(), field), seq);
-        let pool = self.context.pool.clone();
-        let dialect = self.context.dialect;
-        let tx = self.save_tx.clone();
-        self.context.runtime.spawn(async move {
-            let error = storage::save_person_patch(pool, dialect, person_id.clone(), patch)
-                .await
-                .err()
-                .map(|error| error.to_string());
-            let _ = tx.send(PersonSaveResult {
-                person_id,
-                field,
-                seq,
-                error,
-            });
-        });
-    }
-
-    fn poll_save_results(&mut self) -> bool {
-        let mut changed = false;
-        while let Ok(result) = self.save_rx.try_recv() {
-            let key = (result.person_id.clone(), result.field);
-            let latest = self.latest_save_seq.get(&key).copied();
-            if latest != Some(result.seq) {
-                continue;
-            }
-            self.latest_save_seq.remove(&key);
-            if let Some(patch) = self.pending_saves.remove(&key) {
-                self.start_save(result.person_id, patch);
-                changed = true;
-                continue;
-            }
-            let outcome = self
-                .context
-                .store
-                .borrow_mut()
-                .dispatch(AppEvent::SaveCompleted {
-                    target: SaveTarget::person(result.person_id, result.field),
-                    error: result.error,
-                });
-            changed |= outcome.changed;
-        }
-        changed
-    }
-}
-
-impl TuiNode<AppMsg> for PeopleWorkspace {
-    fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
-        self.sync_store_version();
-        self.split.layout(area, ctx)
-    }
-
-    fn render<'a>(&'a self, frame: &mut Frame, area: Rect, ctx: &mut RenderCtx<'a>) {
-        self.split.render(frame, area, ctx);
-    }
-
-    fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<AppMsg>) -> EventOutcome {
-        let outcome = self.split.event(event, ctx);
-        if self.sync_detail_changes() {
-            ctx.request_redraw();
-        }
-        self.sync_table_events(ctx);
-        outcome
-    }
-
-    fn dispatch_event(
-        &mut self,
-        route: &EventRoute,
-        event: &TuiEvent,
-        ctx: &mut EventCtx<AppMsg>,
-    ) -> EventOutcome {
-        let outcome = self.split.dispatch_event(route, event, ctx);
-        if self.sync_detail_changes() {
-            ctx.request_redraw();
-        }
-        self.sync_table_events(ctx);
-        outcome
-    }
-
-    fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<AppMsg>) {
-        self.split.dispatch_focus(target, focused, ctx);
-        if self.sync_detail_changes() {
-            ctx.request_redraw();
-        }
-    }
-
-    fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
-        let mut result = self.split.tick(dt, settings);
-        if self.poll_save_results() {
-            self.sync_store_version();
-            result = result.merge(TickResult::CHANGED);
-        }
-        if !self.latest_save_seq.is_empty() {
-            result = result.merge(TickResult::scheduled_after(Duration::from_millis(50)));
-        }
-        result
-    }
-
-    fn init(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
-        self.split.init(ctx);
-    }
-
-    fn mount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
-        self.split.mount(ctx);
-    }
-
-    fn unmount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
-        self.split.unmount(ctx);
-    }
-
-    fn destroy(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
-        self.split.destroy(ctx);
-    }
-}
-
-struct ProjectsWorkspace {
-    context: AppContext,
-    split: Split<ProjectTable, ProjectDetailForm>,
-    observed_version: u64,
-    save_tx: mpsc::Sender<ProjectSaveResult>,
-    save_rx: mpsc::Receiver<ProjectSaveResult>,
-    next_save_seq: u64,
-    latest_save_seq: HashMap<(String, ProjectField), u64>,
-    pending_saves: HashMap<(String, ProjectField), ProjectPatch>,
-}
-
-impl ProjectsWorkspace {
-    fn new(context: AppContext) -> Self {
-        let split = project_split(&context.store);
-        let observed_version = context.store.borrow().state().version;
-        let (save_tx, save_rx) = mpsc::channel();
-        Self {
-            context,
-            split,
-            observed_version,
-            save_tx,
-            save_rx,
-            next_save_seq: 0,
-            latest_save_seq: HashMap::new(),
-            pending_saves: HashMap::new(),
-        }
-    }
-
-    fn sync_store_version(&mut self) {
-        let store = self.context.store.borrow();
-        let state = store.state();
-        let version = state.version;
-        if self.observed_version != version {
-            let rows = state.projects.clone();
-            let save_error = state
-                .selected_project_id
-                .as_deref()
-                .and_then(|id| state.project_save_error(id))
-                .map(str::to_string);
-            drop(store);
-            self.split.first_mut().set_rows(rows);
-            self.split
-                .second_mut()
-                .set_save_error(save_error.as_deref());
-            self.observed_version = version;
-        }
-    }
-
-    fn sync_table_events(&mut self, ctx: &mut EventCtx<AppMsg>) {
-        let events = self.split.first_mut().take_events();
-        let mut focus_detail = false;
-        let mut selected_changed = false;
-        for event in events {
-            match &event {
-                DataViewTypedEvent::HighlightChanged { row_id: Some(id) }
-                | DataViewTypedEvent::Activated { row_id: id } => {
-                    selected_changed |= self.select_project(id, ctx);
-                    if matches!(event, DataViewTypedEvent::Activated { .. }) {
-                        focus_detail = true;
-                    }
-                }
-                DataViewTypedEvent::HighlightChanged { row_id: None }
-                | DataViewTypedEvent::SelectionChanged { .. }
-                | DataViewTypedEvent::TransformChanged { .. } => {}
-            }
-        }
-        if selected_changed {
-            ctx.request_layout();
-            ctx.request_redraw();
-        }
-        if focus_detail {
-            ctx.focus_next();
-            ctx.request_redraw();
-        }
-    }
-
-    fn select_project(&mut self, id: &str, ctx: &mut EventCtx<AppMsg>) -> bool {
-        let outcome = self
-            .context
-            .store
-            .borrow_mut()
-            .dispatch(AppEvent::SelectProject(id.to_string()));
-        if outcome.changed {
-            let store = self.context.store.borrow();
-            let state = store.state();
-            let selected_project = state.projects.iter().find(|project| project.id == id);
-            let save_error =
-                selected_project.and_then(|project| state.project_save_error(&project.id));
-            self.split
-                .second_mut()
-                .set_project(selected_project, &state.people, save_error, ctx);
-        }
-        outcome.changed
-    }
-
-    fn drain_detail_patches(&mut self) -> bool {
-        let patches = self.split.second_mut().take_patches();
-        let mut changed = false;
-        for (project_id, patch) in patches {
-            changed |= self.apply_patch(project_id, patch);
-        }
-        changed
-    }
-
-    fn sync_detail_changes(&mut self) -> bool {
-        if !self.drain_detail_patches() {
-            return false;
-        }
-        let store = self.context.store.borrow();
-        let state = store.state();
-        self.split.first_mut().set_rows(state.projects.clone());
-        self.split.second_mut().set_save_error(
-            state
-                .selected_project_id
-                .as_deref()
-                .and_then(|id| state.project_save_error(id)),
-        );
-        self.observed_version = state.version;
-        true
-    }
-
-    fn apply_patch(&mut self, project_id: String, patch: ProjectPatch) -> bool {
-        let outcome = self
-            .context
-            .store
-            .borrow_mut()
-            .dispatch(AppEvent::PatchProject {
-                project_id: project_id.clone(),
-                patch: patch.clone(),
-            });
-        if !outcome.changed {
-            return false;
-        }
-        self.spawn_save(project_id, patch);
-        true
-    }
-
-    fn spawn_save(&mut self, project_id: String, patch: ProjectPatch) {
-        let field = patch.field();
-        let key = (project_id.clone(), field);
-        if self.latest_save_seq.contains_key(&key) {
-            self.pending_saves.insert(key, patch);
-            return;
-        }
-        self.start_save(project_id, patch);
-    }
-
-    fn start_save(&mut self, project_id: String, patch: ProjectPatch) {
-        let field = patch.field();
-        let seq = self.next_save_seq;
-        self.next_save_seq += 1;
-        self.latest_save_seq
-            .insert((project_id.clone(), field), seq);
-        let pool = self.context.pool.clone();
-        let dialect = self.context.dialect;
-        let tx = self.save_tx.clone();
-        self.context.runtime.spawn(async move {
-            let error = storage::save_project_patch(pool, dialect, project_id.clone(), patch)
-                .await
-                .err()
-                .map(|error| error.to_string());
-            let _ = tx.send(ProjectSaveResult {
-                project_id,
-                field,
-                seq,
-                error,
-            });
-        });
-    }
-
-    fn poll_save_results(&mut self) -> bool {
-        let mut changed = false;
-        while let Ok(result) = self.save_rx.try_recv() {
-            let key = (result.project_id.clone(), result.field);
-            let latest = self.latest_save_seq.get(&key).copied();
-            if latest != Some(result.seq) {
-                continue;
-            }
-            self.latest_save_seq.remove(&key);
-            if let Some(patch) = self.pending_saves.remove(&key) {
-                self.start_save(result.project_id, patch);
-                changed = true;
-                continue;
-            }
-            let outcome = self
-                .context
-                .store
-                .borrow_mut()
-                .dispatch(AppEvent::SaveCompleted {
-                    target: SaveTarget::project(result.project_id, result.field),
-                    error: result.error,
-                });
-            changed |= outcome.changed;
-        }
-        changed
-    }
-}
-
-impl TuiNode<AppMsg> for ProjectsWorkspace {
-    fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
-        self.sync_store_version();
-        self.split.layout(area, ctx)
-    }
-
-    fn render<'a>(&'a self, frame: &mut Frame, area: Rect, ctx: &mut RenderCtx<'a>) {
-        self.split.render(frame, area, ctx);
-    }
-
-    fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<AppMsg>) -> EventOutcome {
-        let outcome = self.split.event(event, ctx);
-        if self.sync_detail_changes() {
-            ctx.request_redraw();
-        }
-        self.sync_table_events(ctx);
-        outcome
-    }
-
-    fn dispatch_event(
-        &mut self,
-        route: &EventRoute,
-        event: &TuiEvent,
-        ctx: &mut EventCtx<AppMsg>,
-    ) -> EventOutcome {
-        let outcome = self.split.dispatch_event(route, event, ctx);
-        if self.sync_detail_changes() {
-            ctx.request_redraw();
-        }
-        self.sync_table_events(ctx);
-        outcome
-    }
-
-    fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<AppMsg>) {
-        self.split.dispatch_focus(target, focused, ctx);
-        if self.sync_detail_changes() {
-            ctx.request_redraw();
-        }
-    }
-
-    fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
-        let mut result = self.split.tick(dt, settings);
-        if self.poll_save_results() {
-            self.sync_store_version();
-            result = result.merge(TickResult::CHANGED);
-        }
-        if !self.latest_save_seq.is_empty() {
-            result = result.merge(TickResult::scheduled_after(Duration::from_millis(50)));
-        }
-        result
-    }
-
-    fn init(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
-        self.split.init(ctx);
-    }
-
-    fn mount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
-        self.split.mount(ctx);
-    }
-
-    fn unmount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
-        self.split.unmount(ctx);
-    }
-
-    fn destroy(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
-        self.split.destroy(ctx);
-    }
-}
-
-struct TagsWorkspace {
-    context: AppContext,
-    split: Split<TagTable, TagDetailForm>,
-    observed_version: u64,
-    save_tx: mpsc::Sender<TagSaveResult>,
-    save_rx: mpsc::Receiver<TagSaveResult>,
-    next_save_seq: u64,
-    latest_save_seq: HashMap<(String, TagField), u64>,
-    pending_saves: HashMap<(String, TagField), TagPatch>,
-}
-
-impl TagsWorkspace {
-    fn new(context: AppContext) -> Self {
-        let split = tag_split(&context.store);
-        let observed_version = context.store.borrow().state().version;
-        let (save_tx, save_rx) = mpsc::channel();
-        Self {
-            context,
-            split,
-            observed_version,
-            save_tx,
-            save_rx,
-            next_save_seq: 0,
-            latest_save_seq: HashMap::new(),
-            pending_saves: HashMap::new(),
-        }
-    }
-
-    fn sync_store_version(&mut self) {
-        let store = self.context.store.borrow();
-        let state = store.state();
-        let version = state.version;
-        if self.observed_version != version {
-            let rows = state.tags.clone();
-            let save_error = state
-                .selected_tag_id
-                .as_deref()
-                .and_then(|id| state.tag_save_error(id))
-                .map(str::to_string);
-            drop(store);
-            self.split.first_mut().set_rows(rows);
-            self.split
-                .second_mut()
-                .set_save_error(save_error.as_deref());
-            self.observed_version = version;
-        }
-    }
-
-    fn sync_table_events(&mut self, ctx: &mut EventCtx<AppMsg>) {
-        let events = self.split.first_mut().take_events();
-        let mut focus_detail = false;
-        let mut selected_changed = false;
-        for event in events {
-            match &event {
-                DataViewTypedEvent::HighlightChanged { row_id: Some(id) }
-                | DataViewTypedEvent::Activated { row_id: id } => {
-                    selected_changed |= self.select_tag(id, ctx);
-                    if matches!(event, DataViewTypedEvent::Activated { .. }) {
-                        focus_detail = true;
-                    }
-                }
-                DataViewTypedEvent::HighlightChanged { row_id: None }
-                | DataViewTypedEvent::SelectionChanged { .. }
-                | DataViewTypedEvent::TransformChanged { .. } => {}
-            }
-        }
-        if selected_changed {
-            ctx.request_layout();
-            ctx.request_redraw();
-        }
-        if focus_detail {
-            ctx.focus_next();
-            ctx.request_redraw();
-        }
-    }
-
-    fn select_tag(&mut self, id: &str, ctx: &mut EventCtx<AppMsg>) -> bool {
-        let outcome = self
-            .context
-            .store
-            .borrow_mut()
-            .dispatch(AppEvent::SelectTag(id.to_string()));
-        if outcome.changed {
-            let store = self.context.store.borrow();
-            let state = store.state();
-            let selected_tag = state.tags.iter().find(|tag| tag.id == id);
-            let save_error = selected_tag.and_then(|tag| state.tag_save_error(&tag.id));
-            self.split
-                .second_mut()
-                .set_tag(selected_tag, save_error, ctx);
-        }
-        outcome.changed
-    }
-
-    fn sync_detail_changes(&mut self) -> bool {
-        let patches = self.split.second_mut().take_patches();
-        let mut changed = false;
-        for (tag_id, patch) in patches {
-            let outcome = self
-                .context
-                .store
-                .borrow_mut()
-                .dispatch(AppEvent::PatchTag {
-                    tag_id: tag_id.clone(),
-                    patch: patch.clone(),
-                });
-            if outcome.changed {
-                self.spawn_save(tag_id, patch);
-                changed = true;
-            }
-        }
-        if changed {
-            let store = self.context.store.borrow();
-            let state = store.state();
-            self.split.first_mut().set_rows(state.tags.clone());
-            self.split.second_mut().set_save_error(
-                state
-                    .selected_tag_id
-                    .as_deref()
-                    .and_then(|id| state.tag_save_error(id)),
-            );
-            self.observed_version = state.version;
-        }
-        changed
-    }
-
-    fn spawn_save(&mut self, tag_id: String, patch: TagPatch) {
-        let field = patch.field();
-        let key = (tag_id.clone(), field);
-        if self.latest_save_seq.contains_key(&key) {
-            self.pending_saves.insert(key, patch);
-            return;
-        }
-        self.start_save(tag_id, patch);
-    }
-
-    fn start_save(&mut self, tag_id: String, patch: TagPatch) {
-        let field = patch.field();
-        let seq = self.next_save_seq;
-        self.next_save_seq += 1;
-        self.latest_save_seq.insert((tag_id.clone(), field), seq);
-        let pool = self.context.pool.clone();
-        let dialect = self.context.dialect;
-        let tx = self.save_tx.clone();
-        self.context.runtime.spawn(async move {
-            let error = storage::save_tag_patch(pool, dialect, tag_id.clone(), patch)
-                .await
-                .err()
-                .map(|error| error.to_string());
-            let _ = tx.send(TagSaveResult {
-                tag_id,
-                field,
-                seq,
-                error,
-            });
-        });
-    }
-
-    fn poll_save_results(&mut self) -> bool {
-        let mut changed = false;
-        while let Ok(result) = self.save_rx.try_recv() {
-            let key = (result.tag_id.clone(), result.field);
-            if self.latest_save_seq.get(&key).copied() != Some(result.seq) {
-                continue;
-            }
-            self.latest_save_seq.remove(&key);
-            if let Some(patch) = self.pending_saves.remove(&key) {
-                self.start_save(result.tag_id, patch);
-                changed = true;
-                continue;
-            }
-            let outcome = self
-                .context
-                .store
-                .borrow_mut()
-                .dispatch(AppEvent::SaveCompleted {
-                    target: SaveTarget::tag(result.tag_id, result.field),
-                    error: result.error,
-                });
-            changed |= outcome.changed;
-        }
-        changed
-    }
-}
-
-impl TuiNode<AppMsg> for TagsWorkspace {
-    fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
-        self.sync_store_version();
-        self.split.layout(area, ctx)
-    }
-
-    fn render<'a>(&'a self, frame: &mut Frame, area: Rect, ctx: &mut RenderCtx<'a>) {
-        self.split.render(frame, area, ctx);
-    }
-
-    fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<AppMsg>) -> EventOutcome {
-        let outcome = self.split.event(event, ctx);
-        if self.sync_detail_changes() {
-            ctx.request_redraw();
-        }
-        self.sync_table_events(ctx);
-        outcome
-    }
-
-    fn dispatch_event(
-        &mut self,
-        route: &EventRoute,
-        event: &TuiEvent,
-        ctx: &mut EventCtx<AppMsg>,
-    ) -> EventOutcome {
-        let outcome = self.split.dispatch_event(route, event, ctx);
-        if self.sync_detail_changes() {
-            ctx.request_redraw();
-        }
-        self.sync_table_events(ctx);
-        outcome
-    }
-
-    fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<AppMsg>) {
-        self.split.dispatch_focus(target, focused, ctx);
-        if self.sync_detail_changes() {
-            ctx.request_redraw();
-        }
-    }
-
-    fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
-        let mut result = self.split.tick(dt, settings);
-        if self.poll_save_results() {
-            self.sync_store_version();
-            result = result.merge(TickResult::CHANGED);
-        }
-        if !self.latest_save_seq.is_empty() {
-            result = result.merge(TickResult::scheduled_after(Duration::from_millis(50)));
-        }
-        result
-    }
-
-    fn init(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
-        self.split.init(ctx);
-    }
-
-    fn mount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
-        self.split.mount(ctx);
-    }
-
-    fn unmount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
-        self.split.unmount(ctx);
-    }
-
-    fn destroy(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
-        self.split.destroy(ctx);
-    }
-}
-
 enum AppDialog {
-    Management(Box<DialogHost<ManagementDialog, AppMsg>>),
+    People(Box<people::PeopleDialog>),
+    Projects(Box<projects::ProjectsDialog>),
+    Tags(Box<tags::TagsDialog>),
     CreateTask(DialogHost<CreateTaskDialog, AppMsg>),
     DeleteTask(ConfirmationDialog<AppMsg>),
     TaskDisposition(Dialog<AppMsg>),
 }
 
+fn management_dialog(context: AppContext, kind: ManagementDialogKind) -> AppDialog {
+    match kind {
+        ManagementDialogKind::People => AppDialog::People(Box::new(people::dialog(context))),
+        ManagementDialogKind::Projects => AppDialog::Projects(Box::new(projects::dialog(context))),
+        ManagementDialogKind::Tags => AppDialog::Tags(Box::new(tags::dialog(context))),
+    }
+}
+
 impl TuiNode<AppMsg> for AppDialog {
     fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
         match self {
-            Self::Management(dialog) => dialog.measure(proposal),
+            Self::People(dialog) => dialog.measure(proposal),
+            Self::Projects(dialog) => dialog.measure(proposal),
+            Self::Tags(dialog) => dialog.measure(proposal),
             Self::CreateTask(dialog) => {
                 let body = dialog.child().measure(proposal);
                 let chrome = dialog.dialog().measure(proposal);
@@ -2025,7 +978,9 @@ impl TuiNode<AppMsg> for AppDialog {
 
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
         match self {
-            Self::Management(dialog) => dialog.layout(area, ctx),
+            Self::People(dialog) => dialog.layout(area, ctx),
+            Self::Projects(dialog) => dialog.layout(area, ctx),
+            Self::Tags(dialog) => dialog.layout(area, ctx),
             Self::CreateTask(dialog) => dialog.layout(area, ctx),
             Self::DeleteTask(dialog) => dialog.layout(area, ctx),
             Self::TaskDisposition(dialog) => dialog.layout(area, ctx),
@@ -2034,7 +989,9 @@ impl TuiNode<AppMsg> for AppDialog {
 
     fn render<'a>(&'a self, frame: &mut Frame, area: Rect, ctx: &mut RenderCtx<'a>) {
         match self {
-            Self::Management(dialog) => dialog.render(frame, area, ctx),
+            Self::People(dialog) => dialog.render(frame, area, ctx),
+            Self::Projects(dialog) => dialog.render(frame, area, ctx),
+            Self::Tags(dialog) => dialog.render(frame, area, ctx),
             Self::CreateTask(dialog) => dialog.render(frame, area, ctx),
             Self::DeleteTask(dialog) => dialog.render(frame, area),
             Self::TaskDisposition(dialog) => dialog.render(frame, area),
@@ -2043,7 +1000,9 @@ impl TuiNode<AppMsg> for AppDialog {
 
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<AppMsg>) -> EventOutcome {
         match self {
-            Self::Management(dialog) => dialog.event(event, ctx),
+            Self::People(dialog) => dialog.event(event, ctx),
+            Self::Projects(dialog) => dialog.event(event, ctx),
+            Self::Tags(dialog) => dialog.event(event, ctx),
             Self::CreateTask(dialog) => dialog.event(event, ctx),
             Self::DeleteTask(dialog) => dialog.event(event, ctx),
             Self::TaskDisposition(dialog) => dialog.event(event, ctx),
@@ -2057,7 +1016,9 @@ impl TuiNode<AppMsg> for AppDialog {
         ctx: &mut EventCtx<AppMsg>,
     ) -> EventOutcome {
         match self {
-            Self::Management(dialog) => dialog.dispatch_event(route, event, ctx),
+            Self::People(dialog) => dialog.dispatch_event(route, event, ctx),
+            Self::Projects(dialog) => dialog.dispatch_event(route, event, ctx),
+            Self::Tags(dialog) => dialog.dispatch_event(route, event, ctx),
             Self::CreateTask(dialog) => dialog.dispatch_event(route, event, ctx),
             Self::DeleteTask(dialog) => dialog.dispatch_event(route, event, ctx),
             Self::TaskDisposition(dialog) => dialog.dispatch_event(route, event, ctx),
@@ -2066,7 +1027,9 @@ impl TuiNode<AppMsg> for AppDialog {
 
     fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<AppMsg>) {
         match self {
-            Self::Management(dialog) => dialog.dispatch_focus(target, focused, ctx),
+            Self::People(dialog) => dialog.dispatch_focus(target, focused, ctx),
+            Self::Projects(dialog) => dialog.dispatch_focus(target, focused, ctx),
+            Self::Tags(dialog) => dialog.dispatch_focus(target, focused, ctx),
             Self::CreateTask(dialog) => dialog.dispatch_focus(target, focused, ctx),
             Self::DeleteTask(dialog) => dialog.dispatch_focus(target, focused, ctx),
             Self::TaskDisposition(dialog) => dialog.dispatch_focus(target, focused, ctx),
@@ -2075,7 +1038,9 @@ impl TuiNode<AppMsg> for AppDialog {
 
     fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
         match self {
-            Self::Management(dialog) => dialog.tick(dt, settings),
+            Self::People(dialog) => dialog.tick(dt, settings),
+            Self::Projects(dialog) => dialog.tick(dt, settings),
+            Self::Tags(dialog) => dialog.tick(dt, settings),
             Self::CreateTask(dialog) => dialog.tick(dt, settings),
             Self::DeleteTask(dialog) => dialog.tick(dt, settings),
             Self::TaskDisposition(dialog) => dialog.tick(dt, settings),
@@ -2084,7 +1049,9 @@ impl TuiNode<AppMsg> for AppDialog {
 
     fn init(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
         match self {
-            Self::Management(dialog) => dialog.init(ctx),
+            Self::People(dialog) => dialog.init(ctx),
+            Self::Projects(dialog) => dialog.init(ctx),
+            Self::Tags(dialog) => dialog.init(ctx),
             Self::CreateTask(dialog) => dialog.init(ctx),
             Self::DeleteTask(dialog) => dialog.init(ctx),
             Self::TaskDisposition(dialog) => dialog.init(ctx),
@@ -2093,7 +1060,9 @@ impl TuiNode<AppMsg> for AppDialog {
 
     fn mount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
         match self {
-            Self::Management(dialog) => dialog.mount(ctx),
+            Self::People(dialog) => dialog.mount(ctx),
+            Self::Projects(dialog) => dialog.mount(ctx),
+            Self::Tags(dialog) => dialog.mount(ctx),
             Self::CreateTask(dialog) => dialog.mount(ctx),
             Self::DeleteTask(dialog) => dialog.mount(ctx),
             Self::TaskDisposition(dialog) => dialog.mount(ctx),
@@ -2102,7 +1071,9 @@ impl TuiNode<AppMsg> for AppDialog {
 
     fn unmount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
         match self {
-            Self::Management(dialog) => dialog.unmount(ctx),
+            Self::People(dialog) => dialog.unmount(ctx),
+            Self::Projects(dialog) => dialog.unmount(ctx),
+            Self::Tags(dialog) => dialog.unmount(ctx),
             Self::CreateTask(dialog) => dialog.unmount(ctx),
             Self::DeleteTask(dialog) => dialog.unmount(ctx),
             Self::TaskDisposition(dialog) => dialog.unmount(ctx),
@@ -2111,23 +1082,14 @@ impl TuiNode<AppMsg> for AppDialog {
 
     fn destroy(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
         match self {
-            Self::Management(dialog) => dialog.destroy(ctx),
+            Self::People(dialog) => dialog.destroy(ctx),
+            Self::Projects(dialog) => dialog.destroy(ctx),
+            Self::Tags(dialog) => dialog.destroy(ctx),
             Self::CreateTask(dialog) => dialog.destroy(ctx),
             Self::DeleteTask(dialog) => dialog.destroy(ctx),
             Self::TaskDisposition(dialog) => dialog.destroy(ctx),
         }
     }
-}
-
-fn management_dialog(context: AppContext, kind: ManagementDialogKind) -> AppDialog {
-    let mut management = ManagementDialog::new(context);
-    management.set_active(kind);
-    AppDialog::Management(Box::new(
-        Dialog::new()
-            .top_left(kind.title())
-            .on_close(|_| AppMsg::CloseDialog)
-            .host(management),
-    ))
 }
 
 fn create_task_dialog_host() -> AppDialog {
@@ -2183,106 +1145,6 @@ fn task_disposition_dialog(task: &Task) -> AppDialog {
             ])
             .on_close(|_| AppMsg::CloseDialog),
     )
-}
-
-struct ManagementDialog {
-    people: PeopleWorkspace,
-    projects: ProjectsWorkspace,
-    tags: TagsWorkspace,
-    active: ManagementDialogKind,
-}
-
-impl ManagementDialog {
-    fn new(context: AppContext) -> Self {
-        Self {
-            people: PeopleWorkspace::new(context.clone()),
-            projects: ProjectsWorkspace::new(context.clone()),
-            tags: TagsWorkspace::new(context),
-            active: ManagementDialogKind::People,
-        }
-    }
-
-    fn set_active(&mut self, active: ManagementDialogKind) {
-        self.active = active;
-    }
-}
-
-impl TuiNode<AppMsg> for ManagementDialog {
-    fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
-        match self.active {
-            ManagementDialogKind::People => self.people.layout(area, ctx),
-            ManagementDialogKind::Projects => self.projects.layout(area, ctx),
-            ManagementDialogKind::Tags => self.tags.layout(area, ctx),
-        }
-    }
-
-    fn render<'a>(&'a self, frame: &mut Frame, area: Rect, ctx: &mut RenderCtx<'a>) {
-        match self.active {
-            ManagementDialogKind::People => self.people.render(frame, area, ctx),
-            ManagementDialogKind::Projects => self.projects.render(frame, area, ctx),
-            ManagementDialogKind::Tags => self.tags.render(frame, area, ctx),
-        }
-    }
-
-    fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<AppMsg>) -> EventOutcome {
-        match self.active {
-            ManagementDialogKind::People => self.people.event(event, ctx),
-            ManagementDialogKind::Projects => self.projects.event(event, ctx),
-            ManagementDialogKind::Tags => self.tags.event(event, ctx),
-        }
-    }
-
-    fn dispatch_event(
-        &mut self,
-        route: &EventRoute,
-        event: &TuiEvent,
-        ctx: &mut EventCtx<AppMsg>,
-    ) -> EventOutcome {
-        match self.active {
-            ManagementDialogKind::People => self.people.dispatch_event(route, event, ctx),
-            ManagementDialogKind::Projects => self.projects.dispatch_event(route, event, ctx),
-            ManagementDialogKind::Tags => self.tags.dispatch_event(route, event, ctx),
-        }
-    }
-
-    fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<AppMsg>) {
-        match self.active {
-            ManagementDialogKind::People => self.people.dispatch_focus(target, focused, ctx),
-            ManagementDialogKind::Projects => self.projects.dispatch_focus(target, focused, ctx),
-            ManagementDialogKind::Tags => self.tags.dispatch_focus(target, focused, ctx),
-        }
-    }
-
-    fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
-        self.people
-            .tick(dt, settings)
-            .merge(self.projects.tick(dt, settings))
-            .merge(self.tags.tick(dt, settings))
-    }
-
-    fn init(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
-        self.people.init(ctx);
-        self.projects.init(ctx);
-        self.tags.init(ctx);
-    }
-
-    fn mount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
-        self.people.mount(ctx);
-        self.projects.mount(ctx);
-        self.tags.mount(ctx);
-    }
-
-    fn unmount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
-        self.people.unmount(ctx);
-        self.projects.unmount(ctx);
-        self.tags.unmount(ctx);
-    }
-
-    fn destroy(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
-        self.people.destroy(ctx);
-        self.projects.destroy(ctx);
-        self.tags.destroy(ctx);
-    }
 }
 
 struct TaskDetailForm {
@@ -2417,647 +1279,6 @@ impl TuiNode<AppMsg> for TaskDetailForm {
     fn destroy(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
         self.root.destroy(ctx);
     }
-}
-
-struct PersonDetailForm {
-    root: Flex<AppMsg>,
-    person_id: Option<String>,
-    patches: PersonPatchSink,
-    save_status: SaveStatusLine,
-}
-
-impl PersonDetailForm {
-    fn new(person: Option<&Person>, save_error: Option<&str>) -> Self {
-        let patches = Rc::new(RefCell::new(Vec::new()));
-        let save_status = SaveStatusLine::new(save_error);
-        Self {
-            root: Flex::column().child(
-                "form",
-                person_detail_form(person, Rc::clone(&patches), save_status.clone()),
-                FlexItem::content(),
-            ),
-            person_id: person.map(|person| person.id.clone()),
-            patches,
-            save_status,
-        }
-    }
-
-    fn take_patches(&mut self) -> Vec<(String, PersonPatch)> {
-        let Some(person_id) = self.person_id.clone() else {
-            self.patches.borrow_mut().clear();
-            return Vec::new();
-        };
-        self.patches
-            .borrow_mut()
-            .drain(..)
-            .map(|patch| (person_id.clone(), patch))
-            .collect()
-    }
-
-    fn set_person(
-        &mut self,
-        person: Option<&Person>,
-        save_error: Option<&str>,
-        ctx: &mut EventCtx<AppMsg>,
-    ) {
-        self.patches = Rc::new(RefCell::new(Vec::new()));
-        self.person_id = person.map(|person| person.id.clone());
-        self.save_status = SaveStatusLine::new(save_error);
-        self.root
-            .replace(
-                "form",
-                person_detail_form(person, Rc::clone(&self.patches), self.save_status.clone()),
-                FlexItem::content(),
-                ctx,
-            )
-            .expect("person detail form host should contain form child");
-    }
-
-    fn set_save_error(&self, save_error: Option<&str>) {
-        self.save_status.set_error(save_error);
-    }
-}
-
-impl TuiNode<AppMsg> for PersonDetailForm {
-    fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
-        self.root.layout(area, ctx)
-    }
-
-    fn render<'a>(&'a self, frame: &mut Frame, area: Rect, ctx: &mut RenderCtx<'a>) {
-        self.root.render(frame, area, ctx);
-    }
-
-    fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<AppMsg>) -> EventOutcome {
-        let outcome = self.root.event(event, ctx);
-        detail_outcome_or_escape(outcome, event, ctx)
-    }
-
-    fn dispatch_event(
-        &mut self,
-        route: &EventRoute,
-        event: &TuiEvent,
-        ctx: &mut EventCtx<AppMsg>,
-    ) -> EventOutcome {
-        let outcome = self.root.dispatch_event(route, event, ctx);
-        detail_outcome_or_escape(outcome, event, ctx)
-    }
-
-    fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<AppMsg>) {
-        self.root.dispatch_focus(target, focused, ctx);
-    }
-
-    fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
-        self.root.tick(dt, settings)
-    }
-
-    fn init(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
-        self.root.init(ctx);
-    }
-
-    fn mount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
-        self.root.mount(ctx);
-    }
-
-    fn unmount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
-        self.root.unmount(ctx);
-    }
-
-    fn destroy(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
-        self.root.destroy(ctx);
-    }
-}
-
-struct ProjectDetailForm {
-    root: Flex<AppMsg>,
-    project_id: Option<String>,
-    patches: ProjectPatchSink,
-    save_status: SaveStatusLine,
-}
-
-impl ProjectDetailForm {
-    fn new(project: Option<&Project>, people: &[Person], save_error: Option<&str>) -> Self {
-        let patches = Rc::new(RefCell::new(Vec::new()));
-        let save_status = SaveStatusLine::new(save_error);
-        Self {
-            root: Flex::column().child(
-                "form",
-                project_detail_form(project, people, Rc::clone(&patches), save_status.clone()),
-                FlexItem::content(),
-            ),
-            project_id: project.map(|project| project.id.clone()),
-            patches,
-            save_status,
-        }
-    }
-
-    fn take_patches(&mut self) -> Vec<(String, ProjectPatch)> {
-        let Some(project_id) = self.project_id.clone() else {
-            self.patches.borrow_mut().clear();
-            return Vec::new();
-        };
-        self.patches
-            .borrow_mut()
-            .drain(..)
-            .map(|patch| (project_id.clone(), patch))
-            .collect()
-    }
-
-    fn set_project(
-        &mut self,
-        project: Option<&Project>,
-        people: &[Person],
-        save_error: Option<&str>,
-        ctx: &mut EventCtx<AppMsg>,
-    ) {
-        self.patches = Rc::new(RefCell::new(Vec::new()));
-        self.project_id = project.map(|project| project.id.clone());
-        self.save_status = SaveStatusLine::new(save_error);
-        self.root
-            .replace(
-                "form",
-                project_detail_form(
-                    project,
-                    people,
-                    Rc::clone(&self.patches),
-                    self.save_status.clone(),
-                ),
-                FlexItem::content(),
-                ctx,
-            )
-            .expect("project detail form host should contain form child");
-    }
-
-    fn set_save_error(&self, save_error: Option<&str>) {
-        self.save_status.set_error(save_error);
-    }
-}
-
-impl TuiNode<AppMsg> for ProjectDetailForm {
-    fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
-        self.root.layout(area, ctx)
-    }
-
-    fn render<'a>(&'a self, frame: &mut Frame, area: Rect, ctx: &mut RenderCtx<'a>) {
-        self.root.render(frame, area, ctx);
-    }
-
-    fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<AppMsg>) -> EventOutcome {
-        let outcome = self.root.event(event, ctx);
-        detail_outcome_or_escape(outcome, event, ctx)
-    }
-
-    fn dispatch_event(
-        &mut self,
-        route: &EventRoute,
-        event: &TuiEvent,
-        ctx: &mut EventCtx<AppMsg>,
-    ) -> EventOutcome {
-        let outcome = self.root.dispatch_event(route, event, ctx);
-        detail_outcome_or_escape(outcome, event, ctx)
-    }
-
-    fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<AppMsg>) {
-        self.root.dispatch_focus(target, focused, ctx);
-    }
-
-    fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
-        self.root.tick(dt, settings)
-    }
-
-    fn init(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
-        self.root.init(ctx);
-    }
-
-    fn mount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
-        self.root.mount(ctx);
-    }
-
-    fn unmount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
-        self.root.unmount(ctx);
-    }
-
-    fn destroy(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
-        self.root.destroy(ctx);
-    }
-}
-
-struct TagDetailForm {
-    root: Flex<AppMsg>,
-    tag_id: Option<String>,
-    patches: TagPatchSink,
-    save_status: SaveStatusLine,
-}
-
-impl TagDetailForm {
-    fn new(tag: Option<&Tag>, save_error: Option<&str>) -> Self {
-        let patches = Rc::new(RefCell::new(Vec::new()));
-        let save_status = SaveStatusLine::new(save_error);
-        Self {
-            root: Flex::column().child(
-                "form",
-                tag_detail_form(tag, Rc::clone(&patches), save_status.clone()),
-                FlexItem::content(),
-            ),
-            tag_id: tag.map(|tag| tag.id.clone()),
-            patches,
-            save_status,
-        }
-    }
-
-    fn take_patches(&mut self) -> Vec<(String, TagPatch)> {
-        let Some(tag_id) = self.tag_id.clone() else {
-            self.patches.borrow_mut().clear();
-            return Vec::new();
-        };
-        self.patches
-            .borrow_mut()
-            .drain(..)
-            .map(|patch| (tag_id.clone(), patch))
-            .collect()
-    }
-
-    fn set_tag(&mut self, tag: Option<&Tag>, save_error: Option<&str>, ctx: &mut EventCtx<AppMsg>) {
-        self.patches = Rc::new(RefCell::new(Vec::new()));
-        self.tag_id = tag.map(|tag| tag.id.clone());
-        self.save_status = SaveStatusLine::new(save_error);
-        self.root
-            .replace(
-                "form",
-                tag_detail_form(tag, Rc::clone(&self.patches), self.save_status.clone()),
-                FlexItem::content(),
-                ctx,
-            )
-            .expect("tag detail form host should contain form child");
-    }
-
-    fn set_save_error(&self, save_error: Option<&str>) {
-        self.save_status.set_error(save_error);
-    }
-}
-
-impl TuiNode<AppMsg> for TagDetailForm {
-    fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
-        self.root.layout(area, ctx)
-    }
-
-    fn render<'a>(&'a self, frame: &mut Frame, area: Rect, ctx: &mut RenderCtx<'a>) {
-        self.root.render(frame, area, ctx);
-    }
-
-    fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<AppMsg>) -> EventOutcome {
-        let outcome = self.root.event(event, ctx);
-        detail_outcome_or_escape(outcome, event, ctx)
-    }
-
-    fn dispatch_event(
-        &mut self,
-        route: &EventRoute,
-        event: &TuiEvent,
-        ctx: &mut EventCtx<AppMsg>,
-    ) -> EventOutcome {
-        let outcome = self.root.dispatch_event(route, event, ctx);
-        detail_outcome_or_escape(outcome, event, ctx)
-    }
-
-    fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<AppMsg>) {
-        self.root.dispatch_focus(target, focused, ctx);
-    }
-
-    fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
-        self.root.tick(dt, settings)
-    }
-
-    fn init(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
-        self.root.init(ctx);
-    }
-
-    fn mount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
-        self.root.mount(ctx);
-    }
-
-    fn unmount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
-        self.root.unmount(ctx);
-    }
-
-    fn destroy(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
-        self.root.destroy(ctx);
-    }
-}
-
-fn person_split(store: &AppStore) -> Split<PersonTable, PersonDetailForm> {
-    let store_ref = store.borrow();
-    let state = store_ref.state();
-    let selected = state.selected_person_id.as_deref();
-    let table = person_table(state.people.clone(), selected);
-    let selected_person =
-        selected.and_then(|id| state.people.iter().find(|person| person.id == id));
-    let save_error = selected_person.and_then(|person| state.person_save_error(&person.id));
-    let detail = PersonDetailForm::new(selected_person, save_error);
-    Split::horizontal(table, detail)
-        .ratio(65, 35)
-        .separator(Separator::new())
-}
-
-fn project_split(store: &AppStore) -> Split<ProjectTable, ProjectDetailForm> {
-    let store_ref = store.borrow();
-    let state = store_ref.state();
-    let selected = state.selected_project_id.as_deref();
-    let table = project_table(state.projects.clone(), &state.people, selected);
-    let selected_project =
-        selected.and_then(|id| state.projects.iter().find(|project| project.id == id));
-    let save_error = selected_project.and_then(|project| state.project_save_error(&project.id));
-    let detail = ProjectDetailForm::new(selected_project, &state.people, save_error);
-    Split::horizontal(table, detail)
-        .ratio(65, 35)
-        .separator(Separator::new())
-}
-
-fn tag_split(store: &AppStore) -> Split<TagTable, TagDetailForm> {
-    let store_ref = store.borrow();
-    let state = store_ref.state();
-    let selected = state.selected_tag_id.as_deref();
-    let table = tag_table(state.tags.clone(), selected);
-    let selected_tag = selected.and_then(|id| state.tags.iter().find(|tag| tag.id == id));
-    let save_error = selected_tag.and_then(|tag| state.tag_save_error(&tag.id));
-    let detail = TagDetailForm::new(selected_tag, save_error);
-    Split::horizontal(table, detail)
-        .ratio(65, 35)
-        .separator(Separator::new())
-}
-
-fn person_table(rows: Vec<Person>, selected_id: Option<&str>) -> DataView<Person, String> {
-    let mut table = DataView::new(rows, |row: &Person| row.id.clone())
-        .headers(true)
-        .action_bar(true)
-        .activation_mode(ActivationMode::OnActivateKey)
-        .selection_mode(SelectionMode::Single)
-        .selection_trigger(SelectionTrigger::OnNavigate)
-        .columns(vec![
-            Column::text(
-                "name",
-                "Person",
-                Constraint::Percentage(45),
-                |row: &Person| row.name.clone(),
-            )
-            .sortable(|row| row.name.clone()),
-            Column::text(
-                "email",
-                "Email",
-                Constraint::Percentage(40),
-                |row: &Person| row.email.clone(),
-            ),
-            Column::text(
-                "active",
-                "Active",
-                Constraint::Percentage(15),
-                |row: &Person| if row.active { "yes" } else { "no" }.to_string(),
-            )
-            .filter_key(|row| if row.active { "active" } else { "inactive" }.to_string()),
-        ]);
-    if let Some(id) = selected_id {
-        table = table.selected([id.to_string()]);
-    }
-    table
-}
-
-fn project_table(
-    rows: Vec<Project>,
-    people: &[Person],
-    selected_id: Option<&str>,
-) -> DataView<Project, String> {
-    let person_names: HashMap<String, String> = people
-        .iter()
-        .map(|person| (person.id.clone(), person.name.clone()))
-        .collect();
-    let lead_filter_names = person_names.clone();
-    let mut table = DataView::new(rows, |row: &Project| row.id.clone())
-        .headers(true)
-        .action_bar(true)
-        .activation_mode(ActivationMode::OnActivateKey)
-        .selection_mode(SelectionMode::Single)
-        .selection_trigger(SelectionTrigger::OnNavigate)
-        .columns(vec![
-            Column::text("key", "Key", Constraint::Percentage(20), |row: &Project| {
-                row.key.clone()
-            })
-            .sortable(|row| row.key.clone()),
-            Column::text(
-                "name",
-                "Project",
-                Constraint::Percentage(45),
-                |row: &Project| row.name.clone(),
-            ),
-            Column::text(
-                "lead",
-                "Lead",
-                Constraint::Percentage(35),
-                move |row: &Project| {
-                    row.lead_person_id
-                        .as_ref()
-                        .and_then(|id| person_names.get(id))
-                        .cloned()
-                        .unwrap_or_else(|| "—".to_string())
-                },
-            )
-            .filter_key(move |row| {
-                row.lead_person_id
-                    .as_ref()
-                    .and_then(|id| lead_filter_names.get(id))
-                    .cloned()
-                    .unwrap_or_else(|| "none".to_string())
-            }),
-        ]);
-    if let Some(id) = selected_id {
-        table = table.selected([id.to_string()]);
-    }
-    table
-}
-
-fn tag_table(rows: Vec<Tag>, selected_id: Option<&str>) -> DataView<Tag, String> {
-    let mut table = DataView::new(rows, |row: &Tag| row.id.clone())
-        .headers(true)
-        .action_bar(true)
-        .activation_mode(ActivationMode::OnActivateKey)
-        .selection_mode(SelectionMode::Single)
-        .selection_trigger(SelectionTrigger::OnNavigate)
-        .columns(vec![
-            Column::text("label", "Tag", Constraint::Fill(1), |row: &Tag| {
-                row.label.clone()
-            })
-            .sortable(|row| row.label.clone())
-            .filter_key(|row| row.label.clone()),
-        ]);
-    if let Some(id) = selected_id {
-        table = table.selected([id.to_string()]);
-    }
-    table
-}
-
-fn person_detail_form(
-    person: Option<&Person>,
-    patch_sink: PersonPatchSink,
-    save_status: SaveStatusLine,
-) -> Flex<AppMsg> {
-    let Some(person) = person else {
-        return Flex::<AppMsg>::column().child(
-            "empty",
-            Paragraph::new("No person selected."),
-            FlexItem::fixed(1),
-        );
-    };
-    Flex::<AppMsg>::column()
-        .gap(0)
-        .child("save-status", save_status, FlexItem::fixed(1))
-        .child(
-            "name",
-            TextInput::<AppMsg>::new()
-                .value(person.name.clone())
-                .panel("Name")
-                .on_edit_end({
-                    let patch_sink = Rc::clone(&patch_sink);
-                    move |value| {
-                        patch_sink.borrow_mut().push(PersonPatch::Name(value));
-                        AppMsg::Noop
-                    }
-                }),
-            FlexItem::fixed(3),
-        )
-        .child(
-            "email",
-            TextInput::<AppMsg>::new()
-                .value(person.email.clone())
-                .panel("Email")
-                .on_edit_end({
-                    let patch_sink = Rc::clone(&patch_sink);
-                    move |value| {
-                        patch_sink.borrow_mut().push(PersonPatch::Email(value));
-                        AppMsg::Noop
-                    }
-                }),
-            FlexItem::fixed(3),
-        )
-        .child(
-            "active",
-            dropdown_single(
-                "Active",
-                active_choices(),
-                if person.active { "true" } else { "false" },
-                {
-                    let patch_sink = Rc::clone(&patch_sink);
-                    move |id| {
-                        patch_sink
-                            .borrow_mut()
-                            .push(PersonPatch::Active(id == "true"))
-                    }
-                },
-            ),
-            FlexItem::fixed(3),
-        )
-}
-
-fn project_detail_form(
-    project: Option<&Project>,
-    people: &[Person],
-    patch_sink: ProjectPatchSink,
-    save_status: SaveStatusLine,
-) -> Flex<AppMsg> {
-    let Some(project) = project else {
-        return Flex::<AppMsg>::column().child(
-            "empty",
-            Paragraph::new("No project selected."),
-            FlexItem::fixed(1),
-        );
-    };
-    Flex::<AppMsg>::column()
-        .gap(0)
-        .child("save-status", save_status, FlexItem::fixed(1))
-        .child(
-            "key",
-            TextInput::<AppMsg>::new()
-                .value(project.key.clone())
-                .panel("Key")
-                .on_edit_end({
-                    let patch_sink = Rc::clone(&patch_sink);
-                    move |value| {
-                        patch_sink.borrow_mut().push(ProjectPatch::Key(value));
-                        AppMsg::Noop
-                    }
-                }),
-            FlexItem::fixed(3),
-        )
-        .child(
-            "name",
-            TextInput::<AppMsg>::new()
-                .value(project.name.clone())
-                .panel("Name")
-                .on_edit_end({
-                    let patch_sink = Rc::clone(&patch_sink);
-                    move |value| {
-                        patch_sink.borrow_mut().push(ProjectPatch::Name(value));
-                        AppMsg::Noop
-                    }
-                }),
-            FlexItem::fixed(3),
-        )
-        .child(
-            "description",
-            TextareaInput::<AppMsg>::new()
-                .value(project.description.clone())
-                .panel("Description")
-                .on_edit_end({
-                    let patch_sink = Rc::clone(&patch_sink);
-                    move |value| {
-                        patch_sink
-                            .borrow_mut()
-                            .push(ProjectPatch::Description(value));
-                        AppMsg::Noop
-                    }
-                })
-                .min_rows(4)
-                .max_rows(8),
-            FlexItem::fixed(6),
-        )
-        .child(
-            "lead",
-            dropdown_single_optional(
-                "Lead",
-                person_choices(people),
-                project.lead_person_id.as_deref(),
-                {
-                    let patch_sink = Rc::clone(&patch_sink);
-                    move |id| patch_sink.borrow_mut().push(ProjectPatch::LeadPerson(id))
-                },
-            ),
-            FlexItem::fixed(3),
-        )
-}
-
-fn tag_detail_form(
-    tag: Option<&Tag>,
-    patch_sink: TagPatchSink,
-    save_status: SaveStatusLine,
-) -> Flex<AppMsg> {
-    let Some(tag) = tag else {
-        return Flex::<AppMsg>::column().child(
-            "empty",
-            Paragraph::new("No tag selected."),
-            FlexItem::fixed(1),
-        );
-    };
-    Flex::<AppMsg>::column()
-        .gap(0)
-        .child("save-status", save_status, FlexItem::fixed(1))
-        .child(
-            "label",
-            TextInput::<AppMsg>::new()
-                .value(tag.label.clone())
-                .panel("Label")
-                .on_edit_end(move |value| {
-                    patch_sink.borrow_mut().push(TagPatch::Label(value));
-                    AppMsg::Noop
-                }),
-            FlexItem::fixed(3),
-        )
 }
 
 fn task_toolbar(pending_view: TaskViewChange, selected_view: TaskView) -> Flex<AppMsg> {
@@ -3479,7 +1700,7 @@ fn task_priority_icon(priority: TaskPriority) -> &'static str {
     }
 }
 
-fn detail_escape(event: &TuiEvent) -> bool {
+pub(crate) fn detail_escape(event: &TuiEvent) -> bool {
     app_keymap::matches_any(event, &[keys::DETAIL_CLOSE, keys::DETAIL_CLOSE_ALT])
 }
 
@@ -3518,31 +1739,6 @@ fn dropdown_single(
         .on_select(move |ids| {
             if let Some(id) = ids.into_iter().next() {
                 on_select(id);
-            }
-        })
-}
-
-fn dropdown_single_optional(
-    label: &'static str,
-    mut rows: Vec<Choice>,
-    selected: Option<&str>,
-    on_select: impl Fn(Option<String>) + 'static,
-) -> Dropdown<Choice, String> {
-    rows.insert(
-        0,
-        Choice {
-            id: "".to_string(),
-            label: "None".to_string(),
-        },
-    );
-    Dropdown::single(rows, |row| row.id.clone(), |row| row.label.clone())
-        .label(label)
-        .selected_one(selected.unwrap_or_default().to_string())
-        .search_mode(DropdownSearchMode::Contains)
-        .commit_mode(DropdownCommitMode::Explicit)
-        .on_select(move |ids| {
-            if let Some(id) = ids.into_iter().next() {
-                on_select((!id.is_empty()).then_some(id));
             }
         })
 }
@@ -3647,19 +1843,6 @@ fn priority_choices() -> Vec<Choice> {
         .collect()
 }
 
-fn active_choices() -> Vec<Choice> {
-    vec![
-        Choice {
-            id: "true".to_string(),
-            label: "Active".to_string(),
-        },
-        Choice {
-            id: "false".to_string(),
-            label: "Inactive".to_string(),
-        },
-    ]
-}
-
 fn person_choices(people: &[Person]) -> Vec<Choice> {
     people
         .iter()
@@ -3681,8 +1864,9 @@ fn project_choices(projects: &[Project]) -> Vec<Choice> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use crate::domain::{SaveTarget, TaskField, WorkspaceSnapshot};
     use ratatui::{Terminal, backend::TestBackend};
     use sqlx::any::AnyPoolOptions;
     use tuicore::{
@@ -3712,7 +1896,11 @@ mod tests {
             label: "api".to_string(),
         };
         let patches = Rc::new(RefCell::new(Vec::new()));
-        let mut input = TaskTagsInput::new(&test_task(), &[api.clone()], Rc::clone(&patches));
+        let mut input = TaskTagsInput::new(
+            &test_task(),
+            std::slice::from_ref(&api),
+            Rc::clone(&patches),
+        );
         input.input.set_focused(true);
         let mut ctx = EventCtx::default();
 
@@ -3779,7 +1967,7 @@ mod tests {
         workspace.select_task(&task_id, &mut EventCtx::default());
     }
 
-    fn test_context(
+    pub(crate) fn test_context(
         snapshot: WorkspaceSnapshot,
     ) -> (tokio::runtime::Runtime, AppContext, AppStore) {
         sqlx::any::install_default_drivers();
@@ -3797,16 +1985,20 @@ mod tests {
             AppState::from_snapshot(snapshot),
             reduce_app_state as fn(&mut AppState, AppEvent) -> tuicore::DispatchOutcome,
         )));
+        let coordinator = Rc::new(RefCell::new(PersistenceCoordinator::new(
+            Rc::clone(&store),
+            pool,
+            crate::storage::SqlDialect::Sqlite,
+            runtime.handle().clone(),
+        )));
         let context = AppContext {
             store: Rc::clone(&store),
-            pool,
-            dialect: SqlDialect::Sqlite,
-            runtime: runtime.handle().clone(),
+            coordinator,
         };
         (runtime, context, store)
     }
 
-    fn rendered_text(node: &impl TuiNode<AppMsg>, area: Rect) -> String {
+    pub(crate) fn rendered_text(node: &impl TuiNode<AppMsg>, area: Rect) -> String {
         let mut terminal = Terminal::new(TestBackend::new(area.width, area.height))
             .expect("terminal should build");
         terminal
@@ -4586,23 +2778,13 @@ mod tests {
 
     #[test]
     fn confirmed_delete_removes_task_from_state_immediately() {
-        let (runtime, context, _store) = test_context(WorkspaceSnapshot {
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
             tasks: vec![test_task()],
             people: Vec::new(),
             projects: Vec::new(),
             tags: Vec::new(),
         });
-        let mut app = App::new(
-            WorkspaceSnapshot {
-                tasks: vec![test_task()],
-                people: Vec::new(),
-                projects: Vec::new(),
-                tags: Vec::new(),
-            },
-            context.pool,
-            SqlDialect::Sqlite,
-            runtime.handle().clone(),
-        );
+        let mut app = App::new(context.store, context.coordinator);
 
         app.delete_task("task-1".to_string(), &mut EventCtx::default());
 
@@ -4639,13 +2821,8 @@ mod tests {
             projects: Vec::new(),
             tags: Vec::new(),
         };
-        let (runtime, context, _store) = test_context(snapshot.clone());
-        let mut app = App::new(
-            snapshot,
-            context.pool,
-            SqlDialect::Sqlite,
-            runtime.handle().clone(),
-        );
+        let (_runtime, context, _store) = test_context(snapshot);
+        let mut app = App::new(context.store, context.coordinator);
         let area = Rect::new(0, 0, 120, 40);
 
         app.open_delete_task_dialog(&mut EventCtx::default());
@@ -4682,13 +2859,8 @@ mod tests {
             projects: Vec::new(),
             tags: Vec::new(),
         };
-        let (runtime, context, _store) = test_context(snapshot.clone());
-        let mut app = App::new(
-            snapshot,
-            context.pool,
-            SqlDialect::Sqlite,
-            runtime.handle().clone(),
-        );
+        let (_runtime, context, _store) = test_context(snapshot);
+        let mut app = App::new(context.store, context.coordinator);
         let area = Rect::new(0, 0, 120, 40);
 
         app.open_create_task_dialog(&mut EventCtx::default());
@@ -4768,45 +2940,6 @@ mod tests {
     }
 
     #[test]
-    fn focused_detail_input_receives_tab_navigation_characters_before_ancestor_tabs() {
-        let person = Person {
-            id: "person-1".to_string(),
-            name: "Ada".to_string(),
-            email: "ada@example.com".to_string(),
-            active: true,
-        };
-        let detail = PersonDetailForm::new(Some(&person), None);
-        let patches = Rc::clone(&detail.patches);
-        let mut tabs = Tabs::new(vec![
-            Tab::new("Details", detail),
-            Tab::text("Other", "Other tab"),
-        ]);
-        let mut layout = LayoutCtx::new();
-        tabs.layout(Rect::new(0, 0, 80, 24), &mut layout);
-        let target = layout
-            .focus_targets()
-            .iter()
-            .find(|target| target.id.as_str() == "input")
-            .expect("detail name input should be focusable")
-            .clone();
-        tabs.dispatch_focus(&target, true, &mut FocusCtx::default());
-        let route = EventRoute::new(target.path);
-
-        for key in [Key::Enter, Key::Char('['), Key::Char(']'), Key::Enter] {
-            let outcome =
-                tabs.dispatch_event(&route, &TuiEvent::Key(key.into()), &mut EventCtx::default());
-            assert_eq!(outcome, EventOutcome::Handled);
-            assert_eq!(tabs.selected_index(), 0);
-        }
-
-        let patches = patches.borrow();
-        let [PersonPatch::Name(value)] = patches.as_slice() else {
-            panic!("expected one submitted name patch, got {patches:?}");
-        };
-        assert_eq!(value, "Ada[]");
-    }
-
-    #[test]
     fn title_blur_during_description_hotkey_preserves_description_focus() {
         sqlx::any::install_default_drivers();
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -4838,11 +2971,15 @@ mod tests {
             }),
             reduce_app_state as fn(&mut AppState, AppEvent) -> tuicore::DispatchOutcome,
         )));
+        let coordinator = Rc::new(RefCell::new(PersistenceCoordinator::new(
+            Rc::clone(&store),
+            pool,
+            crate::storage::SqlDialect::Sqlite,
+            runtime.handle().clone(),
+        )));
         let mut workspace = TaskWorkspace::new(AppContext {
             store: Rc::clone(&store),
-            pool,
-            dialect: SqlDialect::Sqlite,
-            runtime: runtime.handle().clone(),
+            coordinator,
         });
         let area = Rect::new(0, 0, 120, 40);
         let mut layout = LayoutCtx::new();
@@ -5175,79 +3312,17 @@ mod tests {
     }
 
     #[test]
-    fn people_save_status_reconciliation_keeps_pending_detail_changes() {
-        let person = Person {
-            id: "person-1".to_string(),
-            name: "Ada".to_string(),
-            email: "ada@example.com".to_string(),
-            active: true,
-        };
-        let (_runtime, context, store) = test_context(WorkspaceSnapshot {
-            tasks: Vec::new(),
-            people: vec![person],
-            projects: Vec::new(),
-            tags: Vec::new(),
-        });
-        let mut workspace = PeopleWorkspace::new(context);
-        workspace
-            .split
-            .second_mut()
-            .patches
-            .borrow_mut()
-            .push(PersonPatch::Name("Ada Lovelace".to_string()));
-
-        store.borrow_mut().dispatch(AppEvent::SaveCompleted {
-            target: SaveTarget::person("person-1".to_string(), PersonField::Email),
-            error: Some("offline".to_string()),
-        });
-        workspace.layout(Rect::new(0, 0, 100, 30), &mut LayoutCtx::new());
-
-        let patches = workspace.split.second_mut().take_patches();
-        let [(person_id, PersonPatch::Name(name))] = patches.as_slice() else {
-            panic!("expected pending person name patch, got {patches:?}");
-        };
-        assert_eq!(person_id, "person-1");
-        assert_eq!(name, "Ada Lovelace");
-        assert!(rendered_text(&workspace, Rect::new(0, 0, 100, 30)).contains("Save failed"));
-    }
-
-    #[test]
-    fn tags_management_workspace_has_table_and_editable_detail() {
-        let tags = vec![
-            Tag {
-                id: "tag-api".to_string(),
-                label: "api".to_string(),
-            },
-            Tag {
-                id: "tag-backend".to_string(),
-                label: "backend".to_string(),
-            },
-        ];
-        let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+    fn management_routing_builds_concrete_dialog_variant() {
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
             tasks: Vec::new(),
             people: Vec::new(),
             projects: Vec::new(),
-            tags,
+            tags: Vec::new(),
         });
-        let mut workspace = TagsWorkspace::new(context);
-        let area = Rect::new(0, 0, 100, 30);
 
-        workspace.layout(area, &mut LayoutCtx::new());
-        let text = rendered_text(&workspace, area);
-        assert!(text.contains("Tag"));
-        assert!(text.contains("api"));
-        assert!(text.contains("backend"));
-        assert!(text.contains("Label"));
-
-        workspace.select_tag("tag-backend", &mut EventCtx::default());
-        workspace
-            .split
-            .second_mut()
-            .patches
-            .borrow_mut()
-            .push(TagPatch::Label("platform".to_string()));
-        assert!(workspace.sync_detail_changes());
-        assert_eq!(store.borrow().state().tags[1].label, "platform");
-        assert_eq!(ManagementDialogKind::Tags.title(), "Tags");
+        assert!(matches!(
+            management_dialog(context, ManagementDialogKind::Projects),
+            AppDialog::Projects(_)
+        ));
     }
 }
