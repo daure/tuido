@@ -12,8 +12,8 @@ use tuicore::Store;
 
 use crate::{
     domain::{
-        AppEvent, AppState, PersonField, PersonPatch, ProjectField, ProjectPatch, SaveTarget,
-        TagField, TagPatch, Task, TaskPatch,
+        AppEvent, AppState, Person, PersonDeletion, PersonPatch, Project, ProjectDeletion,
+        ProjectPatch, SaveTarget, Tag, TagDeletion, TagPatch, Task, TaskField, TaskPatch,
     },
     storage::{self, SqlDialect},
 };
@@ -23,10 +23,10 @@ pub(crate) type AppStore =
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum CommandKey {
-    Task(String),
-    Person(String, PersonField),
-    Project(String, ProjectField),
-    Tag(String, TagField),
+    Task,
+    Person(String),
+    Project(String),
+    Tag(String),
 }
 
 #[derive(Debug, Clone)]
@@ -34,19 +34,30 @@ pub(crate) enum PersistenceCommand {
     CreateTask(Task),
     DeleteTask(Task),
     PatchTask(String, TaskPatch),
+    CreatePerson(Person),
+    DeletePerson(PersonDeletion),
     PatchPerson(String, PersonPatch),
+    CreateProject(Project),
+    DeleteProject(ProjectDeletion),
     PatchProject(String, ProjectPatch),
+    CreateTag(Tag),
+    DeleteTag(TagDeletion),
     PatchTag(String, TagPatch),
 }
 
 impl PersistenceCommand {
     fn key(&self) -> CommandKey {
         match self {
-            Self::CreateTask(task) | Self::DeleteTask(task) => CommandKey::Task(task.id.clone()),
-            Self::PatchTask(id, _) => CommandKey::Task(id.clone()),
-            Self::PatchPerson(id, patch) => CommandKey::Person(id.clone(), patch.field()),
-            Self::PatchProject(id, patch) => CommandKey::Project(id.clone(), patch.field()),
-            Self::PatchTag(id, patch) => CommandKey::Tag(id.clone(), patch.field()),
+            Self::CreateTask(_) | Self::DeleteTask(_) | Self::PatchTask(_, _) => CommandKey::Task,
+            Self::CreatePerson(person) => CommandKey::Person(person.id.clone()),
+            Self::DeletePerson(deletion) => CommandKey::Person(deletion.person.id.clone()),
+            Self::PatchPerson(id, _) => CommandKey::Person(id.clone()),
+            Self::CreateProject(project) => CommandKey::Project(project.id.clone()),
+            Self::DeleteProject(deletion) => CommandKey::Project(deletion.project.id.clone()),
+            Self::PatchProject(id, _) => CommandKey::Project(id.clone()),
+            Self::CreateTag(tag) => CommandKey::Tag(tag.id.clone()),
+            Self::DeleteTag(deletion) => CommandKey::Tag(deletion.tag.id.clone()),
+            Self::PatchTag(id, _) => CommandKey::Tag(id.clone()),
         }
     }
 }
@@ -91,32 +102,41 @@ impl PersistenceCoordinator {
         }
     }
 
-    pub(crate) fn submit(&mut self, command: PersistenceCommand) {
+    pub(crate) fn submit(&mut self, mut command: PersistenceCommand) {
         let key = command.key();
         if self.active.contains_key(&key) {
             let queue = self.queued.entry(key).or_default();
             let patch_field = match &command {
-                PersistenceCommand::PatchTask(_, patch) => Some(patch.field()),
+                PersistenceCommand::PatchTask(id, patch) => {
+                    Some((id.as_str(), coalesce_task_field(patch)))
+                }
                 _ => None,
             };
-            let replace_index = patch_field.and_then(|field| {
+            let replace_index = patch_field.and_then(|(task_id, field)| {
                 queue
                     .iter()
                     .enumerate()
                     .rev()
-                    .take_while(|(_, queued)| matches!(queued, PersistenceCommand::PatchTask(_, _)))
+                    .take_while(|(_, queued)| {
+                        matches!(queued, PersistenceCommand::PatchTask(_, _))
+                            && !remembered_custom_for_other_task(queued, task_id)
+                    })
                     .find_map(|(index, queued)| match queued {
-                        PersistenceCommand::PatchTask(_, patch) if patch.field() == field => {
+                        PersistenceCommand::PatchTask(queued_id, patch)
+                            if queued_id == task_id
+                                && coalesce_task_field(patch) == field
+                                && can_supersede_task_patch(patch, &command) =>
+                        {
                             Some(index)
                         }
                         _ => None,
                     })
             });
             if let Some(index) = replace_index {
-                queue[index] = command;
-            } else {
-                queue.push_back(command);
+                let removed = queue.remove(index).expect("queued command index is valid");
+                merge_remembered_custom(&removed, &mut command);
             }
+            queue.push_back(command);
         } else {
             self.start(command);
         }
@@ -175,20 +195,29 @@ impl PersistenceCoordinator {
             return false;
         }
         self.active.remove(&completion.key);
+        if completion.error.is_some() {
+            preserve_failed_active_custom(
+                &completion.command,
+                self.queued.get_mut(&completion.key),
+            );
+        }
         let task_patch_is_superseded = match &completion.command {
-            PersistenceCommand::PatchTask(_, patch) => {
+            PersistenceCommand::PatchTask(id, patch) => {
                 self.queued.get(&completion.key).is_some_and(|queue| {
                     queue
                         .iter()
                         .take_while(|command| {
                             matches!(command, PersistenceCommand::PatchTask(_, _))
+                                && !remembered_custom_for_other_task(command, id)
                         })
                         .any(|command| {
-                            matches!(
-                                command,
-                                PersistenceCommand::PatchTask(_, queued_patch)
-                                    if queued_patch.field() == patch.field()
-                            )
+                            let PersistenceCommand::PatchTask(queued_id, queued_patch) = command
+                            else {
+                                return false;
+                            };
+                            queued_id == id
+                                && coalesce_task_field(queued_patch) == coalesce_task_field(patch)
+                                && can_supersede_task_patch(patch, command)
                         })
                 })
             }
@@ -198,12 +227,13 @@ impl PersistenceCoordinator {
         match completion.command {
             PersistenceCommand::CreateTask(task) => {
                 if completion.error.is_some() {
+                    let task_id = task.id.clone();
                     changed |= self
                         .store
                         .borrow_mut()
                         .dispatch(AppEvent::TaskDeleted(task.id))
                         .changed;
-                    self.queued.remove(&completion.key);
+                    remove_queued_task_commands(self.queued.get_mut(&completion.key), &task_id);
                 }
             }
             PersistenceCommand::DeleteTask(task) => match completion.error {
@@ -217,9 +247,75 @@ impl PersistenceCoordinator {
                 None => {
                     if let Some(queue) = self.queued.get_mut(&completion.key) {
                         queue.retain(|command| {
-                            !matches!(command, PersistenceCommand::PatchTask(_, _))
+                            !matches!(command, PersistenceCommand::PatchTask(id, _) if id == &task.id)
                         });
                     }
+                }
+            },
+            PersistenceCommand::CreatePerson(person) => {
+                if completion.error.is_some() {
+                    changed |= self
+                        .store
+                        .borrow_mut()
+                        .dispatch(AppEvent::PersonDeleted(person.id))
+                        .changed;
+                    self.queued.remove(&completion.key);
+                }
+            }
+            PersistenceCommand::DeletePerson(deletion) => match completion.error {
+                Some(_) => {
+                    changed |= self
+                        .store
+                        .borrow_mut()
+                        .dispatch(AppEvent::PersonRestored(deletion))
+                        .changed;
+                }
+                None => {
+                    self.queued.remove(&completion.key);
+                }
+            },
+            PersistenceCommand::CreateProject(project) => {
+                if completion.error.is_some() {
+                    changed |= self
+                        .store
+                        .borrow_mut()
+                        .dispatch(AppEvent::ProjectDeleted(project.id))
+                        .changed;
+                    self.queued.remove(&completion.key);
+                }
+            }
+            PersistenceCommand::DeleteProject(deletion) => match completion.error {
+                Some(_) => {
+                    changed |= self
+                        .store
+                        .borrow_mut()
+                        .dispatch(AppEvent::ProjectRestored(deletion))
+                        .changed;
+                }
+                None => {
+                    self.queued.remove(&completion.key);
+                }
+            },
+            PersistenceCommand::CreateTag(tag) => {
+                if completion.error.is_some() {
+                    changed |= self
+                        .store
+                        .borrow_mut()
+                        .dispatch(AppEvent::TagDeleted(tag.id))
+                        .changed;
+                    self.queued.remove(&completion.key);
+                }
+            }
+            PersistenceCommand::DeleteTag(deletion) => match completion.error {
+                Some(_) => {
+                    changed |= self
+                        .store
+                        .borrow_mut()
+                        .dispatch(AppEvent::TagRestored(deletion))
+                        .changed;
+                }
+                None => {
+                    self.queued.remove(&completion.key);
                 }
             },
             PersistenceCommand::PatchTask(id, patch) => {
@@ -292,6 +388,22 @@ async fn execute(
     match command {
         PersistenceCommand::CreateTask(task) => storage::create_task(pool, dialect, task).await,
         PersistenceCommand::DeleteTask(task) => storage::delete_task(pool, dialect, task.id).await,
+        PersistenceCommand::CreatePerson(person) => {
+            storage::create_person(pool, dialect, person).await
+        }
+        PersistenceCommand::DeletePerson(deletion) => {
+            storage::delete_person(pool, dialect, deletion.person.id).await
+        }
+        PersistenceCommand::CreateProject(project) => {
+            storage::create_project(pool, dialect, project).await
+        }
+        PersistenceCommand::DeleteProject(deletion) => {
+            storage::delete_project(pool, dialect, deletion.project.id).await
+        }
+        PersistenceCommand::CreateTag(tag) => storage::create_tag(pool, dialect, tag).await,
+        PersistenceCommand::DeleteTag(deletion) => {
+            storage::delete_tag(pool, dialect, deletion.tag.id).await
+        }
         PersistenceCommand::PatchTask(id, patch) => {
             storage::save_patch(pool, dialect, id, patch).await
         }
@@ -307,10 +419,118 @@ async fn execute(
     }
 }
 
+fn coalesce_task_field(patch: &TaskPatch) -> TaskField {
+    match patch.field() {
+        TaskField::Snooze => TaskField::State,
+        field => field,
+    }
+}
+
+fn can_supersede_task_patch(queued: &TaskPatch, replacement: &PersistenceCommand) -> bool {
+    !matches!(
+        (queued, replacement),
+        (
+            TaskPatch::Snooze {
+                remember_custom: Some(_),
+                ..
+            },
+            PersistenceCommand::PatchTask(_, TaskPatch::State(_) | TaskPatch::Unsnooze)
+        )
+    )
+}
+
+fn merge_remembered_custom(removed: &PersistenceCommand, replacement: &mut PersistenceCommand) {
+    let PersistenceCommand::PatchTask(
+        _,
+        TaskPatch::Snooze {
+            remember_custom: Some(custom),
+            ..
+        },
+    ) = removed
+    else {
+        return;
+    };
+    if let PersistenceCommand::PatchTask(
+        _,
+        TaskPatch::Snooze {
+            remember_custom, ..
+        },
+    ) = replacement
+        && remember_custom.is_none()
+    {
+        *remember_custom = Some(*custom);
+    }
+}
+
+fn remembered_custom_for_other_task(command: &PersistenceCommand, task_id: &str) -> bool {
+    matches!(
+        command,
+        PersistenceCommand::PatchTask(
+            queued_id,
+            TaskPatch::Snooze {
+                remember_custom: Some(_),
+                ..
+            }
+        ) if queued_id != task_id
+    )
+}
+
+fn preserve_failed_active_custom(
+    active: &PersistenceCommand,
+    queue: Option<&mut VecDeque<PersistenceCommand>>,
+) {
+    let PersistenceCommand::PatchTask(
+        task_id,
+        TaskPatch::Snooze {
+            remember_custom: Some(custom),
+            ..
+        },
+    ) = active
+    else {
+        return;
+    };
+    let Some(queue) = queue else { return };
+    let candidate = queue
+        .iter()
+        .enumerate()
+        .take_while(|(_, command)| !remembered_custom_for_other_task(command, task_id))
+        .filter_map(|(index, command)| {
+            matches!(command, PersistenceCommand::PatchTask(id, TaskPatch::Snooze { .. }) if id == task_id)
+                .then_some(index)
+        })
+        .last();
+    if let Some(PersistenceCommand::PatchTask(
+        _,
+        TaskPatch::Snooze {
+            remember_custom, ..
+        },
+    )) = candidate.and_then(|index| queue.get_mut(index))
+        && remember_custom.is_none()
+    {
+        *remember_custom = Some(*custom);
+    }
+}
+
+fn remove_queued_task_commands(queue: Option<&mut VecDeque<PersistenceCommand>>, task_id: &str) {
+    if let Some(queue) = queue {
+        queue.retain(|command| command_task_id(command) != Some(task_id));
+    }
+}
+
+fn command_task_id(command: &PersistenceCommand) -> Option<&str> {
+    match command {
+        PersistenceCommand::CreateTask(task) | PersistenceCommand::DeleteTask(task) => {
+            Some(&task.id)
+        }
+        PersistenceCommand::PatchTask(id, _) => Some(id),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{TaskSize, WorkspaceSnapshot, reduce_app_state};
+    use crate::domain::{Person, Project, Tag, TaskSize, WorkspaceSnapshot, reduce_app_state};
     use sqlx::{Row, any::AnyPoolOptions};
 
     fn test_task(id: &str) -> Task {
@@ -437,15 +657,15 @@ mod tests {
 
         let queue = coordinator
             .queued
-            .get(&CommandKey::Task("task-1".to_string()))
+            .get(&CommandKey::Task)
             .expect("task queue exists");
         assert!(matches!(
             &queue[0],
-            PersistenceCommand::PatchTask(_, TaskPatch::Title(value)) if value == "Latest"
+            PersistenceCommand::PatchTask(_, TaskPatch::Detail(value)) if value == "Details"
         ));
         assert!(matches!(
             &queue[1],
-            PersistenceCommand::PatchTask(_, TaskPatch::Detail(value)) if value == "Details"
+            PersistenceCommand::PatchTask(_, TaskPatch::Title(value)) if value == "Latest"
         ));
 
         assert!(coordinator.drain(Duration::from_secs(2)));
@@ -476,7 +696,7 @@ mod tests {
         });
         let initial_version = store.borrow().state().version;
         let mut coordinator = test_coordinator(&runtime, &pool, Rc::clone(&store));
-        let key = CommandKey::Task("task-1".to_string());
+        let key = CommandKey::Task;
         coordinator.active.insert(key.clone(), 7);
         coordinator.submit(PersistenceCommand::PatchTask(
             "task-1".to_string(),
@@ -504,6 +724,491 @@ mod tests {
     }
 
     #[test]
+    fn custom_snooze_then_state_then_quick_keeps_last_custom_and_latest_workflow_order() {
+        let (runtime, pool) = test_database();
+        let task = test_task("task-1");
+        runtime
+            .block_on(storage::create_task(
+                pool.clone(),
+                SqlDialect::Sqlite,
+                task.clone(),
+            ))
+            .unwrap();
+        let mut coordinator = test_coordinator(&runtime, &pool, test_store(vec![task]));
+        let key = CommandKey::Task;
+        coordinator.active.insert(key.clone(), 41);
+        let custom = time::macros::datetime!(2026-08-05 14:30);
+        let quick = time::macros::datetime!(2026-08-06 8:00);
+
+        coordinator.submit(PersistenceCommand::PatchTask(
+            "task-1".into(),
+            TaskPatch::Snooze {
+                until: custom,
+                remember_custom: Some(custom),
+            },
+        ));
+        coordinator.submit(PersistenceCommand::PatchTask(
+            "task-1".into(),
+            TaskPatch::State(crate::domain::TaskState::Done),
+        ));
+        coordinator.submit(PersistenceCommand::PatchTask(
+            "task-1".into(),
+            TaskPatch::Snooze {
+                until: quick,
+                remember_custom: None,
+            },
+        ));
+
+        let queue = coordinator.queued.get(&key).unwrap();
+        assert!(matches!(
+            queue[0],
+            PersistenceCommand::PatchTask(
+                _,
+                TaskPatch::Snooze {
+                    until,
+                    remember_custom: Some(remembered)
+                }
+            ) if until == custom && remembered == custom
+        ));
+        assert!(matches!(
+            queue[1],
+            PersistenceCommand::PatchTask(
+                _,
+                TaskPatch::Snooze {
+                    until,
+                    remember_custom: None
+                }
+            ) if until == quick
+        ));
+        coordinator.finish(Completion {
+            key,
+            sequence: 41,
+            command: PersistenceCommand::PatchTask(
+                "task-1".into(),
+                TaskPatch::Title("active".into()),
+            ),
+            error: None,
+        });
+        assert!(coordinator.drain(Duration::from_secs(2)));
+
+        let row = runtime
+            .block_on(
+                sqlx::query("SELECT workflow_state, snoozed_until FROM tasks WHERE id = 'task-1'")
+                    .fetch_one(&pool),
+            )
+            .unwrap();
+        assert_eq!(
+            row.try_get::<String, _>("workflow_state").unwrap(),
+            "snoozed"
+        );
+        assert_eq!(
+            row.try_get::<String, _>("snoozed_until").unwrap(),
+            crate::snooze::format_datetime(quick)
+        );
+        let last: String = runtime
+            .block_on(
+                sqlx::query("SELECT value FROM settings WHERE key = 'last_custom_snooze'")
+                    .fetch_one(&pool),
+            )
+            .unwrap()
+            .try_get("value")
+            .unwrap();
+        assert_eq!(last, crate::snooze::format_datetime(custom));
+    }
+
+    #[test]
+    fn custom_snooze_replaced_before_execution_preserves_remembered_value() {
+        let (runtime, pool) = test_database();
+        let task = test_task("task-1");
+        runtime
+            .block_on(storage::create_task(
+                pool.clone(),
+                SqlDialect::Sqlite,
+                task.clone(),
+            ))
+            .unwrap();
+        let mut coordinator = test_coordinator(&runtime, &pool, test_store(vec![task]));
+        let key = CommandKey::Task;
+        coordinator.active.insert(key.clone(), 42);
+        let custom = time::macros::datetime!(2026-09-01 16:45);
+        let quick = time::macros::datetime!(2026-09-02 8:00);
+        coordinator.submit(PersistenceCommand::PatchTask(
+            "task-1".into(),
+            TaskPatch::Snooze {
+                until: custom,
+                remember_custom: Some(custom),
+            },
+        ));
+        coordinator.submit(PersistenceCommand::PatchTask(
+            "task-1".into(),
+            TaskPatch::Snooze {
+                until: quick,
+                remember_custom: None,
+            },
+        ));
+
+        let queue = coordinator.queued.get(&key).unwrap();
+        assert_eq!(queue.len(), 1);
+        assert!(matches!(
+            queue[0],
+            PersistenceCommand::PatchTask(
+                _,
+                TaskPatch::Snooze {
+                    until,
+                    remember_custom: Some(remembered)
+                }
+            ) if until == quick && remembered == custom
+        ));
+
+        coordinator.finish(Completion {
+            key,
+            sequence: 42,
+            command: PersistenceCommand::PatchTask(
+                "task-1".into(),
+                TaskPatch::Detail("active".into()),
+            ),
+            error: None,
+        });
+        assert!(coordinator.drain(Duration::from_secs(2)));
+        let task_row = runtime
+            .block_on(
+                sqlx::query("SELECT snoozed_until FROM tasks WHERE id = 'task-1'").fetch_one(&pool),
+            )
+            .unwrap();
+        assert_eq!(
+            task_row.try_get::<String, _>("snoozed_until").unwrap(),
+            crate::snooze::format_datetime(quick)
+        );
+        let last: String = runtime
+            .block_on(
+                sqlx::query("SELECT value FROM settings WHERE key = 'last_custom_snooze'")
+                    .fetch_one(&pool),
+            )
+            .unwrap()
+            .try_get("value")
+            .unwrap();
+        assert_eq!(last, crate::snooze::format_datetime(custom));
+    }
+
+    #[test]
+    fn other_task_custom_blocks_same_task_quick_from_reordering_global_last() {
+        let (runtime, pool) = test_database();
+        let task_a = test_task("task-a");
+        let task_b = test_task("task-b");
+        for task in [task_a.clone(), task_b.clone()] {
+            runtime
+                .block_on(storage::create_task(pool.clone(), SqlDialect::Sqlite, task))
+                .unwrap();
+        }
+        let mut coordinator = test_coordinator(&runtime, &pool, test_store(vec![task_a, task_b]));
+        let key = CommandKey::Task;
+        coordinator.active.insert(key.clone(), 46);
+        let custom_a = time::macros::datetime!(2026-09-08 14:00);
+        let custom_b = time::macros::datetime!(2026-09-09 17:45);
+        let quick_a = time::macros::datetime!(2026-09-10 8:00);
+
+        coordinator.submit(PersistenceCommand::PatchTask(
+            "task-a".into(),
+            TaskPatch::Snooze {
+                until: custom_a,
+                remember_custom: Some(custom_a),
+            },
+        ));
+        coordinator.submit(PersistenceCommand::PatchTask(
+            "task-b".into(),
+            TaskPatch::Snooze {
+                until: custom_b,
+                remember_custom: Some(custom_b),
+            },
+        ));
+        coordinator.submit(PersistenceCommand::PatchTask(
+            "task-a".into(),
+            TaskPatch::Snooze {
+                until: quick_a,
+                remember_custom: None,
+            },
+        ));
+
+        let queue = coordinator.queued.get(&key).unwrap();
+        assert_eq!(queue.len(), 3);
+        assert!(matches!(
+            queue[0],
+            PersistenceCommand::PatchTask(
+                ref id,
+                TaskPatch::Snooze {
+                    until,
+                    remember_custom: Some(remembered)
+                }
+            ) if id == "task-a" && until == custom_a && remembered == custom_a
+        ));
+        assert!(matches!(
+            queue[1],
+            PersistenceCommand::PatchTask(
+                ref id,
+                TaskPatch::Snooze {
+                    until,
+                    remember_custom: Some(remembered)
+                }
+            ) if id == "task-b" && until == custom_b && remembered == custom_b
+        ));
+        assert!(matches!(
+            queue[2],
+            PersistenceCommand::PatchTask(
+                ref id,
+                TaskPatch::Snooze {
+                    until,
+                    remember_custom: None
+                }
+            ) if id == "task-a" && until == quick_a
+        ));
+
+        coordinator.finish(Completion {
+            key,
+            sequence: 46,
+            command: PersistenceCommand::PatchTask(
+                "active-task".into(),
+                TaskPatch::Title("active".into()),
+            ),
+            error: None,
+        });
+        assert!(coordinator.drain(Duration::from_secs(2)));
+
+        let task_a_until: String = runtime
+            .block_on(
+                sqlx::query("SELECT snoozed_until FROM tasks WHERE id = 'task-a'").fetch_one(&pool),
+            )
+            .unwrap()
+            .try_get("snoozed_until")
+            .unwrap();
+        assert_eq!(task_a_until, crate::snooze::format_datetime(quick_a));
+        let last: String = runtime
+            .block_on(
+                sqlx::query("SELECT value FROM settings WHERE key = 'last_custom_snooze'")
+                    .fetch_one(&pool),
+            )
+            .unwrap()
+            .try_get("value")
+            .unwrap();
+        assert_eq!(last, crate::snooze::format_datetime(custom_b));
+    }
+
+    #[test]
+    fn custom_snooze_then_unsnooze_preserves_setting_and_latest_workflow_order() {
+        let (runtime, pool) = test_database();
+        let task = test_task("task-1");
+        runtime
+            .block_on(storage::create_task(
+                pool.clone(),
+                SqlDialect::Sqlite,
+                task.clone(),
+            ))
+            .unwrap();
+        let mut coordinator = test_coordinator(&runtime, &pool, test_store(vec![task]));
+        let key = CommandKey::Task;
+        coordinator.active.insert(key.clone(), 45);
+        let custom = time::macros::datetime!(2026-09-02 16:45);
+
+        coordinator.submit(PersistenceCommand::PatchTask(
+            "task-1".into(),
+            TaskPatch::Snooze {
+                until: custom,
+                remember_custom: Some(custom),
+            },
+        ));
+        coordinator.submit(PersistenceCommand::PatchTask(
+            "task-1".into(),
+            TaskPatch::Unsnooze,
+        ));
+
+        let queue = coordinator.queued.get(&key).unwrap();
+        assert_eq!(queue.len(), 2);
+        assert!(matches!(
+            queue[0],
+            PersistenceCommand::PatchTask(_, TaskPatch::Snooze { .. })
+        ));
+        assert!(matches!(
+            queue[1],
+            PersistenceCommand::PatchTask(_, TaskPatch::Unsnooze)
+        ));
+        coordinator.finish(Completion {
+            key,
+            sequence: 45,
+            command: PersistenceCommand::PatchTask(
+                "task-1".into(),
+                TaskPatch::Detail("active".into()),
+            ),
+            error: None,
+        });
+        assert!(coordinator.drain(Duration::from_secs(2)));
+
+        let row = runtime
+            .block_on(
+                sqlx::query("SELECT workflow_state, snoozed_until FROM tasks WHERE id = 'task-1'")
+                    .fetch_one(&pool),
+            )
+            .unwrap();
+        assert_eq!(row.try_get::<String, _>("workflow_state").unwrap(), "todo");
+        assert_eq!(
+            row.try_get::<Option<String>, _>("snoozed_until").unwrap(),
+            None
+        );
+        let last: String = runtime
+            .block_on(
+                sqlx::query("SELECT value FROM settings WHERE key = 'last_custom_snooze'")
+                    .fetch_one(&pool),
+            )
+            .unwrap()
+            .try_get("value")
+            .unwrap();
+        assert_eq!(last, crate::snooze::format_datetime(custom));
+    }
+
+    #[test]
+    fn failed_active_custom_snooze_is_not_suppressed_by_queued_state() {
+        let (runtime, pool) = test_database();
+        let task = test_task("task-1");
+        runtime
+            .block_on(storage::create_task(
+                pool.clone(),
+                SqlDialect::Sqlite,
+                task.clone(),
+            ))
+            .unwrap();
+        let store = test_store(vec![task]);
+        let mut coordinator = test_coordinator(&runtime, &pool, Rc::clone(&store));
+        let key = CommandKey::Task;
+        coordinator.active.insert(key.clone(), 43);
+        let custom = time::macros::datetime!(2026-09-03 15:30);
+        coordinator.submit(PersistenceCommand::PatchTask(
+            "task-1".into(),
+            TaskPatch::State(crate::domain::TaskState::Done),
+        ));
+
+        assert!(coordinator.finish(Completion {
+            key,
+            sequence: 43,
+            command: PersistenceCommand::PatchTask(
+                "task-1".into(),
+                TaskPatch::Snooze {
+                    until: custom,
+                    remember_custom: Some(custom),
+                },
+            ),
+            error: Some("custom snooze failed".into()),
+        }));
+        assert!(coordinator.drain(Duration::from_secs(2)));
+
+        assert!(
+            store
+                .borrow()
+                .state()
+                .save_errors
+                .contains_key(&SaveTarget::task("task-1".into(), TaskField::Snooze))
+        );
+    }
+
+    #[test]
+    fn failed_active_custom_merges_into_queued_quick_compound_snooze() {
+        let (runtime, pool) = test_database();
+        let task = test_task("task-1");
+        runtime
+            .block_on(storage::create_task(
+                pool.clone(),
+                SqlDialect::Sqlite,
+                task.clone(),
+            ))
+            .unwrap();
+        let store = test_store(vec![task]);
+        let mut coordinator = test_coordinator(&runtime, &pool, Rc::clone(&store));
+        let key = CommandKey::Task;
+        coordinator.active.insert(key.clone(), 44);
+        let custom = time::macros::datetime!(2026-09-04 16:15);
+        let quick = time::macros::datetime!(2026-09-05 8:00);
+        coordinator.submit(PersistenceCommand::PatchTask(
+            "task-1".into(),
+            TaskPatch::Snooze {
+                until: quick,
+                remember_custom: None,
+            },
+        ));
+
+        assert!(!coordinator.finish(Completion {
+            key,
+            sequence: 44,
+            command: PersistenceCommand::PatchTask(
+                "task-1".into(),
+                TaskPatch::Snooze {
+                    until: custom,
+                    remember_custom: Some(custom),
+                },
+            ),
+            error: Some("custom snooze failed".into()),
+        }));
+        assert!(coordinator.drain(Duration::from_secs(2)));
+
+        let row = runtime
+            .block_on(
+                sqlx::query("SELECT snoozed_until FROM tasks WHERE id = 'task-1'").fetch_one(&pool),
+            )
+            .unwrap();
+        assert_eq!(
+            row.try_get::<String, _>("snoozed_until").unwrap(),
+            crate::snooze::format_datetime(quick)
+        );
+        let last: String = runtime
+            .block_on(
+                sqlx::query("SELECT value FROM settings WHERE key = 'last_custom_snooze'")
+                    .fetch_one(&pool),
+            )
+            .unwrap()
+            .try_get("value")
+            .unwrap();
+        assert_eq!(last, crate::snooze::format_datetime(custom));
+        assert!(store.borrow().state().save_errors.is_empty());
+    }
+
+    #[test]
+    fn latest_custom_snooze_wins_across_tasks_in_submission_order() {
+        let (runtime, pool) = test_database();
+        let first = test_task("task-1");
+        let second = test_task("task-2");
+        for task in [first.clone(), second.clone()] {
+            runtime
+                .block_on(storage::create_task(pool.clone(), SqlDialect::Sqlite, task))
+                .unwrap();
+        }
+        let mut coordinator = test_coordinator(&runtime, &pool, test_store(vec![first, second]));
+        let first_custom = time::macros::datetime!(2026-09-06 14:00);
+        let latest_custom = time::macros::datetime!(2026-09-07 17:45);
+
+        coordinator.submit(PersistenceCommand::PatchTask(
+            "task-1".into(),
+            TaskPatch::Snooze {
+                until: first_custom,
+                remember_custom: Some(first_custom),
+            },
+        ));
+        coordinator.submit(PersistenceCommand::PatchTask(
+            "task-2".into(),
+            TaskPatch::Snooze {
+                until: latest_custom,
+                remember_custom: Some(latest_custom),
+            },
+        ));
+        assert!(coordinator.drain(Duration::from_secs(2)));
+
+        let last: String = runtime
+            .block_on(
+                sqlx::query("SELECT value FROM settings WHERE key = 'last_custom_snooze'")
+                    .fetch_one(&pool),
+            )
+            .unwrap()
+            .try_get("value")
+            .unwrap();
+        assert_eq!(last, crate::snooze::format_datetime(latest_custom));
+    }
+
+    #[test]
     fn successful_active_patch_defers_completion_to_failed_queued_patch() {
         let (runtime, pool) = test_database();
         let store = test_store(vec![test_task("missing-task")]);
@@ -514,7 +1219,7 @@ mod tests {
         });
         let initial_version = store.borrow().state().version;
         let mut coordinator = test_coordinator(&runtime, &pool, Rc::clone(&store));
-        let key = CommandKey::Task("missing-task".to_string());
+        let key = CommandKey::Task;
         coordinator.active.insert(key.clone(), 11);
         coordinator.submit(PersistenceCommand::PatchTask(
             "missing-task".to_string(),
@@ -584,5 +1289,86 @@ mod tests {
         assert!(coordinator.drain(Duration::from_secs(2)));
         assert_eq!(store.borrow().state().tasks.len(), 1);
         assert_eq!(store.borrow().state().tasks[0].id, "task-1");
+    }
+
+    #[test]
+    fn management_entity_creates_and_queued_deletes_drain_to_absent() {
+        let (runtime, pool) = test_database();
+        let person = Person::new("person-1".into(), "Ada".into(), String::new());
+        let project = Project::new(
+            "project-1".into(),
+            "CORE".into(),
+            "Core".into(),
+            String::new(),
+        );
+        let tag = Tag::new("tag-1".into(), "api".into());
+        let mut coordinator = test_coordinator(&runtime, &pool, test_store(Vec::new()));
+
+        coordinator.submit(PersistenceCommand::CreatePerson(person.clone()));
+        coordinator.submit(PersistenceCommand::DeletePerson(PersonDeletion {
+            person,
+            task_ids: Vec::new(),
+            lead_project_ids: Vec::new(),
+        }));
+        coordinator.submit(PersistenceCommand::CreateProject(project.clone()));
+        coordinator.submit(PersistenceCommand::DeleteProject(ProjectDeletion {
+            project,
+            task_ids: Vec::new(),
+        }));
+        coordinator.submit(PersistenceCommand::CreateTag(tag.clone()));
+        coordinator.submit(PersistenceCommand::DeleteTag(TagDeletion {
+            tag,
+            task_ids: Vec::new(),
+        }));
+
+        assert!(coordinator.drain(Duration::from_secs(2)));
+        let people: i64 = runtime
+            .block_on(sqlx::query("SELECT COUNT(*) AS count FROM people").fetch_one(&pool))
+            .unwrap()
+            .try_get("count")
+            .unwrap();
+        let projects: i64 = runtime
+            .block_on(sqlx::query("SELECT COUNT(*) AS count FROM projects").fetch_one(&pool))
+            .unwrap()
+            .try_get("count")
+            .unwrap();
+        let tags: i64 = runtime
+            .block_on(sqlx::query("SELECT COUNT(*) AS count FROM tags").fetch_one(&pool))
+            .unwrap()
+            .try_get("count")
+            .unwrap();
+        assert_eq!((people, projects, tags), (0, 0, 0));
+    }
+
+    #[test]
+    fn failed_management_entity_deletes_restore_optimistic_state() {
+        let (runtime, pool) = test_database();
+        let store = test_store(Vec::new());
+        let mut coordinator = test_coordinator(&runtime, &pool, Rc::clone(&store));
+
+        coordinator.submit(PersistenceCommand::DeletePerson(PersonDeletion {
+            person: Person::new("person-1".into(), "Ada".into(), String::new()),
+            task_ids: Vec::new(),
+            lead_project_ids: Vec::new(),
+        }));
+        coordinator.submit(PersistenceCommand::DeleteProject(ProjectDeletion {
+            project: Project::new(
+                "project-1".into(),
+                "CORE".into(),
+                "Core".into(),
+                String::new(),
+            ),
+            task_ids: Vec::new(),
+        }));
+        coordinator.submit(PersistenceCommand::DeleteTag(TagDeletion {
+            tag: Tag::new("tag-1".into(), "api".into()),
+            task_ids: Vec::new(),
+        }));
+
+        assert!(coordinator.drain(Duration::from_secs(2)));
+        let state = store.borrow();
+        assert_eq!(state.state().people[0].id, "person-1");
+        assert_eq!(state.state().projects[0].id, "project-1");
+        assert_eq!(state.state().tags[0].id, "tag-1");
     }
 }

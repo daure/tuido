@@ -8,6 +8,8 @@ use crate::domain::{
     Person, PersonPatch, Project, ProjectPatch, Tag, TagPatch, Task, TaskField, TaskPatch,
     TaskPriority, TaskSize, TaskState, WorkspaceSnapshot,
 };
+use crate::snooze::{format_datetime, parse_datetime};
+use time::PrimitiveDateTime;
 
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
@@ -78,6 +80,17 @@ impl Storage {
         load_workspace(&self.pool, self.dialect).await
     }
 
+    pub async fn load_last_custom_snooze(
+        &self,
+    ) -> Result<Option<PrimitiveDateTime>, Box<dyn std::error::Error>> {
+        let row = sqlx::query("SELECT value FROM settings WHERE key = 'last_custom_snooze'")
+            .fetch_optional(&self.pool)
+            .await?;
+        let Some(row) = row else { return Ok(None) };
+        let value: String = row.try_get("value")?;
+        Ok(Some(parse_datetime(&value)?))
+    }
+
     #[cfg(test)]
     async fn initialize_demo_workspace(&self) -> Result<(), Box<dyn std::error::Error>> {
         let mut tx = self.pool.begin().await?;
@@ -95,7 +108,7 @@ pub async fn create_task(
     task: Task,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let query = format!(
-        "INSERT INTO tasks (id, title, state, workflow_state, rejected, size, priority, start_date, due_date, detail, created_at, updated_at) VALUES ({}, {}, 'next', {}, {}, {}, {}, {}, {}, {}, {}, {})",
+        "INSERT INTO tasks (id, title, state, workflow_state, rejected, size, priority, start_date, due_date, snoozed_until, detail, created_at, updated_at) VALUES ({}, {}, 'next', {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
         dialect.placeholder(1),
         dialect.placeholder(2),
         dialect.placeholder(3),
@@ -106,7 +119,8 @@ pub async fn create_task(
         dialect.placeholder(8),
         dialect.placeholder(9),
         dialect.placeholder(10),
-        dialect.placeholder(11)
+        dialect.placeholder(11),
+        dialect.placeholder(12)
     );
     let now = now_text();
     sqlx::query(AssertSqlSafe(query.as_str()))
@@ -118,6 +132,7 @@ pub async fn create_task(
         .bind(task.priority.id())
         .bind(task.start_date)
         .bind(task.due_date)
+        .bind(task.snoozed_until.map(format_datetime))
         .bind(task.detail)
         .bind(&now)
         .bind(&now)
@@ -137,6 +152,149 @@ pub async fn delete_task(
         .execute(&pool)
         .await?;
     require_one_row(result.rows_affected(), "task delete")?;
+    Ok(())
+}
+
+pub async fn create_person(
+    pool: AnyPool,
+    dialect: SqlDialect,
+    person: Person,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let query = format!(
+        "INSERT INTO people (id, name, email, active) VALUES ({}, {}, {}, {})",
+        dialect.placeholder(1),
+        dialect.placeholder(2),
+        dialect.placeholder(3),
+        dialect.placeholder(4)
+    );
+    sqlx::query(AssertSqlSafe(query.as_str()))
+        .bind(person.id)
+        .bind(person.name)
+        .bind(person.email)
+        .bind(person.active)
+        .execute(&pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn delete_person(
+    pool: AnyPool,
+    dialect: SqlDialect,
+    person_id: String,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut tx = pool.begin().await?;
+    for sql in [
+        format!(
+            "DELETE FROM task_people WHERE person_id = {}",
+            dialect.placeholder(1)
+        ),
+        format!(
+            "UPDATE projects SET lead_person_id = NULL WHERE lead_person_id = {}",
+            dialect.placeholder(1)
+        ),
+    ] {
+        sqlx::query(AssertSqlSafe(sql.as_str()))
+            .bind(&person_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    let query = format!("DELETE FROM people WHERE id = {}", dialect.placeholder(1));
+    let result = sqlx::query(AssertSqlSafe(query.as_str()))
+        .bind(person_id)
+        .execute(&mut *tx)
+        .await?;
+    require_one_row(result.rows_affected(), "person delete")?;
+    tx.commit().await?;
+    Ok(())
+}
+
+pub async fn create_project(
+    pool: AnyPool,
+    dialect: SqlDialect,
+    project: Project,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let query = format!(
+        "INSERT INTO projects (id, key, name, description, lead_person_id) VALUES ({}, {}, {}, {}, {})",
+        dialect.placeholder(1),
+        dialect.placeholder(2),
+        dialect.placeholder(3),
+        dialect.placeholder(4),
+        dialect.placeholder(5)
+    );
+    sqlx::query(AssertSqlSafe(query.as_str()))
+        .bind(project.id)
+        .bind(project.key)
+        .bind(project.name)
+        .bind(project.description)
+        .bind(project.lead_person_id)
+        .execute(&pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn delete_project(
+    pool: AnyPool,
+    dialect: SqlDialect,
+    project_id: String,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut tx = pool.begin().await?;
+    let joins = format!(
+        "DELETE FROM task_projects WHERE project_id = {}",
+        dialect.placeholder(1)
+    );
+    sqlx::query(AssertSqlSafe(joins.as_str()))
+        .bind(&project_id)
+        .execute(&mut *tx)
+        .await?;
+    let query = format!("DELETE FROM projects WHERE id = {}", dialect.placeholder(1));
+    let result = sqlx::query(AssertSqlSafe(query.as_str()))
+        .bind(project_id)
+        .execute(&mut *tx)
+        .await?;
+    require_one_row(result.rows_affected(), "project delete")?;
+    tx.commit().await?;
+    Ok(())
+}
+
+pub async fn create_tag(
+    pool: AnyPool,
+    dialect: SqlDialect,
+    tag: Tag,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let query = format!(
+        "INSERT INTO tags (id, label) VALUES ({}, {})",
+        dialect.placeholder(1),
+        dialect.placeholder(2)
+    );
+    sqlx::query(AssertSqlSafe(query.as_str()))
+        .bind(tag.id)
+        .bind(tag.label)
+        .execute(&pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn delete_tag(
+    pool: AnyPool,
+    dialect: SqlDialect,
+    tag_id: String,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut tx = pool.begin().await?;
+    let joins = format!(
+        "DELETE FROM task_tags WHERE tag_id = {}",
+        dialect.placeholder(1)
+    );
+    sqlx::query(AssertSqlSafe(joins.as_str()))
+        .bind(&tag_id)
+        .execute(&mut *tx)
+        .await?;
+    let query = format!("DELETE FROM tags WHERE id = {}", dialect.placeholder(1));
+    let result = sqlx::query(AssertSqlSafe(query.as_str()))
+        .bind(tag_id)
+        .execute(&mut *tx)
+        .await?;
+    require_one_row(result.rows_affected(), "tag delete")?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -176,7 +334,71 @@ pub async fn save_patch(
         TaskPatch::People(value) => replace_task_people(pool, dialect, task_id, value).await,
         TaskPatch::Projects(value) => replace_task_projects(pool, dialect, task_id, value).await,
         TaskPatch::Tags(value) => replace_task_tags(pool, dialect, task_id, value).await,
+        TaskPatch::Snooze {
+            until,
+            remember_custom,
+        } => snooze_task(pool, dialect, task_id, until, remember_custom).await,
+        TaskPatch::Unsnooze => unsnooze_task(pool, dialect, task_id).await,
     }
+}
+
+pub async fn unsnooze_task(
+    pool: AnyPool,
+    dialect: SqlDialect,
+    task_id: String,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let query = format!(
+        "UPDATE tasks SET workflow_state = 'todo', rejected = {}, snoozed_until = NULL, updated_at = {} WHERE id = {}",
+        dialect.placeholder(1),
+        dialect.placeholder(2),
+        dialect.placeholder(3)
+    );
+    let result = sqlx::query(AssertSqlSafe(query.as_str()))
+        .bind(false)
+        .bind(now_text())
+        .bind(task_id)
+        .execute(&pool)
+        .await?;
+    require_one_row(result.rows_affected(), "task unsnooze")?;
+    Ok(())
+}
+
+pub async fn snooze_task(
+    pool: AnyPool,
+    dialect: SqlDialect,
+    task_id: String,
+    until: PrimitiveDateTime,
+    remember_custom: Option<PrimitiveDateTime>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let task_query = format!(
+        "UPDATE tasks SET workflow_state = 'snoozed', rejected = {}, snoozed_until = {}, updated_at = {} WHERE id = {}",
+        dialect.placeholder(1),
+        dialect.placeholder(2),
+        dialect.placeholder(3),
+        dialect.placeholder(4)
+    );
+    let setting_query = format!(
+        "INSERT INTO settings (key, value) VALUES ('last_custom_snooze', {}) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        dialect.placeholder(1)
+    );
+    let value = format_datetime(until);
+    let mut tx = pool.begin().await?;
+    let result = sqlx::query(AssertSqlSafe(task_query.as_str()))
+        .bind(false)
+        .bind(&value)
+        .bind(now_text())
+        .bind(task_id)
+        .execute(&mut *tx)
+        .await?;
+    require_one_row(result.rows_affected(), "task snooze")?;
+    if let Some(custom) = remember_custom {
+        sqlx::query(AssertSqlSafe(setting_query.as_str()))
+            .bind(format_datetime(custom))
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(())
 }
 
 pub async fn save_person_patch(
@@ -330,7 +552,8 @@ async fn update_task_scalar(
         | TaskField::EndDate
         | TaskField::People
         | TaskField::Projects
-        | TaskField::Tags => return Ok(()),
+        | TaskField::Tags
+        | TaskField::Snooze => return Ok(()),
         TaskField::State => return Ok(()),
         TaskField::Size => "size",
         TaskField::Priority => "priority",
@@ -623,7 +846,7 @@ async fn load_workspace(
     let tags = load_tags(pool).await?;
     let mut tasks = Vec::new();
     let rows = sqlx::query(
-        "SELECT id, title, workflow_state, CAST(CASE WHEN rejected THEN 1 ELSE 0 END AS BIGINT) AS rejected, size, priority, start_date, due_date, detail FROM tasks ORDER BY id",
+        "SELECT id, title, workflow_state, CAST(CASE WHEN rejected THEN 1 ELSE 0 END AS BIGINT) AS rejected, size, priority, start_date, due_date, snoozed_until, detail FROM tasks ORDER BY id",
     )
     .fetch_all(pool)
     .await?;
@@ -646,6 +869,10 @@ async fn load_workspace(
             priority: parse_priority(row.try_get::<String, _>("priority")?)?,
             start_date: row.try_get("start_date")?,
             due_date: row.try_get("due_date")?,
+            snoozed_until: row
+                .try_get::<Option<String>, _>("snoozed_until")?
+                .map(|value| parse_datetime(&value))
+                .transpose()?,
             people_ids,
             project_ids,
             tag_ids,
@@ -1336,6 +1563,132 @@ mod tests {
     }
 
     #[test]
+    fn snooze_and_last_custom_round_trip_without_quick_pick_overwriting_last() {
+        run_async(async {
+            sqlx::any::install_default_drivers();
+            let pool = AnyPoolOptions::new()
+                .max_connections(1)
+                .connect("sqlite::memory:")
+                .await
+                .expect("sqlite test database connects");
+            MIGRATOR.run(&pool).await.expect("migrations run");
+            let storage = Storage {
+                pool: pool.clone(),
+                dialect: SqlDialect::Sqlite,
+            };
+            create_task(
+                pool.clone(),
+                SqlDialect::Sqlite,
+                Task::quick_capture("task".into(), "Task".into(), String::new(), TaskSize::Small),
+            )
+            .await
+            .expect("task creates");
+            let custom = time::macros::datetime!(2026-08-05 14:30);
+            snooze_task(
+                pool.clone(),
+                SqlDialect::Sqlite,
+                "task".into(),
+                custom,
+                Some(custom),
+            )
+            .await
+            .expect("custom snooze saves");
+            let quick = time::macros::datetime!(2026-08-06 8:00);
+            snooze_task(pool.clone(), SqlDialect::Sqlite, "task".into(), quick, None)
+                .await
+                .expect("quick snooze saves");
+
+            let snapshot = storage.load_workspace().await.expect("workspace loads");
+            assert_eq!(snapshot.tasks[0].state, TaskState::Snoozed);
+            assert_eq!(snapshot.tasks[0].snoozed_until, Some(quick));
+            assert_eq!(
+                storage.load_last_custom_snooze().await.unwrap(),
+                Some(custom)
+            );
+        });
+    }
+
+    #[test]
+    fn unsnooze_round_trip_clears_datetime_and_preserves_last_custom() {
+        run_async(async {
+            sqlx::any::install_default_drivers();
+            let pool = AnyPoolOptions::new()
+                .max_connections(1)
+                .connect("sqlite::memory:")
+                .await
+                .expect("sqlite test database connects");
+            MIGRATOR.run(&pool).await.expect("migrations run");
+            let storage = Storage {
+                pool: pool.clone(),
+                dialect: SqlDialect::Sqlite,
+            };
+            create_task(
+                pool.clone(),
+                SqlDialect::Sqlite,
+                Task::quick_capture("task".into(), "Task".into(), String::new(), TaskSize::Small),
+            )
+            .await
+            .expect("task creates");
+            let custom = time::macros::datetime!(2026-08-05 14:30);
+            snooze_task(
+                pool.clone(),
+                SqlDialect::Sqlite,
+                "task".into(),
+                custom,
+                Some(custom),
+            )
+            .await
+            .expect("task snoozes");
+
+            unsnooze_task(pool, SqlDialect::Sqlite, "task".into())
+                .await
+                .expect("task unsnoozes");
+
+            let snapshot = storage.load_workspace().await.expect("workspace loads");
+            assert_eq!(snapshot.tasks[0].state, TaskState::Todo);
+            assert_eq!(snapshot.tasks[0].snoozed_until, None);
+            assert_eq!(
+                storage.load_last_custom_snooze().await.unwrap(),
+                Some(custom)
+            );
+        });
+    }
+
+    #[test]
+    fn failed_compound_snooze_does_not_commit_remembered_custom_setting() {
+        run_async(async {
+            sqlx::any::install_default_drivers();
+            let pool = AnyPoolOptions::new()
+                .max_connections(1)
+                .connect("sqlite::memory:")
+                .await
+                .expect("sqlite test database connects");
+            MIGRATOR.run(&pool).await.expect("migrations run");
+            let remembered = time::macros::datetime!(2026-10-01 15:00);
+
+            let result = snooze_task(
+                pool.clone(),
+                SqlDialect::Sqlite,
+                "missing-task".into(),
+                time::macros::datetime!(2026-10-02 8:00),
+                Some(remembered),
+            )
+            .await;
+
+            assert!(result.is_err());
+            let count: i64 = sqlx::query(
+                "SELECT COUNT(*) AS count FROM settings WHERE key = 'last_custom_snooze'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .try_get("count")
+            .unwrap();
+            assert_eq!(count, 0);
+        });
+    }
+
+    #[test]
     fn writes_to_unknown_ids_fail() {
         run_async(async {
             sqlx::any::install_default_drivers();
@@ -1405,6 +1758,95 @@ mod tests {
 
             drop(pool);
             let _ = std::fs::remove_file(database_path);
+        });
+    }
+
+    #[test]
+    fn deleting_management_entities_removes_task_and_lead_references() {
+        run_async(async {
+            sqlx::any::install_default_drivers();
+            let pool = AnyPoolOptions::new()
+                .max_connections(1)
+                .connect("sqlite::memory:")
+                .await
+                .expect("sqlite test database connects");
+            MIGRATOR.run(&pool).await.expect("migrations run");
+            let person = Person::new("person-1".into(), "Ada".into(), String::new());
+            let project = Project::new(
+                "project-1".into(),
+                "CORE".into(),
+                "Core".into(),
+                String::new(),
+            );
+            let tag = Tag::new("tag-1".into(), "api".into());
+            let task = Task::quick_capture(
+                "task-1".into(),
+                "Ship".into(),
+                String::new(),
+                TaskSize::Small,
+            );
+            create_person(pool.clone(), SqlDialect::Sqlite, person)
+                .await
+                .unwrap();
+            create_project(pool.clone(), SqlDialect::Sqlite, project)
+                .await
+                .unwrap();
+            create_tag(pool.clone(), SqlDialect::Sqlite, tag.clone())
+                .await
+                .unwrap();
+            create_task(pool.clone(), SqlDialect::Sqlite, task)
+                .await
+                .unwrap();
+            save_project_patch(
+                pool.clone(),
+                SqlDialect::Sqlite,
+                "project-1".into(),
+                ProjectPatch::LeadPerson(Some("person-1".into())),
+            )
+            .await
+            .unwrap();
+            save_patch(
+                pool.clone(),
+                SqlDialect::Sqlite,
+                "task-1".into(),
+                TaskPatch::People(vec!["person-1".into()]),
+            )
+            .await
+            .unwrap();
+            save_patch(
+                pool.clone(),
+                SqlDialect::Sqlite,
+                "task-1".into(),
+                TaskPatch::Projects(vec!["project-1".into()]),
+            )
+            .await
+            .unwrap();
+            save_patch(
+                pool.clone(),
+                SqlDialect::Sqlite,
+                "task-1".into(),
+                TaskPatch::Tags(vec![tag]),
+            )
+            .await
+            .unwrap();
+
+            delete_person(pool.clone(), SqlDialect::Sqlite, "person-1".into())
+                .await
+                .unwrap();
+            delete_project(pool.clone(), SqlDialect::Sqlite, "project-1".into())
+                .await
+                .unwrap();
+            delete_tag(pool.clone(), SqlDialect::Sqlite, "tag-1".into())
+                .await
+                .unwrap();
+
+            let snapshot = load_workspace(&pool, SqlDialect::Sqlite).await.unwrap();
+            assert!(snapshot.people.is_empty());
+            assert!(snapshot.projects.is_empty());
+            assert!(snapshot.tags.is_empty());
+            assert!(snapshot.tasks[0].people_ids.is_empty());
+            assert!(snapshot.tasks[0].project_ids.is_empty());
+            assert!(snapshot.tasks[0].tag_ids.is_empty());
         });
     }
 }

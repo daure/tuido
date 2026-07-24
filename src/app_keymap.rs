@@ -40,6 +40,12 @@ impl AppBinding {
             .unwrap_or(resolved.raw)
     }
 
+    pub fn key_spec(self) -> KeySpec {
+        self.resolved()
+            .spec
+            .unwrap_or_else(|| panic!("app key `{}` is a sequence, not a key", self.name))
+    }
+
     pub fn matches(self, event: &TuiEvent) -> bool {
         let TuiEvent::Key(key) = event else {
             return false;
@@ -250,24 +256,38 @@ pub mod keys {
     pub const APP_CALENDAR_TAB: AppBinding = AppBinding::new("APP_CALENDAR_TAB", "c");
     pub const APP_PROJECTS_TAB: AppBinding = AppBinding::new_sequence("APP_PROJECTS_TAB", "pr");
     pub const APP_PEOPLE_TAB: AppBinding = AppBinding::new_sequence("APP_PEOPLE_TAB", "pe");
-    pub const TASK_QUICK_CREATE: AppBinding = AppBinding::new("TASK_QUICK_CREATE", "+");
+    pub const TASK_QUICK_CREATE: AppBinding = AppBinding::new("TASK_QUICK_CREATE", "n");
     pub const TASK_VIEW_MENU: AppBinding = AppBinding::new("TASK_VIEW_MENU", "f");
     pub const TASK_DELETE: AppBinding = AppBinding::new("TASK_DELETE", "delete");
     pub const TASK_DELETE_ALT: AppBinding = AppBinding::new("TASK_DELETE_ALT", "ctrl+backspace");
+    pub const TASK_DELETE_CTRL_X: AppBinding = AppBinding::new("TASK_DELETE_CTRL_X", "ctrl+x");
     pub const TASK_DISPOSITION: AppBinding = AppBinding::new("TASK_DISPOSITION", "backspace");
-    pub const TASK_TITLE_FIELD: AppBinding = AppBinding::new("TASK_TITLE_FIELD", "e");
-    pub const TASK_DESCRIPTION_FIELD: AppBinding = AppBinding::new("TASK_DESCRIPTION_FIELD", "d");
-    pub const TASK_STATE_FIELD: AppBinding = AppBinding::new("TASK_STATE_FIELD", "s");
-    pub const TASK_SIZE_FIELD: AppBinding = AppBinding::new("TASK_SIZE_FIELD", "x");
-    pub const TASK_PRIORITY_FIELD: AppBinding = AppBinding::new("TASK_PRIORITY_FIELD", "r");
-    pub const TASK_PEOPLE_FIELD: AppBinding = AppBinding::new("TASK_PEOPLE_FIELD", "z");
+    pub const TASK_DISPOSITION_X: AppBinding = AppBinding::new("TASK_DISPOSITION_X", "x");
+    pub const TASK_SNOOZE: AppBinding = AppBinding::new("TASK_SNOOZE", "b");
+    pub const MANAGEMENT_CREATE: AppBinding = AppBinding::new("MANAGEMENT_CREATE", "n");
+    pub const MANAGEMENT_DELETE: AppBinding = AppBinding::new("MANAGEMENT_DELETE", "delete");
+    pub const MANAGEMENT_DELETE_ALT: AppBinding =
+        AppBinding::new("MANAGEMENT_DELETE_ALT", "ctrl+backspace");
+    pub const MANAGEMENT_DELETE_X: AppBinding = AppBinding::new("MANAGEMENT_DELETE_X", "ctrl+x");
+    pub const TASK_TITLE_FIELD: AppBinding = AppBinding::new_sequence("TASK_TITLE_FIELD", "ti");
+    pub const TASK_DESCRIPTION_FIELD: AppBinding =
+        AppBinding::new_sequence("TASK_DESCRIPTION_FIELD", "dd");
+    pub const TASK_DESCRIPTION_EDITOR: AppBinding =
+        AppBinding::new_sequence("TASK_DESCRIPTION_EDITOR", "do");
+    pub const TASK_STATE_FIELD: AppBinding = AppBinding::new_sequence("TASK_STATE_FIELD", "st");
+    pub const TASK_SIZE_FIELD: AppBinding = AppBinding::new_sequence("TASK_SIZE_FIELD", "si");
+    pub const TASK_PRIORITY_FIELD: AppBinding =
+        AppBinding::new_sequence("TASK_PRIORITY_FIELD", "pri");
+    pub const TASK_PEOPLE_FIELD: AppBinding = AppBinding::new_sequence("TASK_PEOPLE_FIELD", "pe");
     pub const TASK_PROJECTS_FIELD: AppBinding =
-        AppBinding::new_sequence("TASK_PROJECTS_FIELD", "ts");
+        AppBinding::new_sequence("TASK_PROJECTS_FIELD", "pro");
     pub const TASK_TAGS_FIELD: AppBinding = AppBinding::new_sequence("TASK_TAGS_FIELD", "ta");
     pub const TASK_START_DATE_FIELD: AppBinding =
         AppBinding::new_sequence("TASK_START_DATE_FIELD", "sd");
     pub const TASK_END_DATE_FIELD: AppBinding =
         AppBinding::new_sequence("TASK_END_DATE_FIELD", "ed");
+    pub const TASK_SNOOZED_UNTIL_FIELD: AppBinding =
+        AppBinding::new_sequence("TASK_SNOOZED_UNTIL_FIELD", "su");
     pub const DETAIL_CLOSE: AppBinding = AppBinding::new("DETAIL_CLOSE", "esc");
     pub const DETAIL_CLOSE_ALT: AppBinding = AppBinding::new("DETAIL_CLOSE_ALT", "ctrl+[");
 
@@ -302,7 +322,6 @@ pub mod keys {
     pub const BULK_SNOOZE_BUTTON: AppBinding = AppBinding::new("BULK_SNOOZE_BUTTON", "z");
     pub const PULL_FOCUS_BUTTON: AppBinding = AppBinding::new("PULL_FOCUS_BUTTON", "p");
     pub const SHOW_FUTURE_TOGGLE: AppBinding = AppBinding::new("SHOW_FUTURE_TOGGLE", "f");
-    pub const SNOOZED_FILTER_TOGGLE: AppBinding = AppBinding::new("SNOOZED_FILTER_TOGGLE", "s");
     pub const RETURNED_FILTER_TOGGLE: AppBinding = AppBinding::new("RETURNED_FILTER_TOGGLE", "/");
     pub const CONTEXTS_PANEL: AppBinding = AppBinding::new("CONTEXTS_PANEL", "c");
     pub const DETAIL_TAB: AppBinding = AppBinding::new("DETAIL_TAB", "d");
@@ -351,9 +370,17 @@ pub mod keys {
         TASK_VIEW_MENU,
         TASK_DELETE,
         TASK_DELETE_ALT,
+        TASK_DELETE_CTRL_X,
         TASK_DISPOSITION,
+        TASK_DISPOSITION_X,
+        TASK_SNOOZE,
+        MANAGEMENT_CREATE,
+        MANAGEMENT_DELETE,
+        MANAGEMENT_DELETE_ALT,
+        MANAGEMENT_DELETE_X,
         TASK_TITLE_FIELD,
         TASK_DESCRIPTION_FIELD,
+        TASK_DESCRIPTION_EDITOR,
         TASK_STATE_FIELD,
         TASK_SIZE_FIELD,
         TASK_PRIORITY_FIELD,
@@ -362,6 +389,7 @@ pub mod keys {
         TASK_TAGS_FIELD,
         TASK_START_DATE_FIELD,
         TASK_END_DATE_FIELD,
+        TASK_SNOOZED_UNTIL_FIELD,
         DETAIL_CLOSE,
         DETAIL_CLOSE_ALT,
         CAPTURE_RAW_LEAD,
@@ -394,7 +422,6 @@ pub mod keys {
         BULK_SNOOZE_BUTTON,
         PULL_FOCUS_BUTTON,
         SHOW_FUTURE_TOGGLE,
-        SNOOZED_FILTER_TOGGLE,
         RETURNED_FILTER_TOGGLE,
         CONTEXTS_PANEL,
         DETAIL_TAB,
@@ -472,16 +499,51 @@ mod tests {
     }
 
     #[test]
-    fn sequence_hotkeys_allow_multi_character_defaults() {
+    fn task_detail_hotkeys_use_requested_sequence_defaults() {
         let keymap = AppKeymap::from_overrides(std::iter::empty::<(String, String)>()).unwrap();
-        assert_eq!(keymap.binding("TASK_START_DATE_FIELD").unwrap().raw, "sd");
-        assert!(
-            keymap
-                .binding("TASK_START_DATE_FIELD")
-                .unwrap()
-                .spec
-                .is_none()
-        );
+        let expected = [
+            ("TASK_TITLE_FIELD", "ti"),
+            ("TASK_DESCRIPTION_FIELD", "dd"),
+            ("TASK_DESCRIPTION_EDITOR", "do"),
+            ("TASK_STATE_FIELD", "st"),
+            ("TASK_SIZE_FIELD", "si"),
+            ("TASK_PRIORITY_FIELD", "pri"),
+            ("TASK_PEOPLE_FIELD", "pe"),
+            ("TASK_PROJECTS_FIELD", "pro"),
+            ("TASK_TAGS_FIELD", "ta"),
+            ("TASK_SNOOZED_UNTIL_FIELD", "su"),
+        ];
+
+        for (name, default) in expected {
+            let binding = keymap.binding(name).unwrap();
+            assert_eq!(binding.raw, default);
+            assert!(
+                binding.spec.is_none(),
+                "{name} should be a sequence binding"
+            );
+        }
+    }
+
+    #[test]
+    fn snoozed_until_sequence_override_is_registered() {
+        let keymap =
+            AppKeymap::from_overrides([("TASK_SNOOZED_UNTIL_FIELD".into(), "zz".into())]).unwrap();
+        let binding = keymap.binding("TASK_SNOOZED_UNTIL_FIELD").unwrap();
+
+        assert_eq!(binding.raw, "zz");
+        assert!(binding.spec.is_none());
+    }
+
+    #[test]
+    fn management_delete_uses_ctrl_x_not_plain_x() {
+        let keymap = AppKeymap::from_overrides(std::iter::empty::<(String, String)>()).unwrap();
+        let binding = keymap.binding("MANAGEMENT_DELETE_X").unwrap();
+
+        assert_eq!(binding.raw, "ctrl+x");
+        assert!(binding.spec.unwrap().matches(KeyEvent {
+            code: Key::Char('x'),
+            modifiers: KeyModifiers::CONTROL,
+        }));
     }
 
     #[test]

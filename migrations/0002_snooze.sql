@@ -1,0 +1,6 @@
+ALTER TABLE tasks ADD COLUMN snoozed_until TEXT;
+
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);

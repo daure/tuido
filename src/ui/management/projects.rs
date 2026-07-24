@@ -5,15 +5,17 @@ use ratatui::{
     layout::{Constraint, Rect},
 };
 use tuicore::{
-    ActivationMode, AnimationSettings, Column, DataView, DataViewTypedEvent, Dialog, DialogHost,
-    EventCtx, EventOutcome, EventRoute, Flex, FlexItem, FocusCtx, FocusTarget, LayoutCtx,
-    LayoutResult, LifecycleCtx, Paragraph, RenderCtx, SelectionMode, SelectionTrigger, Separator,
-    Split, TextInput, TextareaInput, TickResult, TuiEvent, TuiNode,
+    ActivationMode, AnimationSettings, ChildKey, Column, DataView, DataViewTypedEvent, Dialog,
+    DialogAction, DialogHost, EventCtx, EventOutcome, EventRoute, Flex, FlexItem, FocusCtx,
+    FocusTarget, LayoutCtx, LayoutResult, LifecycleCtx, Paragraph, RenderCtx, SelectionMode,
+    SelectionTrigger, Separator, Split, TextInput, TextareaInput, TickResult, TuiEvent, TuiNode,
 };
 
-use super::common::{detail_outcome_or_escape, dropdown_single_optional, person_choices};
+use super::ManagementDialogKind;
+use super::common::{dropdown_single_optional, person_choices};
 use crate::{
     app::{AppContext, AppMsg},
+    app_keymap::{self, keys},
     domain::{AppEvent, Person, Project, ProjectPatch},
     persistence_coordinator::PersistenceCommand,
     ui::save_status::SaveStatusLine,
@@ -26,6 +28,8 @@ pub(crate) type ProjectsDialog = DialogHost<ProjectsWorkspace, AppMsg>;
 pub(crate) fn dialog(context: AppContext) -> ProjectsDialog {
     Dialog::new()
         .top_left("Projects")
+        .actions([management_create_action(ManagementDialogKind::Projects)])
+        .close_on_unfocus_from_descendants(true)
         .on_close(|_| AppMsg::CloseDialog)
         .host(ProjectsWorkspace::new(context))
 }
@@ -34,6 +38,7 @@ pub(crate) struct ProjectsWorkspace {
     context: AppContext,
     split: Split<ProjectTable, ProjectDetailForm>,
     observed_version: u64,
+    table_focused: bool,
 }
 
 impl ProjectsWorkspace {
@@ -44,6 +49,7 @@ impl ProjectsWorkspace {
             context,
             split,
             observed_version,
+            table_focused: false,
         }
     }
     fn sync_store_version(&mut self) {
@@ -54,14 +60,33 @@ impl ProjectsWorkspace {
             return;
         }
         let rows = state.projects.clone();
-        let error = state
-            .selected_project_id
+        let people = state.people.clone();
+        let selected_id = state.selected_project_id.clone();
+        let project = selected_id
+            .as_deref()
+            .and_then(|id| state.projects.iter().find(|project| project.id == id))
+            .cloned();
+        let error = selected_id
             .as_deref()
             .and_then(|id| state.project_save_error(id))
             .map(str::to_string);
         drop(store);
         self.split.first_mut().set_rows(rows);
-        self.split.second_mut().set_save_error(error.as_deref());
+        if let Some(id) = selected_id.as_ref() {
+            self.split.first_mut().highlight_id(id);
+            self.split.first_mut().select_id(id.clone());
+        }
+        self.split.first_mut().take_events();
+        if self.split.second().project_id.as_deref() != selected_id.as_deref() {
+            self.split.second_mut().set_project(
+                project.as_ref(),
+                &people,
+                error.as_deref(),
+                &mut EventCtx::default(),
+            );
+        } else {
+            self.split.second_mut().set_save_error(error.as_deref());
+        }
         self.observed_version = version;
     }
     fn sync_table_events(&mut self, ctx: &mut EventCtx<AppMsg>) {
@@ -140,6 +165,41 @@ impl ProjectsWorkspace {
         }
         changed
     }
+    fn handle_workspace_event(
+        &self,
+        outcome: EventOutcome,
+        event: &TuiEvent,
+        ctx: &mut EventCtx<AppMsg>,
+    ) -> EventOutcome {
+        if outcome.handled() || !self.table_focused {
+            return outcome;
+        }
+        let selected = self
+            .context
+            .store
+            .borrow()
+            .state()
+            .selected_project_id
+            .clone();
+        if let Some(entity_id) = selected
+            && app_keymap::matches_any(
+                event,
+                &[
+                    keys::MANAGEMENT_DELETE,
+                    keys::MANAGEMENT_DELETE_ALT,
+                    keys::MANAGEMENT_DELETE_X,
+                ],
+            )
+        {
+            ctx.emit(AppMsg::OpenDeleteManagement {
+                kind: ManagementDialogKind::Projects,
+                entity_id,
+            });
+            ctx.stop_propagation();
+            return EventOutcome::Handled;
+        }
+        outcome
+    }
 }
 
 impl TuiNode<AppMsg> for ProjectsWorkspace {
@@ -156,7 +216,7 @@ impl TuiNode<AppMsg> for ProjectsWorkspace {
             ctx.request_redraw();
         }
         self.sync_table_events(ctx);
-        outcome
+        self.handle_workspace_event(outcome, event, ctx)
     }
     fn dispatch_event(
         &mut self,
@@ -169,9 +229,14 @@ impl TuiNode<AppMsg> for ProjectsWorkspace {
             ctx.request_redraw();
         }
         self.sync_table_events(ctx);
-        outcome
+        self.handle_workspace_event(outcome, event, ctx)
     }
     fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<AppMsg>) {
+        if target.for_child(&ChildKey::first()).is_some() {
+            self.table_focused = focused;
+        } else if focused {
+            self.table_focused = false;
+        }
         self.split.dispatch_focus(target, focused, ctx);
         if self.sync_detail_changes() {
             ctx.request_redraw();
@@ -192,6 +257,12 @@ impl TuiNode<AppMsg> for ProjectsWorkspace {
     fn destroy(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
         self.split.destroy(ctx);
     }
+}
+
+fn management_create_action(kind: ManagementDialogKind) -> DialogAction<AppMsg> {
+    DialogAction::new("New")
+        .hotkey(keys::MANAGEMENT_CREATE.key_spec())
+        .on_trigger(move || AppMsg::OpenCreateManagement(kind))
 }
 
 struct ProjectDetailForm {
@@ -262,8 +333,7 @@ impl TuiNode<AppMsg> for ProjectDetailForm {
         self.root.render(frame, area, ctx);
     }
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<AppMsg>) -> EventOutcome {
-        let outcome = self.root.event(event, ctx);
-        detail_outcome_or_escape(outcome, event, ctx)
+        self.root.event(event, ctx)
     }
     fn dispatch_event(
         &mut self,
@@ -271,8 +341,7 @@ impl TuiNode<AppMsg> for ProjectDetailForm {
         event: &TuiEvent,
         ctx: &mut EventCtx<AppMsg>,
     ) -> EventOutcome {
-        let outcome = self.root.dispatch_event(route, event, ctx);
-        detail_outcome_or_escape(outcome, event, ctx)
+        self.root.dispatch_event(route, event, ctx)
     }
     fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<AppMsg>) {
         self.root.dispatch_focus(target, focused, ctx);
@@ -321,6 +390,7 @@ fn project_table(rows: Vec<Project>, people: &[Person], selected: Option<&str>) 
     let mut table = DataView::new(rows, |row: &Project| row.id.clone())
         .headers(true)
         .action_bar(true)
+        .filter_controls(false)
         .activation_mode(ActivationMode::OnActivateKey)
         .selection_mode(SelectionMode::Single)
         .selection_trigger(SelectionTrigger::OnNavigate)
@@ -476,5 +546,92 @@ mod tests {
             .push(ProjectPatch::Name("Foundation".into()));
         assert!(workspace.sync_detail_changes());
         assert_eq!(store.borrow().state().projects[0].name, "Foundation");
+    }
+
+    #[test]
+    fn delete_hotkey_requests_confirmation_for_selected_project() {
+        let project = Project::new(
+            "project-1".into(),
+            "CORE".into(),
+            "Core".into(),
+            String::new(),
+        );
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks: vec![],
+            people: vec![],
+            projects: vec![project],
+            tags: vec![],
+        });
+        let mut workspace = ProjectsWorkspace::new(context);
+        workspace.table_focused = true;
+        let mut ctx = EventCtx::default();
+
+        let outcome = workspace.handle_workspace_event(
+            EventOutcome::Ignored,
+            &TuiEvent::Key(tuicore::KeyEvent {
+                code: tuicore::Key::Char('x'),
+                modifiers: tuicore::KeyModifiers::CONTROL,
+            }),
+            &mut ctx,
+        );
+
+        assert!(outcome.handled());
+        assert!(matches!(
+            ctx.messages(),
+            [AppMsg::OpenDeleteManagement {
+                kind: ManagementDialogKind::Projects,
+                entity_id,
+            }] if entity_id == "project-1"
+        ));
+    }
+
+    #[test]
+    fn projects_table_disables_filter_mode() {
+        let mut table = project_table(Vec::new(), &[], None);
+
+        let outcome = table.on_key(tuicore::Key::Char('f'), Rect::new(0, 0, 80, 20));
+
+        assert!(!outcome.handled);
+        assert!(!outcome.changed);
+        assert!(table.transform_state().filters.is_empty());
+    }
+
+    #[test]
+    fn newly_created_project_is_selected_and_shown_in_detail() {
+        let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+            tasks: vec![],
+            people: vec![],
+            projects: vec![Project::new(
+                "project-1".into(),
+                "CORE".into(),
+                "Core".into(),
+                String::new(),
+            )],
+            tags: vec![],
+        });
+        let mut workspace = ProjectsWorkspace::new(context);
+        store
+            .borrow_mut()
+            .dispatch(AppEvent::ProjectCreated(Project::new(
+                "project-2".into(),
+                "APP".into(),
+                "App".into(),
+                String::new(),
+            )));
+
+        workspace.layout(Rect::new(0, 0, 100, 30), &mut LayoutCtx::new());
+
+        assert_eq!(
+            workspace.split.first().highlighted_id().as_deref(),
+            Some("project-2")
+        );
+        assert_eq!(
+            workspace.split.first().selected_id().as_deref(),
+            Some("project-2")
+        );
+        assert_eq!(
+            workspace.split.second().project_id.as_deref(),
+            Some("project-2")
+        );
     }
 }

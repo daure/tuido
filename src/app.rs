@@ -1,12 +1,15 @@
 use std::{cell::RefCell, error::Error, rc::Rc, time::Duration};
 
 use crate::app_keymap::{self, keys};
+use crate::calendar::CalendarWorkspace;
+use crate::create_management_dialog::{CreateManagementDialog, ManagementEntityDraft};
 use crate::create_task_dialog::{CreateTaskDialog, CreateTaskDraft};
 use crate::domain::{
     AppEvent, AppState, Person, Project, Tag, Task, TaskPatch, TaskPriority, TaskSize, TaskState,
     reduce_app_state,
 };
 use crate::persistence_coordinator::{AppStore, PersistenceCommand, PersistenceCoordinator};
+use crate::snooze::{SnoozeDialog, local_now};
 use crate::storage::Storage;
 use crate::ui::management::{ManagementDialogKind, people, projects, tags};
 use crate::ui::save_status::SaveStatusLine;
@@ -16,17 +19,17 @@ use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
 };
-use time::Date;
+use time::{Date, PrimitiveDateTime};
 use tuicore::{
     ActivationMode, AnimationSettings, AxisProposal, Button, CellContext, ChildKey, ChipColorRole,
     Column, ConfirmationDialog, ConfirmationDialogOutcome, CrossAlign, DataView,
-    DataViewTypedEvent, DatePickerDropdown, Dialog, DialogAction, DialogBackdrop, DialogHost,
-    DialogLayer, Dropdown, DropdownCommitMode, DropdownSearchMode, EventCtx, EventOutcome,
-    EventRoute, Flex, FlexItem, FocusCtx, FocusId, FocusRequest, FocusTarget, HotkeyLabelMode,
-    KeySpec, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, Menu, MenuItem,
-    MenuSearchMode, Paragraph, RenderCtx, SelectedTag, SelectionMode, SelectionTrigger, Split,
-    StatusBar, StatusBarMenuItem, Store, Tab, Tabs, TabsVariant, TagInput, TagInputEvent,
-    TextInput, TextareaInput, TickResult, TreeApp, TuiEvent, TuiNode,
+    DataViewTypedEvent, DatePickerDropdown, DateTimePickerDropdown, Dialog, DialogAction,
+    DialogBackdrop, DialogHost, DialogLayer, Dropdown, DropdownCommitMode, DropdownSearchMode,
+    EventCtx, EventOutcome, EventRoute, Flex, FlexItem, FocusCtx, FocusId, FocusRequest,
+    FocusTarget, HotkeyLabelMode, KeySpec, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint,
+    LifecycleCtx, Menu, MenuItem, MenuSearchMode, Paragraph, RenderCtx, SelectedTag, SelectionMode,
+    SelectionTrigger, Split, StatusBar, StatusBarMenuItem, Store, Tab, Tabs, TabsVariant, TagInput,
+    TagInputEvent, TextInput, TextareaInput, TickResult, TreeApp, TuiEvent, TuiNode,
 };
 use uuid::Uuid;
 
@@ -38,12 +41,33 @@ const TAGS_MENU_ID: &str = "tags";
 pub(crate) enum AppMsg {
     Noop,
     OpenManagementDialog(ManagementDialogKind),
+    OpenCreateManagement(ManagementDialogKind),
+    CreateManagementSubmitted(ManagementEntityDraft),
+    OpenDeleteManagement {
+        kind: ManagementDialogKind,
+        entity_id: String,
+    },
+    DeleteManagementConfirmed {
+        kind: ManagementDialogKind,
+        entity_id: String,
+    },
     OpenCreateTask,
     CreateTaskSubmitted(CreateTaskDraft),
     OpenDeleteTask,
     DeleteTaskConfirmed(String),
     OpenTaskDisposition,
-    SetTaskState { task_id: String, state: TaskState },
+    OpenTaskSnooze,
+    SnoozeTask {
+        task_id: String,
+        until: PrimitiveDateTime,
+        remember_custom: Option<PrimitiveDateTime>,
+    },
+    UnsnoozeTask(String),
+    SetTaskState {
+        task_id: String,
+        state: TaskState,
+    },
+    CloseManagementOverlay,
     CloseDialog,
 }
 
@@ -56,8 +80,11 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     let storage = runtime.block_on(Storage::connect_from_env())?;
     runtime.block_on(storage.migrate())?;
     let snapshot = runtime.block_on(storage.load_workspace())?;
+    let last_custom_snooze = runtime.block_on(storage.load_last_custom_snooze())?;
+    let mut app_state = AppState::from_snapshot(snapshot);
+    app_state.last_custom_snooze = last_custom_snooze;
     let store = Rc::new(RefCell::new(Store::new(
-        AppState::from_snapshot(snapshot),
+        app_state,
         reduce_app_state as fn(&mut AppState, AppEvent) -> tuicore::DispatchOutcome,
     )));
     let coordinator = Rc::new(RefCell::new(PersistenceCoordinator::new(
@@ -71,12 +98,28 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         .on_message(|app, message, ctx| match message {
             AppMsg::Noop => {}
             AppMsg::OpenManagementDialog(kind) => app.open_management_dialog(kind, ctx),
+            AppMsg::OpenCreateManagement(kind) => app.open_create_management_dialog(kind, ctx),
+            AppMsg::CreateManagementSubmitted(draft) => app.submit_create_management(draft, ctx),
+            AppMsg::OpenDeleteManagement { kind, entity_id } => {
+                app.open_delete_management_dialog(kind, &entity_id, ctx)
+            }
+            AppMsg::DeleteManagementConfirmed { kind, entity_id } => {
+                app.delete_management(kind, &entity_id, ctx)
+            }
             AppMsg::OpenCreateTask => app.open_create_task_dialog(ctx),
             AppMsg::CreateTaskSubmitted(draft) => app.submit_create_task(draft, ctx),
             AppMsg::OpenDeleteTask => app.open_delete_task_dialog(ctx),
             AppMsg::DeleteTaskConfirmed(task_id) => app.delete_task(task_id, ctx),
             AppMsg::OpenTaskDisposition => app.open_task_disposition_dialog(ctx),
+            AppMsg::OpenTaskSnooze => app.open_task_snooze_dialog(ctx),
+            AppMsg::SnoozeTask {
+                task_id,
+                until,
+                remember_custom,
+            } => app.snooze_task(task_id, until, remember_custom, ctx),
+            AppMsg::UnsnoozeTask(task_id) => app.unsnooze_task(task_id, ctx),
             AppMsg::SetTaskState { task_id, state } => app.set_task_state(task_id, state, ctx),
+            AppMsg::CloseManagementOverlay => app.close_management_overlay(ctx),
             AppMsg::CloseDialog => app.close_dialog(ctx),
         })
         .run();
@@ -88,8 +131,11 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+type PrimaryDialogLayer = DialogLayer<Flex<AppMsg>, AppDialog>;
+type AppDialogLayers = DialogLayer<PrimaryDialogLayer, AppDialog>;
+
 struct App {
-    root: DialogLayer<Flex<AppMsg>, AppDialog>,
+    root: AppDialogLayers,
     context: AppContext,
 }
 
@@ -99,7 +145,7 @@ impl App {
         let tabs = Tabs::new(vec![
             Tab::new("Tasks", TaskWorkspace::new(context.clone()))
                 .hotkey(keys::APP_TASKS_TAB.hotkey()),
-            Tab::text("Calendar", "Time-aware planning comes later.")
+            Tab::new("Calendar", CalendarWorkspace::new(context.clone()))
                 .hotkey(keys::APP_CALENDAR_TAB.hotkey()),
         ])
         .selected(0)
@@ -136,32 +182,223 @@ impl App {
             FlexItem::fixed(1),
         );
 
-        let dialog = AppDialog::TaskDisposition(Dialog::new());
+        let primary = DialogLayer::new(root, empty_app_dialog())
+            .active(false)
+            .layer_percent(80)
+            .layer_cross_percent(80)
+            .backdrop(DialogBackdrop::dim().amount(0.5));
         Self {
-            root: DialogLayer::new(root, dialog)
+            root: DialogLayer::new(primary, empty_app_dialog())
                 .active(false)
-                .layer_percent(80)
-                .layer_cross_percent(80)
+                .layer_percent(60)
+                .layer_cross_percent(50)
+                .base_overlays_visible(true)
                 .backdrop(DialogBackdrop::dim().amount(0.5)),
             context,
         }
     }
 
-    fn open_management_dialog(&mut self, kind: ManagementDialogKind, ctx: &mut EventCtx<AppMsg>) {
-        let dialog = management_dialog(self.context.clone(), kind);
-        self.root.replace_layer(dialog, ctx);
-        self.root.set_layer_percent(80);
-        self.root.set_layer_cross_percent(80);
-        self.root.set_fit_content(false);
-        self.root.set_active_immediate_with_context(true, ctx);
+    fn primary_dialog(&mut self) -> &mut PrimaryDialogLayer {
+        self.root.base_mut()
     }
 
-    fn open_create_task_dialog(&mut self, ctx: &mut EventCtx<AppMsg>) {
-        self.root.replace_layer(create_task_dialog_host(), ctx);
+    fn open_management_dialog(&mut self, kind: ManagementDialogKind, ctx: &mut EventCtx<AppMsg>) {
+        self.root.set_active_with_context(false, ctx);
+        let dialog = management_dialog(self.context.clone(), kind);
+        let primary = self.primary_dialog();
+        primary.replace_layer(dialog, ctx);
+        primary.set_layer_percent(80);
+        primary.set_layer_cross_percent(80);
+        primary.set_fit_content(false);
+        primary.set_active_immediate_with_context(true, ctx);
+    }
+
+    fn open_create_management_dialog(
+        &mut self,
+        kind: ManagementDialogKind,
+        ctx: &mut EventCtx<AppMsg>,
+    ) {
+        self.root
+            .replace_layer(create_management_dialog_host(kind), ctx);
         self.root.set_layer_percent(60);
         self.root.set_layer_cross_percent(50);
         self.root.set_fit_content(true);
         self.root.set_active_with_context(true, ctx);
+    }
+
+    fn submit_create_management(
+        &mut self,
+        draft: ManagementEntityDraft,
+        ctx: &mut EventCtx<AppMsg>,
+    ) {
+        match draft {
+            ManagementEntityDraft::Person { name, email } => {
+                if name.trim().is_empty() {
+                    notify_required(
+                        ctx,
+                        "Person name required",
+                        "Enter a name before creating the person.",
+                    );
+                    return;
+                }
+                let person = Person::new(Uuid::new_v4().to_string(), name, email);
+                self.context
+                    .store
+                    .borrow_mut()
+                    .dispatch(AppEvent::PersonCreated(person.clone()));
+                self.context
+                    .coordinator
+                    .borrow_mut()
+                    .submit(PersistenceCommand::CreatePerson(person));
+            }
+            ManagementEntityDraft::Project {
+                key,
+                name,
+                description,
+            } => {
+                if key.trim().is_empty() || name.trim().is_empty() {
+                    notify_required(
+                        ctx,
+                        "Project key and name required",
+                        "Enter both a key and name before creating the project.",
+                    );
+                    return;
+                }
+                let project = Project::new(Uuid::new_v4().to_string(), key, name, description);
+                self.context
+                    .store
+                    .borrow_mut()
+                    .dispatch(AppEvent::ProjectCreated(project.clone()));
+                self.context
+                    .coordinator
+                    .borrow_mut()
+                    .submit(PersistenceCommand::CreateProject(project));
+            }
+            ManagementEntityDraft::Tag { label } => {
+                if label.trim().is_empty() {
+                    notify_required(
+                        ctx,
+                        "Tag label required",
+                        "Enter a label before creating the tag.",
+                    );
+                    return;
+                }
+                let tag = Tag::new(Uuid::new_v4().to_string(), label);
+                self.context
+                    .store
+                    .borrow_mut()
+                    .dispatch(AppEvent::TagCreated(tag.clone()));
+                self.context
+                    .coordinator
+                    .borrow_mut()
+                    .submit(PersistenceCommand::CreateTag(tag));
+            }
+        }
+        self.close_management_overlay(ctx);
+    }
+
+    fn open_delete_management_dialog(
+        &mut self,
+        kind: ManagementDialogKind,
+        entity_id: &str,
+        ctx: &mut EventCtx<AppMsg>,
+    ) {
+        let label = {
+            let store = self.context.store.borrow();
+            let state = store.state();
+            match kind {
+                ManagementDialogKind::People => state
+                    .people
+                    .iter()
+                    .find(|person| person.id == entity_id)
+                    .map(|person| person.name.clone()),
+                ManagementDialogKind::Projects => state
+                    .projects
+                    .iter()
+                    .find(|project| project.id == entity_id)
+                    .map(|project| project.name.clone()),
+                ManagementDialogKind::Tags => state
+                    .tags
+                    .iter()
+                    .find(|tag| tag.id == entity_id)
+                    .map(|tag| tag.label.clone()),
+            }
+        };
+        let Some(label) = label else {
+            return;
+        };
+        self.root.replace_layer(
+            delete_management_dialog(kind, entity_id.to_string(), &label),
+            ctx,
+        );
+        self.root.set_fit_content(true);
+        self.root.set_active_with_context(true, ctx);
+    }
+
+    fn delete_management(
+        &mut self,
+        kind: ManagementDialogKind,
+        entity_id: &str,
+        ctx: &mut EventCtx<AppMsg>,
+    ) {
+        match kind {
+            ManagementDialogKind::People => {
+                let deletion = self
+                    .context
+                    .store
+                    .borrow()
+                    .state()
+                    .person_deletion(entity_id);
+                let Some(deletion) = deletion else { return };
+                self.context
+                    .store
+                    .borrow_mut()
+                    .dispatch(AppEvent::PersonDeleted(deletion.person.id.clone()));
+                self.context
+                    .coordinator
+                    .borrow_mut()
+                    .submit(PersistenceCommand::DeletePerson(deletion));
+            }
+            ManagementDialogKind::Projects => {
+                let deletion = self
+                    .context
+                    .store
+                    .borrow()
+                    .state()
+                    .project_deletion(entity_id);
+                let Some(deletion) = deletion else { return };
+                self.context
+                    .store
+                    .borrow_mut()
+                    .dispatch(AppEvent::ProjectDeleted(deletion.project.id.clone()));
+                self.context
+                    .coordinator
+                    .borrow_mut()
+                    .submit(PersistenceCommand::DeleteProject(deletion));
+            }
+            ManagementDialogKind::Tags => {
+                let deletion = self.context.store.borrow().state().tag_deletion(entity_id);
+                let Some(deletion) = deletion else { return };
+                self.context
+                    .store
+                    .borrow_mut()
+                    .dispatch(AppEvent::TagDeleted(deletion.tag.id.clone()));
+                self.context
+                    .coordinator
+                    .borrow_mut()
+                    .submit(PersistenceCommand::DeleteTag(deletion));
+            }
+        }
+        self.close_management_overlay(ctx);
+    }
+
+    fn open_create_task_dialog(&mut self, ctx: &mut EventCtx<AppMsg>) {
+        let primary = self.primary_dialog();
+        primary.replace_layer(create_task_dialog_host(), ctx);
+        primary.set_layer_percent(60);
+        primary.set_layer_cross_percent(50);
+        primary.set_fit_content(true);
+        primary.set_active_with_context(true, ctx);
     }
 
     fn submit_create_task(&mut self, draft: CreateTaskDraft, ctx: &mut EventCtx<AppMsg>) {
@@ -195,9 +432,10 @@ impl App {
         let Some(task) = self.selected_task() else {
             return;
         };
-        self.root.replace_layer(delete_task_dialog(&task), ctx);
-        self.root.set_fit_content(true);
-        self.root.set_active_with_context(true, ctx);
+        let primary = self.primary_dialog();
+        primary.replace_layer(delete_task_dialog(&task), ctx);
+        primary.set_fit_content(true);
+        primary.set_active_with_context(true, ctx);
     }
 
     fn delete_task(&mut self, task_id: String, ctx: &mut EventCtx<AppMsg>) {
@@ -225,9 +463,67 @@ impl App {
         let Some(task) = self.selected_task() else {
             return;
         };
-        self.root.replace_layer(task_disposition_dialog(&task), ctx);
-        self.root.set_fit_content(true);
-        self.root.set_active_with_context(true, ctx);
+        let primary = self.primary_dialog();
+        primary.replace_layer(task_disposition_dialog(&task), ctx);
+        primary.set_fit_content(true);
+        primary.set_active_with_context(true, ctx);
+    }
+
+    fn open_task_snooze_dialog(&mut self, ctx: &mut EventCtx<AppMsg>) {
+        let Some(task) = self.selected_task() else {
+            return;
+        };
+        let now = match local_now() {
+            Ok(now) => now,
+            Err(error) => {
+                ctx.notify(tuicore::Notification::error(
+                    "Local time unavailable",
+                    format!("Cannot open snooze options: {error}"),
+                ));
+                return;
+            }
+        };
+        let last_custom = self.context.store.borrow().state().last_custom_snooze;
+        let primary = self.primary_dialog();
+        primary.replace_layer(
+            AppDialog::Snooze(Box::new(SnoozeDialog::new(
+                task.id,
+                now,
+                last_custom,
+                task.state == TaskState::Snoozed,
+            ))),
+            ctx,
+        );
+        primary.set_fit_content(true);
+        primary.set_active_with_context(true, ctx);
+    }
+
+    fn snooze_task(
+        &mut self,
+        task_id: String,
+        until: PrimitiveDateTime,
+        remember_custom: Option<PrimitiveDateTime>,
+        ctx: &mut EventCtx<AppMsg>,
+    ) {
+        let patch = TaskPatch::Snooze {
+            until,
+            remember_custom,
+        };
+        let outcome = self
+            .context
+            .store
+            .borrow_mut()
+            .dispatch(AppEvent::PatchTask {
+                task_id: task_id.clone(),
+                patch: patch.clone(),
+            });
+        if outcome.changed {
+            self.context
+                .coordinator
+                .borrow_mut()
+                .submit(PersistenceCommand::PatchTask(task_id, patch));
+        }
+        self.close_dialog(ctx);
     }
 
     fn set_task_state(&mut self, task_id: String, state: TaskState, ctx: &mut EventCtx<AppMsg>) {
@@ -251,6 +547,25 @@ impl App {
         self.close_dialog(ctx);
     }
 
+    fn unsnooze_task(&mut self, task_id: String, ctx: &mut EventCtx<AppMsg>) {
+        let patch = TaskPatch::Unsnooze;
+        let outcome = self
+            .context
+            .store
+            .borrow_mut()
+            .dispatch(AppEvent::PatchTask {
+                task_id: task_id.clone(),
+                patch: patch.clone(),
+            });
+        if outcome.changed {
+            self.context
+                .coordinator
+                .borrow_mut()
+                .submit(PersistenceCommand::PatchTask(task_id, patch));
+        }
+        self.close_dialog(ctx);
+    }
+
     fn selected_task(&self) -> Option<Task> {
         let store = self.context.store.borrow();
         let state = store.state();
@@ -262,6 +577,11 @@ impl App {
     }
 
     fn close_dialog(&mut self, ctx: &mut EventCtx<AppMsg>) {
+        self.root.set_active_with_context(false, ctx);
+        self.primary_dialog().set_active_with_context(false, ctx);
+    }
+
+    fn close_management_overlay(&mut self, ctx: &mut EventCtx<AppMsg>) {
         self.root.set_active_with_context(false, ctx);
     }
 }
@@ -707,6 +1027,7 @@ impl TaskWorkspace {
         if next_view == self.task_view {
             return false;
         }
+        self.table_mut().clear_search();
         self.task_view = next_view;
         let state = self.context.store.borrow().state().clone();
         self.refresh_from_state(&state, true);
@@ -822,11 +1143,22 @@ impl TaskWorkspace {
         let has_visible_task = self.visible_selection.borrow().is_some();
         let message = if self.table_focused
             && has_visible_task
-            && app_keymap::matches_any(event, &[keys::TASK_DELETE, keys::TASK_DELETE_ALT])
-        {
+            && app_keymap::matches_any(
+                event,
+                &[
+                    keys::TASK_DELETE,
+                    keys::TASK_DELETE_ALT,
+                    keys::TASK_DELETE_CTRL_X,
+                ],
+            ) {
             Some(AppMsg::OpenDeleteTask)
-        } else if self.table_focused && has_visible_task && keys::TASK_DISPOSITION.matches(event) {
+        } else if self.table_focused
+            && has_visible_task
+            && app_keymap::matches_any(event, &[keys::TASK_DISPOSITION, keys::TASK_DISPOSITION_X])
+        {
             Some(AppMsg::OpenTaskDisposition)
+        } else if self.table_focused && has_visible_task && keys::TASK_SNOOZE.matches(event) {
+            Some(AppMsg::OpenTaskSnooze)
         } else {
             None
         };
@@ -933,9 +1265,16 @@ enum AppDialog {
     People(Box<people::PeopleDialog>),
     Projects(Box<projects::ProjectsDialog>),
     Tags(Box<tags::TagsDialog>),
+    CreateManagement(DialogHost<CreateManagementDialog, AppMsg>),
+    DeleteManagement(ConfirmationDialog<AppMsg>),
     CreateTask(DialogHost<CreateTaskDialog, AppMsg>),
     DeleteTask(ConfirmationDialog<AppMsg>),
     TaskDisposition(Dialog<AppMsg>),
+    Snooze(Box<SnoozeDialog>),
+}
+
+fn empty_app_dialog() -> AppDialog {
+    AppDialog::TaskDisposition(Dialog::new())
 }
 
 fn management_dialog(context: AppContext, kind: ManagementDialogKind) -> AppDialog {
@@ -952,6 +1291,8 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::People(dialog) => dialog.measure(proposal),
             Self::Projects(dialog) => dialog.measure(proposal),
             Self::Tags(dialog) => dialog.measure(proposal),
+            Self::CreateManagement(dialog) => measure_dialog_host(dialog, proposal),
+            Self::DeleteManagement(dialog) => dialog.measure(proposal),
             Self::CreateTask(dialog) => {
                 let body = dialog.child().measure(proposal);
                 let chrome = dialog.dialog().measure(proposal);
@@ -973,6 +1314,7 @@ impl TuiNode<AppMsg> for AppDialog {
             }
             Self::DeleteTask(dialog) => dialog.measure(proposal),
             Self::TaskDisposition(dialog) => dialog.measure(proposal),
+            Self::Snooze(dialog) => dialog.measure(proposal),
         }
     }
 
@@ -981,9 +1323,12 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::People(dialog) => dialog.layout(area, ctx),
             Self::Projects(dialog) => dialog.layout(area, ctx),
             Self::Tags(dialog) => dialog.layout(area, ctx),
+            Self::CreateManagement(dialog) => dialog.layout(area, ctx),
+            Self::DeleteManagement(dialog) => dialog.layout(area, ctx),
             Self::CreateTask(dialog) => dialog.layout(area, ctx),
             Self::DeleteTask(dialog) => dialog.layout(area, ctx),
             Self::TaskDisposition(dialog) => dialog.layout(area, ctx),
+            Self::Snooze(dialog) => dialog.layout(area, ctx),
         }
     }
 
@@ -992,9 +1337,12 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::People(dialog) => dialog.render(frame, area, ctx),
             Self::Projects(dialog) => dialog.render(frame, area, ctx),
             Self::Tags(dialog) => dialog.render(frame, area, ctx),
+            Self::CreateManagement(dialog) => dialog.render(frame, area, ctx),
+            Self::DeleteManagement(dialog) => dialog.render(frame, area),
             Self::CreateTask(dialog) => dialog.render(frame, area, ctx),
             Self::DeleteTask(dialog) => dialog.render(frame, area),
             Self::TaskDisposition(dialog) => dialog.render(frame, area),
+            Self::Snooze(dialog) => dialog.render(frame, area, ctx),
         }
     }
 
@@ -1003,9 +1351,12 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::People(dialog) => dialog.event(event, ctx),
             Self::Projects(dialog) => dialog.event(event, ctx),
             Self::Tags(dialog) => dialog.event(event, ctx),
+            Self::CreateManagement(dialog) => dialog.event(event, ctx),
+            Self::DeleteManagement(dialog) => dialog.event(event, ctx),
             Self::CreateTask(dialog) => dialog.event(event, ctx),
             Self::DeleteTask(dialog) => dialog.event(event, ctx),
             Self::TaskDisposition(dialog) => dialog.event(event, ctx),
+            Self::Snooze(dialog) => dialog.event(event, ctx),
         }
     }
 
@@ -1019,9 +1370,12 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::People(dialog) => dialog.dispatch_event(route, event, ctx),
             Self::Projects(dialog) => dialog.dispatch_event(route, event, ctx),
             Self::Tags(dialog) => dialog.dispatch_event(route, event, ctx),
+            Self::CreateManagement(dialog) => dialog.dispatch_event(route, event, ctx),
+            Self::DeleteManagement(dialog) => dialog.dispatch_event(route, event, ctx),
             Self::CreateTask(dialog) => dialog.dispatch_event(route, event, ctx),
             Self::DeleteTask(dialog) => dialog.dispatch_event(route, event, ctx),
             Self::TaskDisposition(dialog) => dialog.dispatch_event(route, event, ctx),
+            Self::Snooze(dialog) => dialog.dispatch_event(route, event, ctx),
         }
     }
 
@@ -1030,9 +1384,12 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::People(dialog) => dialog.dispatch_focus(target, focused, ctx),
             Self::Projects(dialog) => dialog.dispatch_focus(target, focused, ctx),
             Self::Tags(dialog) => dialog.dispatch_focus(target, focused, ctx),
+            Self::CreateManagement(dialog) => dialog.dispatch_focus(target, focused, ctx),
+            Self::DeleteManagement(dialog) => dialog.dispatch_focus(target, focused, ctx),
             Self::CreateTask(dialog) => dialog.dispatch_focus(target, focused, ctx),
             Self::DeleteTask(dialog) => dialog.dispatch_focus(target, focused, ctx),
             Self::TaskDisposition(dialog) => dialog.dispatch_focus(target, focused, ctx),
+            Self::Snooze(dialog) => dialog.dispatch_focus(target, focused, ctx),
         }
     }
 
@@ -1041,9 +1398,12 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::People(dialog) => dialog.tick(dt, settings),
             Self::Projects(dialog) => dialog.tick(dt, settings),
             Self::Tags(dialog) => dialog.tick(dt, settings),
+            Self::CreateManagement(dialog) => dialog.tick(dt, settings),
+            Self::DeleteManagement(dialog) => dialog.tick(dt, settings),
             Self::CreateTask(dialog) => dialog.tick(dt, settings),
             Self::DeleteTask(dialog) => dialog.tick(dt, settings),
             Self::TaskDisposition(dialog) => dialog.tick(dt, settings),
+            Self::Snooze(dialog) => dialog.tick(dt, settings),
         }
     }
 
@@ -1052,9 +1412,12 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::People(dialog) => dialog.init(ctx),
             Self::Projects(dialog) => dialog.init(ctx),
             Self::Tags(dialog) => dialog.init(ctx),
+            Self::CreateManagement(dialog) => dialog.init(ctx),
+            Self::DeleteManagement(dialog) => dialog.init(ctx),
             Self::CreateTask(dialog) => dialog.init(ctx),
             Self::DeleteTask(dialog) => dialog.init(ctx),
             Self::TaskDisposition(dialog) => dialog.init(ctx),
+            Self::Snooze(dialog) => dialog.init(ctx),
         }
     }
 
@@ -1063,9 +1426,12 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::People(dialog) => dialog.mount(ctx),
             Self::Projects(dialog) => dialog.mount(ctx),
             Self::Tags(dialog) => dialog.mount(ctx),
+            Self::CreateManagement(dialog) => dialog.mount(ctx),
+            Self::DeleteManagement(dialog) => dialog.mount(ctx),
             Self::CreateTask(dialog) => dialog.mount(ctx),
             Self::DeleteTask(dialog) => dialog.mount(ctx),
             Self::TaskDisposition(dialog) => dialog.mount(ctx),
+            Self::Snooze(dialog) => dialog.mount(ctx),
         }
     }
 
@@ -1074,9 +1440,12 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::People(dialog) => dialog.unmount(ctx),
             Self::Projects(dialog) => dialog.unmount(ctx),
             Self::Tags(dialog) => dialog.unmount(ctx),
+            Self::CreateManagement(dialog) => dialog.unmount(ctx),
+            Self::DeleteManagement(dialog) => dialog.unmount(ctx),
             Self::CreateTask(dialog) => dialog.unmount(ctx),
             Self::DeleteTask(dialog) => dialog.unmount(ctx),
             Self::TaskDisposition(dialog) => dialog.unmount(ctx),
+            Self::Snooze(dialog) => dialog.unmount(ctx),
         }
     }
 
@@ -1085,11 +1454,75 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::People(dialog) => dialog.destroy(ctx),
             Self::Projects(dialog) => dialog.destroy(ctx),
             Self::Tags(dialog) => dialog.destroy(ctx),
+            Self::CreateManagement(dialog) => dialog.destroy(ctx),
+            Self::DeleteManagement(dialog) => dialog.destroy(ctx),
             Self::CreateTask(dialog) => dialog.destroy(ctx),
             Self::DeleteTask(dialog) => dialog.destroy(ctx),
             Self::TaskDisposition(dialog) => dialog.destroy(ctx),
+            Self::Snooze(dialog) => dialog.destroy(ctx),
         }
     }
+}
+
+fn measure_dialog_host<C: TuiNode<AppMsg>>(
+    dialog: &DialogHost<C, AppMsg>,
+    proposal: LayoutProposal,
+) -> LayoutSizeHint {
+    let body = dialog.child().measure(proposal);
+    let chrome = dialog.dialog().measure(proposal);
+    let width = match proposal.width {
+        AxisProposal::AtMost(width) | AxisProposal::Exact(width) => width,
+        AxisProposal::Unbounded => body
+            .preferred
+            .width
+            .saturating_add(2)
+            .max(chrome.preferred.width),
+    };
+    LayoutSizeHint::content(
+        width,
+        body.preferred
+            .height
+            .saturating_add(chrome.preferred.height),
+    )
+    .normalized(proposal)
+}
+
+fn create_management_dialog_host(kind: ManagementDialogKind) -> AppDialog {
+    let create = CreateManagementDialog::new(kind);
+    let actions = create.actions();
+    AppDialog::CreateManagement(
+        Dialog::new()
+            .top_left(format!("Create {}", kind.singular()))
+            .actions(actions)
+            .close_on_unfocus_from_descendants(true)
+            .on_close(|_| AppMsg::CloseManagementOverlay)
+            .host(create),
+    )
+}
+
+fn delete_management_dialog(
+    kind: ManagementDialogKind,
+    entity_id: String,
+    label: &str,
+) -> AppDialog {
+    let description = format!("Delete “{label}”? This cannot be undone.");
+    let dialog = ConfirmationDialog::new(format!("Delete {}?", kind.singular()), &description)
+        .yes_text("Delete")
+        .yes_hotkey(KeySpec::plain('d'))
+        .on_outcome(move |outcome| match outcome {
+            ConfirmationDialogOutcome::Confirmed => AppMsg::DeleteManagementConfirmed {
+                kind,
+                entity_id: entity_id.clone(),
+            },
+            ConfirmationDialogOutcome::Cancelled | ConfirmationDialogOutcome::Closed(_) => {
+                AppMsg::CloseManagementOverlay
+            }
+        });
+    AppDialog::DeleteManagement(dialog)
+}
+
+fn notify_required(ctx: &mut EventCtx<AppMsg>, title: &str, body: &str) {
+    ctx.notify(tuicore::Notification::warning(title, body));
 }
 
 fn create_task_dialog_host() -> AppDialog {
@@ -1099,6 +1532,7 @@ fn create_task_dialog_host() -> AppDialog {
         Dialog::new()
             .top_left("Create task")
             .actions(actions)
+            .close_on_unfocus_from_descendants(true)
             .on_close(|_| AppMsg::CloseDialog)
             .host(create_task),
     )
@@ -1325,7 +1759,6 @@ fn task_split(store: &AppStore, task_view: TaskView) -> TaskPane {
 
 fn task_table(rows: Vec<TaskRow>, selected_id: Option<&str>) -> DataView<TaskRow, String> {
     let mut table = DataView::new(rows, |row: &TaskRow| row.id.clone())
-        .headers(true)
         .action_bar(true)
         .filter_controls(false)
         .activation_mode(ActivationMode::OnActivateKey)
@@ -1521,7 +1954,7 @@ fn detail_form(
         );
     };
 
-    Flex::<AppMsg>::column()
+    let mut form = Flex::<AppMsg>::column()
         .gap(0)
         .child("save-status", save_status, FlexItem::content())
         .child(
@@ -1545,6 +1978,7 @@ fn detail_form(
                 .value(task.detail.clone())
                 .panel("Description")
                 .hotkey(keys::TASK_DESCRIPTION_FIELD.hotkey())
+                .editor_hotkey(keys::TASK_DESCRIPTION_EDITOR.hotkey())
                 .on_edit_end({
                     let patch_sink = Rc::clone(&patch_sink);
                     move |value| {
@@ -1643,7 +2077,28 @@ fn detail_form(
                     }
                 }),
             FlexItem::fixed(3),
-        )
+        );
+    if task.state == TaskState::Snoozed {
+        form = form.child(
+            "snoozed-until",
+            DateTimePickerDropdown::<AppMsg>::new()
+                .value(task.snoozed_until)
+                .panel("Snoozed until")
+                .hotkey(keys::TASK_SNOOZED_UNTIL_FIELD.hotkey())
+                .on_select({
+                    let patch_sink = Rc::clone(&patch_sink);
+                    move |until| {
+                        patch_sink.borrow_mut().push(TaskPatch::Snooze {
+                            until,
+                            remember_custom: None,
+                        });
+                        AppMsg::Noop
+                    }
+                }),
+            FlexItem::fixed(3),
+        );
+    }
+    form
 }
 
 fn parse_date(value: Option<&str>) -> Option<Date> {
@@ -1882,6 +2337,7 @@ pub(crate) mod tests {
             priority: TaskPriority::Medium,
             start_date: None,
             due_date: None,
+            snoozed_until: None,
             people_ids: Vec::new(),
             project_ids: Vec::new(),
             tag_ids: Vec::new(),
@@ -2132,14 +2588,14 @@ pub(crate) mod tests {
                 .expect("table should render");
 
             let buffer = terminal.backend().buffer();
-            assert_eq!(buffer.cell((0, 2)).unwrap().symbol(), "");
-            assert_eq!(buffer.cell((1, 2)).unwrap().symbol(), " ");
-            assert_eq!(buffer.cell((2, 2)).unwrap().symbol(), "󰇼");
-            assert_eq!(buffer.cell((3, 2)).unwrap().symbol(), " ");
-            assert_eq!(buffer.cell((4, 2)).unwrap().symbol(), "S");
-            assert_eq!(buffer.cell((8, 2)).unwrap().symbol(), "L");
-            assert_eq!(buffer.cell((9, 2)).unwrap().symbol(), " ");
-            assert_eq!(buffer.cell((10, 2)).unwrap().symbol(), "Z");
+            assert_eq!(buffer.cell((0, 1)).unwrap().symbol(), "");
+            assert_eq!(buffer.cell((1, 1)).unwrap().symbol(), " ");
+            assert_eq!(buffer.cell((2, 1)).unwrap().symbol(), "󰇼");
+            assert_eq!(buffer.cell((3, 1)).unwrap().symbol(), " ");
+            assert_eq!(buffer.cell((4, 1)).unwrap().symbol(), "S");
+            assert_eq!(buffer.cell((8, 1)).unwrap().symbol(), "L");
+            assert_eq!(buffer.cell((9, 1)).unwrap().symbol(), " ");
+            assert_eq!(buffer.cell((10, 1)).unwrap().symbol(), "Z");
         }
     }
 
@@ -2453,6 +2909,26 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn switching_task_view_clears_table_search() {
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks: vec![
+                task_with("active-1", "Active one", TaskState::InProgress),
+                task_with("todo-1", "Todo one", TaskState::Todo),
+            ],
+            people: Vec::new(),
+            projects: Vec::new(),
+            tags: Vec::new(),
+        });
+        let mut workspace = TaskWorkspace::new(context);
+        workspace.table_mut().set_search_query("Active");
+        *workspace.pending_task_view.borrow_mut() = Some(TaskView::Todo);
+
+        assert!(workspace.sync_task_view_change());
+
+        assert!(workspace.table().transform_state().search.is_empty());
+    }
+
+    #[test]
     fn switching_views_focuses_first_visible_table_row() {
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
             tasks: vec![
@@ -2616,6 +3092,20 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn task_table_hides_column_headers() {
+        let table = task_table(
+            vec![task_with("work", "Write report", TaskState::Todo)],
+            Some("work"),
+        );
+
+        let text = rendered_text(&table, Rect::new(0, 0, 80, 10));
+
+        assert!(!text.contains("Size"));
+        assert!(!text.contains("Task"));
+        assert!(text.contains("Write report"));
+    }
+
+    #[test]
     fn hidden_task_cannot_be_deleted_from_empty_in_progress_view() {
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
             tasks: vec![task_with("todo", "Todo work", TaskState::Todo)],
@@ -2706,6 +3196,256 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn snooze_opens_only_from_focused_table_with_visible_selection() {
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks: vec![test_task()],
+            people: Vec::new(),
+            projects: Vec::new(),
+            tags: Vec::new(),
+        });
+        let mut workspace = TaskWorkspace::new(context);
+        let event = TuiEvent::Key(KeyEvent::from(Key::Char('b')));
+
+        let mut unfocused = EventCtx::default();
+        assert_eq!(
+            workspace.event(&event, &mut unfocused),
+            EventOutcome::Ignored
+        );
+        assert!(unfocused.messages().is_empty());
+
+        workspace.table_focused = true;
+        let mut focused = EventCtx::default();
+        assert!(workspace.event(&event, &mut focused).handled());
+        assert!(matches!(focused.messages(), [AppMsg::OpenTaskSnooze]));
+
+        *workspace.visible_selection.borrow_mut() = None;
+        let mut hidden = EventCtx::default();
+        assert_eq!(workspace.event(&event, &mut hidden), EventOutcome::Ignored);
+        assert!(hidden.messages().is_empty());
+    }
+
+    #[test]
+    fn snooze_dialog_uses_open_filled_dropdown_and_quick_selection_message() {
+        let now = time::macros::datetime!(2026-07-23 12:00);
+        let mut dialog = SnoozeDialog::new("task-1".into(), now, None, false);
+        let hint = dialog.measure(LayoutProposal::unbounded());
+        assert_eq!(hint.preferred, tuicore::LayoutSize::new(46, 12));
+
+        let mut ctx = EventCtx::default();
+        dialog.event(&TuiEvent::Key(KeyEvent::from(Key::Enter)), &mut ctx);
+        assert!(matches!(
+            ctx.messages(),
+            [AppMsg::SnoozeTask { task_id, until, remember_custom: None }]
+                if task_id == "task-1" && *until == time::macros::datetime!(2026-07-24 8:00)
+        ));
+    }
+
+    #[test]
+    fn snooze_dialog_renders_search_and_options_through_modal_portals() {
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks: vec![test_task()],
+            people: Vec::new(),
+            projects: Vec::new(),
+            tags: Vec::new(),
+        });
+        let mut app = App::new(context.store, context.coordinator);
+        let mut activation = EventCtx::default();
+        let primary = app.primary_dialog();
+        primary.replace_layer(
+            AppDialog::Snooze(Box::new(SnoozeDialog::new(
+                "task-1".into(),
+                time::macros::datetime!(2026-07-23 12:00),
+                None,
+                false,
+            ))),
+            &mut activation,
+        );
+        primary.set_fit_content(true);
+        primary.set_active_with_context(true, &mut activation);
+        let area = Rect::new(0, 0, 100, 30);
+        app.layout(area, &mut LayoutCtx::new());
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height))
+            .expect("terminal should build");
+        terminal
+            .draw(|frame| {
+                let mut ctx = RenderCtx::new();
+                app.render(frame, area, &mut ctx);
+                ctx.flush(frame);
+            })
+            .expect("app should render");
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(text.contains("Search..."));
+        assert!(text.contains("Tomorrow"));
+        assert!(text.contains("This weekend"));
+        assert!(text.contains("Pick date & time"));
+    }
+
+    #[test]
+    fn snoozed_detail_places_datetime_field_after_end_date_and_queues_selection() {
+        let until = time::macros::datetime!(2026-07-24 8:00);
+        let mut task = test_task();
+        task.state = TaskState::Snoozed;
+        task.snoozed_until = Some(until);
+        let mut detail = TaskDetailForm::new(Some(&task), &[], &[], &[], None);
+        let area = Rect::new(0, 0, 80, 120);
+        detail.layout(area, &mut LayoutCtx::new());
+        let text = rendered_text(&detail, area);
+        let end_date = text.find("End date").expect("end date should render");
+        let snoozed_until = text
+            .find("Snoozed until")
+            .expect("snoozed datetime should render");
+        assert!(end_date < snoozed_until);
+
+        let mut layout = LayoutCtx::new();
+        detail.layout(area, &mut layout);
+        let target = layout
+            .focus_targets()
+            .iter()
+            .find(|target| target.id.as_str() == "date-time-picker-dropdown")
+            .expect("snoozed datetime should be focusable")
+            .clone();
+        assert_eq!(target.hotkey_sequences, ["su"]);
+        let mut focus = FocusManager::new();
+        let transition = focus
+            .apply_request(
+                &FocusRequest::TargetAt {
+                    path: target.path.clone(),
+                    id: target.id.clone(),
+                },
+                layout.focus_targets(),
+            )
+            .expect("datetime focus should apply");
+        let mut dispatcher = TreeDispatcher::new();
+        dispatcher.dispatch_focus(&mut detail, transition, AnimationSettings::default());
+        let route = EventRoute::new(focus.current_path());
+        for key in [Key::Enter, Key::Right, Key::Enter, Key::Enter] {
+            let effects = dispatcher.dispatch_event(
+                &mut detail,
+                &route,
+                &TuiEvent::Key(key.into()),
+                AnimationSettings::default(),
+            );
+            assert!(effects.outcome.handled());
+        }
+
+        assert!(matches!(
+            detail.take_patches().as_slice(),
+            [(task_id, TaskPatch::Snooze { until, remember_custom: None })]
+                if task_id == "task-1" && *until == time::macros::datetime!(2026-07-25 8:00)
+        ));
+
+        task.state = TaskState::Todo;
+        task.snoozed_until = None;
+        let mut active_detail = TaskDetailForm::new(Some(&task), &[], &[], &[], None);
+        active_detail.layout(area, &mut LayoutCtx::new());
+        assert!(!rendered_text(&active_detail, area).contains("Snoozed until"));
+    }
+
+    #[test]
+    fn snoozed_until_hotkey_opens_detail_picker() {
+        let mut task = test_task();
+        task.state = TaskState::Snoozed;
+        task.snoozed_until = Some(time::macros::datetime!(2026-07-24 8:00));
+        let mut detail = TaskDetailForm::new(Some(&task), &[], &[], &[], None);
+        let area = Rect::new(0, 0, 80, 120);
+        let mut layout = LayoutCtx::new();
+        detail.layout(area, &mut layout);
+        let target = layout
+            .focus_targets()
+            .iter()
+            .find(|target| target.id.as_str() == "date-time-picker-dropdown")
+            .expect("snoozed datetime should be focusable");
+
+        let effects = TreeDispatcher::new().dispatch_event(
+            &mut detail,
+            &EventRoute::new(target.path.clone()),
+            &TuiEvent::Hotkey(HotkeyEvent::Commit(keys::TASK_SNOOZED_UNTIL_FIELD.hotkey())),
+            AnimationSettings::default(),
+        );
+
+        assert!(effects.outcome.handled());
+        assert!(effects.layout);
+    }
+
+    #[test]
+    fn active_snooze_modal_receives_routed_navigation_and_selection() {
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks: vec![test_task()],
+            people: Vec::new(),
+            projects: Vec::new(),
+            tags: Vec::new(),
+        });
+        let mut app = App::new(context.store, context.coordinator);
+        let mut activation = EventCtx::default();
+        let primary = app.primary_dialog();
+        primary.replace_layer(
+            AppDialog::Snooze(Box::new(SnoozeDialog::new(
+                "task-1".into(),
+                time::macros::datetime!(2026-07-23 12:00),
+                None,
+                false,
+            ))),
+            &mut activation,
+        );
+        primary.set_fit_content(true);
+        primary.set_active_with_context(true, &mut activation);
+        let area = Rect::new(0, 0, 100, 30);
+        let mut layout = LayoutCtx::new();
+        app.layout(area, &mut layout);
+        let menu = layout
+            .focus_targets()
+            .iter()
+            .rev()
+            .find(|target| target.id.as_str() == "input")
+            .expect("active modal dropdown search should be focusable")
+            .clone();
+        let mut focus = FocusManager::new();
+        let mut dispatcher = TreeDispatcher::new();
+        let transition = focus
+            .apply_request(
+                &FocusRequest::TargetAt {
+                    path: menu.path.clone(),
+                    id: menu.id.clone(),
+                },
+                layout.focus_targets(),
+            )
+            .expect("modal menu focus should apply");
+        dispatcher.dispatch_focus(&mut app, transition, AnimationSettings::default());
+        let route = EventRoute::new(focus.current_path());
+        let down = dispatcher.dispatch_event(
+            &mut app,
+            &route,
+            &TuiEvent::Key(KeyEvent {
+                code: Key::Char('j'),
+                modifiers: KeyModifiers::CONTROL,
+            }),
+            AnimationSettings::default(),
+        );
+        assert!(down.outcome.handled());
+        let select = dispatcher.dispatch_event(
+            &mut app,
+            &route,
+            &TuiEvent::Key(Key::Enter.into()),
+            AnimationSettings::default(),
+        );
+        assert!(matches!(
+            select.messages.as_slice(),
+            [AppMsg::SnoozeTask {
+                task_id,
+                until,
+                remember_custom: None
+            }] if task_id == "task-1" && *until == time::macros::datetime!(2026-07-25 8:00)
+        ));
+    }
+
+    #[test]
     fn ctrl_backspace_opens_confirmation_from_focused_task_table() {
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
             tasks: vec![test_task()],
@@ -2728,6 +3468,24 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn x_opens_disposition_dialog_from_focused_task_table() {
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks: vec![test_task()],
+            people: Vec::new(),
+            projects: Vec::new(),
+            tags: Vec::new(),
+        });
+        let mut workspace = TaskWorkspace::new(context);
+        workspace.table_focused = true;
+        let mut ctx = EventCtx::default();
+
+        let outcome = workspace.event(&TuiEvent::Key(KeyEvent::from(Key::Char('x'))), &mut ctx);
+
+        assert!(outcome.handled());
+        assert!(matches!(ctx.messages(), [AppMsg::OpenTaskDisposition]));
+    }
+
+    #[test]
     fn backspace_opens_disposition_dialog_from_focused_task_table() {
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
             tasks: vec![test_task()],
@@ -2743,6 +3501,28 @@ pub(crate) mod tests {
 
         assert!(outcome.handled());
         assert!(matches!(ctx.messages(), [AppMsg::OpenTaskDisposition]));
+    }
+
+    #[test]
+    fn ctrl_x_opens_confirmation_from_focused_task_table() {
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks: vec![test_task()],
+            people: Vec::new(),
+            projects: Vec::new(),
+            tags: Vec::new(),
+        });
+        let mut workspace = TaskWorkspace::new(context);
+        workspace.table_focused = true;
+        let mut ctx = EventCtx::default();
+        let key = KeyEvent {
+            code: Key::Char('x'),
+            modifiers: KeyModifiers::CONTROL,
+        };
+
+        let outcome = workspace.event(&TuiEvent::Key(key), &mut ctx);
+
+        assert!(outcome.handled());
+        assert!(matches!(ctx.messages(), [AppMsg::OpenDeleteTask]));
     }
 
     #[test]
@@ -2789,6 +3569,32 @@ pub(crate) mod tests {
         app.delete_task("task-1".to_string(), &mut EventCtx::default());
 
         assert!(app.context.store.borrow().state().tasks.is_empty());
+    }
+
+    #[test]
+    fn management_create_dialog_layers_over_management_workspace() {
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks: Vec::new(),
+            people: Vec::new(),
+            projects: Vec::new(),
+            tags: Vec::new(),
+        });
+        let mut app = App::new(context.store, context.coordinator);
+        let mut ctx = EventCtx::default();
+
+        app.open_management_dialog(ManagementDialogKind::People, &mut ctx);
+        app.open_create_management_dialog(ManagementDialogKind::People, &mut ctx);
+
+        assert!(app.root.is_active());
+        assert!(app.root.base().is_active());
+        assert!(matches!(app.root.layer(), AppDialog::CreateManagement(_)));
+        assert!(matches!(app.root.base().layer(), AppDialog::People(_)));
+
+        app.close_management_overlay(&mut ctx);
+
+        assert!(!app.root.is_active());
+        assert!(app.root.base().is_active());
+        assert!(matches!(app.root.base().layer(), AppDialog::People(_)));
     }
 
     #[test]
@@ -2877,6 +3683,94 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn creation_dialogs_close_from_nested_control_focus_mode() {
+        let area = Rect::new(0, 0, 80, 24);
+        let cases = [
+            (
+                create_management_dialog_host(ManagementDialogKind::Projects),
+                KeyEvent::from(Key::Esc),
+                true,
+            ),
+            (
+                create_task_dialog_host(),
+                KeyEvent {
+                    code: Key::Char('['),
+                    modifiers: KeyModifiers::CONTROL,
+                },
+                false,
+            ),
+        ];
+
+        for (mut dialog, key, management) in cases {
+            let mut layout = LayoutCtx::new();
+            dialog.layout(area, &mut layout);
+            let target = layout
+                .focus_targets()
+                .iter()
+                .find(|target| target.id.as_str() == "textarea")
+                .expect("creation textarea should be focusable")
+                .clone();
+            let mut ctx = EventCtx::default();
+
+            let outcome =
+                dialog.dispatch_event(&EventRoute::new(target.path), &TuiEvent::Key(key), &mut ctx);
+
+            assert!(outcome.handled());
+            if management {
+                assert!(matches!(ctx.messages(), [AppMsg::CloseManagementOverlay]));
+            } else {
+                assert!(matches!(ctx.messages(), [AppMsg::CloseDialog]));
+            }
+        }
+    }
+
+    #[test]
+    fn management_dialogs_close_from_nested_control_focus_mode() {
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks: Vec::new(),
+            people: vec![Person::new("person-1".into(), "Ada".into(), String::new())],
+            projects: vec![Project::new(
+                "project-1".into(),
+                "CORE".into(),
+                "Core".into(),
+                String::new(),
+            )],
+            tags: vec![Tag::new("tag-1".into(), "api".into())],
+        });
+        let area = Rect::new(0, 0, 100, 30);
+        let cases = [
+            (ManagementDialogKind::People, KeyEvent::from(Key::Esc)),
+            (
+                ManagementDialogKind::Projects,
+                KeyEvent {
+                    code: Key::Char('['),
+                    modifiers: KeyModifiers::CONTROL,
+                },
+            ),
+            (ManagementDialogKind::Tags, KeyEvent::from(Key::Esc)),
+        ];
+
+        for (kind, key) in cases {
+            let mut dialog = management_dialog(context.clone(), kind);
+            let mut layout = LayoutCtx::new();
+            dialog.layout(area, &mut layout);
+            let target = layout
+                .focus_targets()
+                .iter()
+                .find(|target| target.id.as_str() == "input")
+                .expect("management detail input should be focusable")
+                .clone();
+            let mut ctx = EventCtx::default();
+
+            let outcome =
+                dialog.dispatch_event(&EventRoute::new(target.path), &TuiEvent::Key(key), &mut ctx);
+
+            assert!(outcome.handled(), "{kind:?} should close");
+            assert!(matches!(ctx.messages(), [AppMsg::CloseDialog]));
+        }
+    }
+
+    #[test]
     fn created_task_state_hotkey_focuses_open_dropdown() {
         let (_runtime, context, store) = test_context(WorkspaceSnapshot {
             tasks: vec![test_task()],
@@ -2940,6 +3834,49 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn task_description_registers_edit_and_editor_hotkeys_and_requests_existing_value() {
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks: vec![test_task()],
+            people: Vec::new(),
+            projects: Vec::new(),
+            tags: Vec::new(),
+        });
+        let mut workspace = TaskWorkspace::new(context);
+        let area = Rect::new(0, 0, 120, 40);
+        let mut layout = LayoutCtx::new();
+        workspace.layout(area, &mut layout);
+        let description = layout
+            .focus_targets()
+            .iter()
+            .find(|target| {
+                target.id.as_str() == "textarea"
+                    && target
+                        .path
+                        .keys()
+                        .iter()
+                        .any(|key| key.as_str() == "description")
+            })
+            .expect("description input should be focusable");
+
+        assert_eq!(description.hotkey_sequences, ["dd", "do"]);
+
+        let effects = TreeDispatcher::new().dispatch_event(
+            &mut workspace,
+            &EventRoute::new(description.path.clone()),
+            &TuiEvent::Hotkey(HotkeyEvent::Commit(keys::TASK_DESCRIPTION_EDITOR.hotkey())),
+            AnimationSettings::default(),
+        );
+
+        assert_eq!(
+            effects
+                .external_editor
+                .expect("editor hotkey should request external editor")
+                .value,
+            "Existing detail"
+        );
+    }
+
+    #[test]
     fn title_blur_during_description_hotkey_preserves_description_focus() {
         sqlx::any::install_default_drivers();
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -2960,6 +3897,7 @@ pub(crate) mod tests {
                     priority: TaskPriority::Medium,
                     start_date: None,
                     due_date: None,
+                    snoozed_until: None,
                     people_ids: Vec::new(),
                     project_ids: Vec::new(),
                     tag_ids: Vec::new(),

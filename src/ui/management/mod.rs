@@ -9,3 +9,13 @@ pub(crate) enum ManagementDialogKind {
     Projects,
     Tags,
 }
+
+impl ManagementDialogKind {
+    pub(crate) fn singular(self) -> &'static str {
+        match self {
+            Self::People => "person",
+            Self::Projects => "project",
+            Self::Tags => "tag",
+        }
+    }
+}

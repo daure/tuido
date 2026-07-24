@@ -8114,6 +8114,7 @@ dependencies = [
  "time",
  "tokio",
  "toml",
+ "unicode-segmentation",
 ]
 
 [[package]]

@@ -1,12 +1,6 @@
-use tuicore::{
-    Dropdown, DropdownCommitMode, DropdownSearchMode, EventCtx, EventOutcome, FocusId,
-    FocusRequest, TuiEvent,
-};
+use tuicore::{Dropdown, DropdownCommitMode, DropdownSearchMode};
 
-use crate::{
-    app::{AppMsg, detail_escape},
-    domain::Person,
-};
+use crate::domain::Person;
 
 #[derive(Debug, Clone)]
 pub(super) struct Choice {
@@ -78,18 +72,4 @@ pub(super) fn person_choices(people: &[Person]) -> Vec<Choice> {
             label: person.name.clone(),
         })
         .collect()
-}
-
-pub(super) fn detail_outcome_or_escape(
-    outcome: EventOutcome,
-    event: &TuiEvent,
-    ctx: &mut EventCtx<AppMsg>,
-) -> EventOutcome {
-    if outcome.handled() || !detail_escape(event) {
-        return outcome;
-    }
-    ctx.focus(FocusRequest::Target(FocusId::new("data-view")));
-    ctx.stop_propagation();
-    ctx.request_redraw();
-    EventOutcome::Handled
 }
