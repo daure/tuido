@@ -1,5 +1,5 @@
 [package]
-name = "tuido"
+name = "tuitodo"
 version = "0.2.0"
 edition = "2024"
 default-run = "tuido"
@@ -19,6 +19,14 @@ include = [
     "migrations/**",
     "tests/**",
 ]
+
+[lib]
+name = "tuido"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tuido"
+path = "src/main.rs"
 
 [dependencies]
 axum = "0.8"

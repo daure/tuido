@@ -4,6 +4,8 @@ set -euo pipefail
 export GIT_PAGER=cat
 export PAGER=cat
 
+crate_name="tuitodo"
+
 usage() {
     cat <<'EOF'
 Usage: ./scripts/release.sh [major|minor|patch]
@@ -231,9 +233,9 @@ if git rev-parse --quiet --verify "refs/tags/$tag" >/dev/null; then
     exit 1
 fi
 remote_tag_must_be_absent "$tag"
-target_version_state="$(crates_io_version_state tuido "$new_version")"
+target_version_state="$(crates_io_version_state "$crate_name" "$new_version")"
 if [[ "$target_version_state" != "absent" ]]; then
-    printf 'error: Tuido %s already exists on crates.io\n' "$new_version" >&2
+    printf 'error: %s %s already exists on crates.io\n' "$crate_name" "$new_version" >&2
     exit 1
 fi
 
@@ -342,19 +344,19 @@ if [[ "$(git rev-parse HEAD)" != "$(git rev-parse "$tag^{commit}")" ]]; then
     printf 'error: HEAD must match release tag %s before publishing\n' "$tag" >&2
     exit 1
 fi
-target_version_state="$(crates_io_version_state tuido "$new_version")"
+target_version_state="$(crates_io_version_state "$crate_name" "$new_version")"
 if [[ "$target_version_state" != "absent" ]]; then
-    printf 'error: Tuido %s appeared on crates.io before publish\n' "$new_version" >&2
+    printf 'error: %s %s appeared on crates.io before publish\n' "$crate_name" "$new_version" >&2
     exit 1
 fi
 
 if ! cargo publish --locked --registry crates-io; then
-    publish_state="$(crates_io_version_state tuido "$new_version")"
+    publish_state="$(crates_io_version_state "$crate_name" "$new_version")"
     if [[ "$publish_state" == "present" ]]; then
-        printf '\nTuido %s is present on crates.io; publication succeeded despite cargo error.\n' "$new_version"
+        printf '\n%s %s is present on crates.io; publication succeeded despite cargo error.\n' "$crate_name" "$new_version"
     else
         printf '\nPublish failed; release commit and tag %s remain.\n' "$tag" >&2
-        printf 'Resume only after: tree is clean; HEAD equals %s; Tuido %s is still absent on crates.io.\n' "$tag" "$new_version" >&2
+        printf 'Resume only after: tree is clean; HEAD equals %s; %s %s is still absent on crates.io.\n' "$tag" "$crate_name" "$new_version" >&2
         printf 'Then run: cargo publish --locked --registry crates-io\n' >&2
         trap - EXIT
         exit 1

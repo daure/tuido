@@ -38,13 +38,13 @@ UI config files are optional and load from the platform config directory under
 On another machine:
 
 ```bash
-cargo install tuido --locked
+cargo install tuitodo --locked
 ```
 
 Update later:
 
 ```bash
-cargo install tuido --locked --force
+cargo install tuitodo --locked --force
 ```
 
 ## Build from source
