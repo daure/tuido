@@ -1,8 +1,4 @@
-use std::{
-    collections::{HashMap, HashSet},
-    error::Error,
-    fmt,
-};
+use std::{collections::HashMap, error::Error, fmt};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -105,8 +101,6 @@ pub struct WorkspaceView {
 pub struct WorkspaceFilter {
     /// Include done and rejected tasks, which are excluded by default.
     pub include_resolved: bool,
-    /// Include every person, project, and tag instead of only entities related to matching tasks.
-    pub include_all_entities: bool,
     /// Match user-facing task statuses such as todo, in_progress, snoozed, done, or rejected.
     pub states: Vec<String>,
     pub priorities: Vec<String>,
@@ -359,32 +353,6 @@ impl TuidoService {
         workspace
             .tasks
             .retain(|task| task_matches_workspace_filter(&task.value, &filter));
-
-        if filter.include_all_entities {
-            return Ok(workspace);
-        }
-
-        let mut person_ids = HashSet::new();
-        let mut project_ids = HashSet::new();
-        let mut tag_ids = HashSet::new();
-        for task in &workspace.tasks {
-            person_ids.extend(task.value.people_ids.iter().cloned());
-            project_ids.extend(task.value.project_ids.iter().cloned());
-            tag_ids.extend(task.value.tag_ids.iter().cloned());
-        }
-        workspace
-            .projects
-            .retain(|project| project_ids.contains(&project.value.id));
-        person_ids.extend(
-            workspace
-                .projects
-                .iter()
-                .filter_map(|project| project.value.lead_person_id.clone()),
-        );
-        workspace
-            .people
-            .retain(|person| person_ids.contains(&person.value.id));
-        workspace.tags.retain(|tag| tag_ids.contains(&tag.value.id));
         Ok(workspace)
     }
 
@@ -511,7 +479,7 @@ impl TuidoService {
         .await?;
         self.replace_links(&mut tx, "task_tags", "tag_id", &task.id, &task.tag_ids)
             .await?;
-        bump_workspace(&mut tx).await?;
+        bump_workspace(&mut tx, self.dialect).await?;
         tx.commit().await.map_err(storage_error)?;
         Ok(Versioned {
             revision: 1,
@@ -608,7 +576,7 @@ impl TuidoService {
         .await?;
         self.replace_links(&mut tx, "task_tags", "tag_id", &input.id, &input.tag_ids)
             .await?;
-        bump_workspace(&mut tx).await?;
+        bump_workspace(&mut tx, self.dialect).await?;
         tx.commit().await.map_err(storage_error)?;
         self.get_task(&input.id).await
     }
@@ -679,7 +647,7 @@ impl TuidoService {
             .execute(&mut *tx)
             .await
             .map_err(storage_error)?;
-        bump_workspace(&mut tx).await?;
+        bump_workspace(&mut tx, self.dialect).await?;
         tx.commit().await.map_err(storage_error)?;
         Ok(TaskPatchResult {
             revision: expected + 1,
@@ -734,7 +702,7 @@ impl TuidoService {
             .execute(&mut *tx)
             .await
             .map_err(storage_error)?;
-        bump_workspace(&mut tx).await?;
+        bump_workspace(&mut tx, self.dialect).await?;
         tx.commit().await.map_err(storage_error)?;
         Ok(Versioned {
             revision: 1,
@@ -837,7 +805,7 @@ impl TuidoService {
             .execute(&mut *tx)
             .await
             .map_err(storage_error)?;
-        bump_workspace(&mut tx).await?;
+        bump_workspace(&mut tx, self.dialect).await?;
         tx.commit().await.map_err(storage_error)?;
         Ok(Versioned {
             revision: 1,
@@ -926,7 +894,7 @@ impl TuidoService {
             .execute(&mut *tx)
             .await
             .map_err(storage_error)?;
-        bump_workspace(&mut tx).await?;
+        bump_workspace(&mut tx, self.dialect).await?;
         tx.commit().await.map_err(storage_error)?;
         Ok(Versioned {
             revision: 1,
@@ -1119,7 +1087,7 @@ impl TuidoService {
                 actual: self.actual_revision(&mut tx, table, id).await?,
             });
         }
-        bump_workspace(&mut tx).await?;
+        bump_workspace(&mut tx, self.dialect).await?;
         tx.commit().await.map_err(storage_error)
     }
 
@@ -1177,7 +1145,7 @@ impl TuidoService {
             }
             .map_err(storage_error)?;
         }
-        bump_workspace(&mut tx).await?;
+        bump_workspace(&mut tx, self.dialect).await?;
         tx.commit().await.map_err(storage_error)
     }
 }
@@ -1235,17 +1203,23 @@ fn now_text() -> String {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs()
+        .as_nanos()
         .to_string()
 }
 fn storage_error(error: impl fmt::Display) -> ServiceError {
     ServiceError::Storage(error.to_string())
 }
-async fn bump_workspace(tx: &mut Transaction<'_, Any>) -> ServiceResult<()> {
+async fn bump_workspace(tx: &mut Transaction<'_, Any>, dialect: SqlDialect) -> ServiceResult<()> {
     sqlx::query("UPDATE workspace_revision SET revision = revision + 1 WHERE singleton = 1")
         .execute(&mut **tx)
         .await
         .map_err(storage_error)?;
+    if dialect == SqlDialect::Postgres {
+        sqlx::query("NOTIFY tuido_changes")
+            .execute(&mut **tx)
+            .await
+            .map_err(storage_error)?;
+    }
     Ok(())
 }
 
@@ -1352,7 +1326,7 @@ mod tests {
     }
 
     #[test]
-    fn filtered_workspace_returns_active_tasks_and_their_normalized_graph() {
+    fn filtered_workspace_filters_tasks_and_returns_complete_entity_catalogs() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -1384,8 +1358,23 @@ mod tests {
                 })
                 .await
                 .unwrap();
+            service
+                .create_project(ProjectInput {
+                    key: "OTHER".into(),
+                    name: "Unrelated".into(),
+                    description: String::new(),
+                    lead_person_id: None,
+                })
+                .await
+                .unwrap();
             let tag = service
                 .create_tag(TagInput { label: "UI".into() })
+                .await
+                .unwrap();
+            service
+                .create_tag(TagInput {
+                    label: "Unrelated".into(),
+                })
                 .await
                 .unwrap();
             service
@@ -1437,10 +1426,15 @@ mod tests {
                 .unwrap();
 
             assert_eq!(workspace.tasks.len(), 1);
-            assert_eq!(workspace.people.len(), 1);
-            assert_eq!(workspace.people[0].value.id, person.value.id);
-            assert_eq!(workspace.projects.len(), 1);
-            assert_eq!(workspace.tags.len(), 1);
+            assert_eq!(workspace.people.len(), 2);
+            assert!(
+                workspace
+                    .people
+                    .iter()
+                    .any(|candidate| candidate.value.id == person.value.id)
+            );
+            assert_eq!(workspace.projects.len(), 2);
+            assert_eq!(workspace.tags.len(), 2);
 
             let with_resolved = service
                 .filtered_workspace(WorkspaceFilter {

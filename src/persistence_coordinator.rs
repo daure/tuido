@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use sqlx::AnyPool;
+use sqlx::{AnyPool, postgres::PgListener};
 use tokio::runtime::Handle;
 use tuicore::Store;
 
@@ -72,8 +72,8 @@ struct Completion {
 }
 
 struct RefreshCompletion {
-    snapshot: crate::domain::WorkspaceSnapshot,
     revision: u64,
+    snapshot: Option<crate::domain::WorkspaceSnapshot>,
     revisions: HashMap<String, u64>,
 }
 
@@ -89,6 +89,8 @@ pub(crate) struct PersistenceCoordinator {
     next_sequence: u64,
     refresh_tx: mpsc::Sender<Result<RefreshCompletion, String>>,
     refresh_rx: mpsc::Receiver<Result<RefreshCompletion, String>>,
+    notification_rx: mpsc::Receiver<()>,
+    change_notified: bool,
     refresh_inflight: bool,
     reconcile_required: bool,
     last_refresh_check: Instant,
@@ -100,9 +102,14 @@ impl PersistenceCoordinator {
         pool: AnyPool,
         dialect: SqlDialect,
         runtime: Handle,
+        notification_url: Option<String>,
     ) -> Self {
         let (completion_tx, completion_rx) = mpsc::channel();
         let (refresh_tx, refresh_rx) = mpsc::channel();
+        let (notification_tx, notification_rx) = mpsc::channel();
+        if let Some(database_url) = notification_url {
+            spawn_postgres_listener(&runtime, database_url, notification_tx);
+        }
         Self {
             store,
             service: TuidoService::from_parts(pool, dialect),
@@ -115,6 +122,8 @@ impl PersistenceCoordinator {
             next_sequence: 0,
             refresh_tx,
             refresh_rx,
+            notification_rx,
+            change_notified: false,
             refresh_inflight: false,
             reconcile_required: false,
             last_refresh_check: Instant::now(),
@@ -163,6 +172,9 @@ impl PersistenceCoordinator {
 
     pub(crate) fn poll(&mut self) -> bool {
         let mut changed = false;
+        while self.notification_rx.try_recv().is_ok() {
+            self.change_notified = true;
+        }
         while let Ok(completion) = self.completion_rx.try_recv() {
             changed |= self.finish(completion);
         }
@@ -171,23 +183,32 @@ impl PersistenceCoordinator {
             match result {
                 Ok(refresh) if !self.has_pending() => {
                     let current = self.store.borrow().state().workspace_revision;
-                    if self.reconcile_required || refresh.revision != current {
-                        self.reconcile_required = false;
-                        changed |= self
-                            .store
-                            .borrow_mut()
-                            .dispatch(AppEvent::WorkspaceRefreshed {
-                                snapshot: refresh.snapshot,
-                                revision: refresh.revision,
-                                entity_revisions: refresh.revisions,
-                            })
-                            .changed;
-                    } else {
-                        changed |= self
-                            .store
-                            .borrow_mut()
-                            .dispatch(AppEvent::RefreshSucceeded)
-                            .changed;
+                    match refresh.snapshot {
+                        None if refresh.revision < current => {
+                            self.reconcile_required = true;
+                        }
+                        None => {
+                            changed |= self
+                                .store
+                                .borrow_mut()
+                                .dispatch(AppEvent::RefreshSucceeded)
+                                .changed;
+                        }
+                        Some(_) if refresh.revision < current => {
+                            self.reconcile_required = true;
+                        }
+                        Some(snapshot) => {
+                            self.reconcile_required = false;
+                            changed |= self
+                                .store
+                                .borrow_mut()
+                                .dispatch(AppEvent::WorkspaceRefreshed {
+                                    snapshot,
+                                    revision: refresh.revision,
+                                    entity_revisions: refresh.revisions,
+                                })
+                                .changed;
+                        }
                     }
                 }
                 Ok(_) => {}
@@ -202,7 +223,8 @@ impl PersistenceCoordinator {
         }
         if !self.refresh_inflight
             && !self.has_pending()
-            && (self.reconcile_required
+            && (self.change_notified
+                || self.reconcile_required
                 || self.last_refresh_check.elapsed() >= Duration::from_millis(500))
         {
             self.start_refresh();
@@ -212,16 +234,27 @@ impl PersistenceCoordinator {
 
     fn start_refresh(&mut self) {
         self.refresh_inflight = true;
+        self.change_notified = false;
         self.last_refresh_check = Instant::now();
         let service = self.service.clone();
+        let current = self.store.borrow().state().workspace_revision;
+        let force_snapshot = self.reconcile_required;
         let tx = self.refresh_tx.clone();
         self.runtime.spawn(async move {
             let result = async {
+                let observed = service.workspace_revision().await?;
+                if !force_snapshot && observed <= current {
+                    return Ok(RefreshCompletion {
+                        revision: observed,
+                        snapshot: None,
+                        revisions: HashMap::new(),
+                    });
+                }
                 let workspace = service.consistent_workspace().await?;
                 Ok(RefreshCompletion {
                     revision: workspace.revision,
+                    snapshot: Some(workspace.snapshot),
                     revisions: workspace.entity_revisions,
-                    snapshot: workspace.snapshot,
                 })
             }
             .await
@@ -498,6 +531,32 @@ impl PersistenceCoordinator {
         }
         changed
     }
+}
+
+fn spawn_postgres_listener(
+    runtime: &Handle,
+    database_url: String,
+    notification_tx: mpsc::Sender<()>,
+) {
+    runtime.spawn(async move {
+        loop {
+            let result = async {
+                let mut listener = PgListener::connect(&database_url).await?;
+                listener.listen("tuido_changes").await?;
+                loop {
+                    listener.recv().await?;
+                    if notification_tx.send(()).is_err() {
+                        return Ok::<(), sqlx::Error>(());
+                    }
+                }
+            }
+            .await;
+            if result.is_ok() || notification_tx.send(()).is_err() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    });
 }
 
 async fn execute(
@@ -824,6 +883,7 @@ mod tests {
             pool.clone(),
             SqlDialect::Sqlite,
             runtime.handle().clone(),
+            None,
         )
     }
 
@@ -866,6 +926,82 @@ mod tests {
             .try_get("title")
             .expect("title decodes");
         assert_eq!(title, "Patched");
+    }
+
+    #[test]
+    fn stale_refresh_cannot_replace_newer_local_workspace() {
+        let (runtime, pool) = test_database();
+        let latest = test_task("latest");
+        let store = test_store(vec![latest.clone()]);
+        for revision in 1..=2 {
+            store
+                .borrow_mut()
+                .dispatch(AppEvent::EntityRevisionCommitted {
+                    key: latest.id.clone(),
+                    revision: Some(revision),
+                });
+        }
+        let mut coordinator = test_coordinator(&runtime, &pool, Rc::clone(&store));
+        coordinator
+            .refresh_tx
+            .send(Ok(RefreshCompletion {
+                snapshot: Some(WorkspaceSnapshot {
+                    tasks: vec![test_task("stale")],
+                    people: Vec::new(),
+                    projects: Vec::new(),
+                    tags: Vec::new(),
+                }),
+                revision: 1,
+                revisions: HashMap::new(),
+            }))
+            .unwrap();
+
+        coordinator.poll();
+
+        let state = store.borrow();
+        assert_eq!(state.state().workspace_revision, 2);
+        assert_eq!(state.state().tasks[0].id, "latest");
+        assert_eq!(state.state().selected_task_id.as_deref(), Some("latest"));
+    }
+
+    #[test]
+    fn unchanged_revision_poll_does_not_load_workspace_snapshot() {
+        let (runtime, pool) = test_database();
+        let store = test_store(Vec::new());
+        store
+            .borrow_mut()
+            .dispatch(AppEvent::EntityRevisionCommitted {
+                key: "workspace".into(),
+                revision: None,
+            });
+        runtime
+            .block_on(sqlx::query("DROP TABLE tasks").execute(&pool))
+            .unwrap();
+        let mut coordinator = test_coordinator(&runtime, &pool, Rc::clone(&store));
+
+        coordinator.start_refresh();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while coordinator.refresh_inflight {
+            assert!(Instant::now() < deadline, "revision check completes");
+            coordinator.poll();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        assert_eq!(store.borrow().state().refresh_error, None);
+    }
+
+    #[test]
+    fn database_notification_starts_revision_check_without_waiting_for_interval() {
+        let (runtime, pool) = test_database();
+        let store = test_store(Vec::new());
+        let mut coordinator = test_coordinator(&runtime, &pool, store);
+        coordinator.change_notified = true;
+        coordinator.last_refresh_check = Instant::now();
+
+        coordinator.poll();
+
+        assert!(coordinator.refresh_inflight);
+        assert!(!coordinator.change_notified);
     }
 
     #[test]
@@ -975,12 +1111,12 @@ mod tests {
         coordinator
             .refresh_tx
             .send(Ok(RefreshCompletion {
-                snapshot: WorkspaceSnapshot {
+                snapshot: Some(WorkspaceSnapshot {
                     tasks: Vec::new(),
                     people: Vec::new(),
                     projects: Vec::new(),
                     tags: Vec::new(),
-                },
+                }),
                 revision: 1,
                 revisions: HashMap::new(),
             }))
@@ -1656,6 +1792,7 @@ mod tests {
             pool,
             SqlDialect::Sqlite,
             runtime.handle().clone(),
+            None,
         );
 
         coordinator.submit(PersistenceCommand::CreateTask(task.clone()));

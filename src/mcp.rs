@@ -115,7 +115,7 @@ fn mcp_error(error: ServiceError) -> String {
 #[tool_router]
 impl McpServer {
     #[tool(
-        description = "Get a normalized workspace graph. Excludes done and rejected tasks by default; set include_resolved=true to include them. Filters use OR within each property and AND across properties. Related entity collections contain only entities referenced by matching tasks unless include_all_entities=true. Task state is user-facing status. Task people are involved people besides the workspace owner, never assignees. Revisions are internal concurrency tokens and should normally be omitted from user-facing summaries."
+        description = "Get a normalized workspace graph. Excludes done and rejected tasks by default; set include_resolved=true to include them. Filters apply to tasks using OR within each property and AND across properties. People, projects, and tags always contain the complete workspace catalogs so their IDs can be used when creating or updating tasks. Task state is user-facing status. Task people are involved people besides the workspace owner, never assignees. Revisions are internal concurrency tokens and should normally be omitted from user-facing summaries."
     )]
     async fn get_workspace(
         &self,

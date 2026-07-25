@@ -6,6 +6,7 @@ mod create_management_dialog;
 mod create_task_dialog;
 mod domain;
 mod mcp;
+mod paths;
 mod persistence_coordinator;
 pub mod service;
 mod snooze;

@@ -259,10 +259,8 @@ pub mod keys {
     pub const TASK_QUICK_CREATE: AppBinding = AppBinding::new("TASK_QUICK_CREATE", "n");
     pub const TASK_VIEW_MENU: AppBinding = AppBinding::new("TASK_VIEW_MENU", "f");
     pub const TASK_DELETE: AppBinding = AppBinding::new("TASK_DELETE", "delete");
-    pub const TASK_DELETE_ALT: AppBinding = AppBinding::new("TASK_DELETE_ALT", "ctrl+backspace");
+    pub const TASK_DELETE_X: AppBinding = AppBinding::new("TASK_DELETE_X", "x");
     pub const TASK_DELETE_CTRL_X: AppBinding = AppBinding::new("TASK_DELETE_CTRL_X", "ctrl+x");
-    pub const TASK_DISPOSITION: AppBinding = AppBinding::new("TASK_DISPOSITION", "backspace");
-    pub const TASK_DISPOSITION_X: AppBinding = AppBinding::new("TASK_DISPOSITION_X", "x");
     pub const TASK_SNOOZE: AppBinding = AppBinding::new("TASK_SNOOZE", "b");
     pub const MANAGEMENT_CREATE: AppBinding = AppBinding::new("MANAGEMENT_CREATE", "n");
     pub const MANAGEMENT_DELETE: AppBinding = AppBinding::new("MANAGEMENT_DELETE", "delete");
@@ -369,10 +367,8 @@ pub mod keys {
         TASK_QUICK_CREATE,
         TASK_VIEW_MENU,
         TASK_DELETE,
-        TASK_DELETE_ALT,
+        TASK_DELETE_X,
         TASK_DELETE_CTRL_X,
-        TASK_DISPOSITION,
-        TASK_DISPOSITION_X,
         TASK_SNOOZE,
         MANAGEMENT_CREATE,
         MANAGEMENT_DELETE,

@@ -3,15 +3,32 @@ name = "tuido"
 version = "0.1.0"
 edition = "2024"
 default-run = "tuido"
+description = "Keyboard-first task manager with optional MCP access"
+repository = "https://github.com/daure/tuido"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+keywords = ["task-management", "tui", "terminal", "productivity", "mcp"]
+categories = ["command-line-utilities"]
+include = [
+    "Cargo.toml",
+    "Cargo.lock",
+    "README.md",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+    "src/**",
+    "migrations/**",
+    "tests/**",
+]
 
 [dependencies]
 axum = "0.8"
 clap = { version = "4", features = ["derive"] }
+dirs = "6"
 rmcp = { version = "0.8", features = ["server", "macros", "transport-io", "transport-streamable-http-server"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tuicore = { path = "../tuicore" }
+tuicore = "0.5.0"
 ratatui = "0.30"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "any", "sqlite", "postgres", "migrate", "macros"] }
 tokio = { version = "1", features = ["rt-multi-thread", "time", "signal", "net", "macros"] }

@@ -24,13 +24,14 @@ use time::{Date, PrimitiveDateTime};
 use tuicore::{
     ActivationMode, AnimationSettings, AxisProposal, Button, CellContext, ChildKey, ChipColorRole,
     Column, ConfirmationDialog, ConfirmationDialogOutcome, CrossAlign, DataView,
-    DataViewTypedEvent, DatePickerDropdown, DateTimePickerDropdown, Dialog, DialogAction,
-    DialogBackdrop, DialogHost, DialogLayer, Dropdown, DropdownCommitMode, DropdownSearchMode,
-    EventCtx, EventOutcome, EventRoute, Flex, FlexItem, FocusCtx, FocusId, FocusRequest,
-    FocusTarget, HotkeyLabelMode, KeySpec, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint,
+    DataViewTypedEvent, DatePickerDropdown, DateTimePickerDropdown, Dialog, DialogBackdrop,
+    DialogHost, DialogLayer, Dropdown, DropdownCommitMode, DropdownSearchMode, EventCtx,
+    EventOutcome, EventRoute, Flex, FlexItem, FocusCtx, FocusId, FocusRequest, FocusTarget,
+    HotkeyLabelMode, KeySpec, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint,
     LifecycleCtx, Menu, MenuItem, MenuSearchMode, Paragraph, RenderCtx, SelectedTag, SelectionMode,
     SelectionTrigger, Split, StatusBar, StatusBarMenuItem, Store, Tab, Tabs, TabsVariant, TagInput,
     TagInputEvent, TextInput, TextareaInput, TickResult, TreeApp, TuiEvent, TuiNode,
+    WeatherProviderConfig,
 };
 use uuid::Uuid;
 
@@ -54,26 +55,31 @@ pub(crate) enum AppMsg {
     },
     OpenCreateTask,
     CreateTaskSubmitted(CreateTaskDraft),
-    OpenDeleteTask,
+    OpenDeleteTask(String),
     DeleteTaskConfirmed(String),
-    OpenTaskDisposition,
-    OpenTaskSnooze,
+    OpenTaskSnooze(String),
     SnoozeTask {
         task_id: String,
         until: PrimitiveDateTime,
         remember_custom: Option<PrimitiveDateTime>,
     },
     UnsnoozeTask(String),
-    SetTaskState {
-        task_id: String,
-        state: TaskState,
-    },
     CloseManagementOverlay,
     CloseDialog,
 }
 
 pub fn run() -> Result<(), Box<dyn Error>> {
-    tuicore::try_init()?;
+    match crate::paths::ui_config_source()? {
+        crate::paths::UiConfigSource::Legacy => tuicore::try_init()?,
+        crate::paths::UiConfigSource::Directory(config_dir) => {
+            tuicore::try_init_from_dir(config_dir)?
+        }
+        crate::paths::UiConfigSource::Defaults => {
+            tuicore::set_theme(tuicore::Theme::default());
+            tuicore::set_keybindings(tuicore::KeyBindings::default());
+            tuicore::set_preset(tuicore::Preset::default());
+        }
+    }
     app_keymap::try_init()?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -96,6 +102,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         storage.pool(),
         storage.dialect(),
         runtime.handle().clone(),
+        storage.notification_url(),
     )));
     let run_result = TreeApp::new(App::new(store, Rc::clone(&coordinator)))
         .initial_focus(FocusRequest::Target(FocusId::new("data-view")))
@@ -112,17 +119,15 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             }
             AppMsg::OpenCreateTask => app.open_create_task_dialog(ctx),
             AppMsg::CreateTaskSubmitted(draft) => app.submit_create_task(draft, ctx),
-            AppMsg::OpenDeleteTask => app.open_delete_task_dialog(ctx),
+            AppMsg::OpenDeleteTask(task_id) => app.open_delete_task_dialog(&task_id, ctx),
             AppMsg::DeleteTaskConfirmed(task_id) => app.delete_task(task_id, ctx),
-            AppMsg::OpenTaskDisposition => app.open_task_disposition_dialog(ctx),
-            AppMsg::OpenTaskSnooze => app.open_task_snooze_dialog(ctx),
+            AppMsg::OpenTaskSnooze(task_id) => app.open_task_snooze_dialog(&task_id, ctx),
             AppMsg::SnoozeTask {
                 task_id,
                 until,
                 remember_custom,
             } => app.snooze_task(task_id, until, remember_custom, ctx),
             AppMsg::UnsnoozeTask(task_id) => app.unsnooze_task(task_id, ctx),
-            AppMsg::SetTaskState { task_id, state } => app.set_task_state(task_id, state, ctx),
             AppMsg::CloseManagementOverlay => app.close_management_overlay(ctx),
             AppMsg::CloseDialog => app.close_dialog(ctx),
         })
@@ -173,8 +178,8 @@ impl App {
                         label: "Tags",
                     },
                     StatusBarMenuItem::Theme,
-                    StatusBarMenuItem::WeatherForecast,
                 ])
+                .weather_provider(WeatherProviderConfig::new().enabled(false))
                 .on_custom_menu_item(|id| match id {
                     PEOPLE_MENU_ID => AppMsg::OpenManagementDialog(ManagementDialogKind::People),
                     PROJECTS_MENU_ID => {
@@ -432,8 +437,8 @@ impl App {
         self.close_dialog(ctx);
     }
 
-    fn open_delete_task_dialog(&mut self, ctx: &mut EventCtx<AppMsg>) {
-        let Some(task) = self.selected_task() else {
+    fn open_delete_task_dialog(&mut self, task_id: &str, ctx: &mut EventCtx<AppMsg>) {
+        let Some(task) = self.task(task_id) else {
             return;
         };
         let primary = self.primary_dialog();
@@ -463,18 +468,8 @@ impl App {
         self.close_dialog(ctx);
     }
 
-    fn open_task_disposition_dialog(&mut self, ctx: &mut EventCtx<AppMsg>) {
-        let Some(task) = self.selected_task() else {
-            return;
-        };
-        let primary = self.primary_dialog();
-        primary.replace_layer(task_disposition_dialog(&task), ctx);
-        primary.set_fit_content(true);
-        primary.set_active_with_context(true, ctx);
-    }
-
-    fn open_task_snooze_dialog(&mut self, ctx: &mut EventCtx<AppMsg>) {
-        let Some(task) = self.selected_task() else {
+    fn open_task_snooze_dialog(&mut self, task_id: &str, ctx: &mut EventCtx<AppMsg>) {
+        let Some(task) = self.task(task_id) else {
             return;
         };
         let now = match local_now() {
@@ -530,27 +525,6 @@ impl App {
         self.close_dialog(ctx);
     }
 
-    fn set_task_state(&mut self, task_id: String, state: TaskState, ctx: &mut EventCtx<AppMsg>) {
-        let outcome = self
-            .context
-            .store
-            .borrow_mut()
-            .dispatch(AppEvent::PatchTask {
-                task_id: task_id.clone(),
-                patch: TaskPatch::State(state),
-            });
-        if outcome.changed {
-            self.context
-                .coordinator
-                .borrow_mut()
-                .submit(PersistenceCommand::PatchTask(
-                    task_id,
-                    TaskPatch::State(state),
-                ));
-        }
-        self.close_dialog(ctx);
-    }
-
     fn unsnooze_task(&mut self, task_id: String, ctx: &mut EventCtx<AppMsg>) {
         let patch = TaskPatch::Unsnooze;
         let outcome = self
@@ -570,13 +544,13 @@ impl App {
         self.close_dialog(ctx);
     }
 
-    fn selected_task(&self) -> Option<Task> {
+    fn task(&self, task_id: &str) -> Option<Task> {
         let store = self.context.store.borrow();
-        let state = store.state();
-        state
-            .selected_task_id
-            .as_deref()
-            .and_then(|id| state.tasks.iter().find(|task| task.id == id))
+        store
+            .state()
+            .tasks
+            .iter()
+            .find(|task| task.id == task_id)
             .cloned()
     }
 
@@ -619,7 +593,12 @@ impl TuiNode<AppMsg> for App {
     fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
         let mut result = self.root.tick(dt, settings);
         if self.context.coordinator.borrow_mut().poll() {
-            result = result.merge(TickResult::CHANGED);
+            result = result.merge(TickResult {
+                changed: true,
+                layout: true,
+                active: false,
+                next_tick: None,
+            });
         }
         let delay = if self.context.coordinator.borrow().has_pending() {
             50
@@ -653,6 +632,7 @@ type TaskDetail = TaskDetailForm;
 type TaskPane = Split<TaskTable, TaskDetail>;
 type TaskWorkspaceLayout = Split<Flex<AppMsg>, TaskPane>;
 type TaskViewChange = Rc<RefCell<Option<TaskView>>>;
+type ActiveTaskView = Rc<RefCell<TaskView>>;
 type VisibleTaskSelection = Rc<RefCell<Option<String>>>;
 type PatchSink = Rc<RefCell<Vec<TaskPatch>>>;
 #[derive(Clone)]
@@ -672,11 +652,11 @@ enum TaskView {
 
 impl TaskView {
     const OPTIONS: [Self; 5] = [
+        Self::All,
         Self::Todo,
         Self::Snoozed,
         Self::InProgress,
         Self::Archived,
-        Self::All,
     ];
 
     fn label(self) -> &'static str {
@@ -709,7 +689,7 @@ impl TaskView {
             Self::Snoozed => task.state == TaskState::Snoozed,
             Self::InProgress => task.state == TaskState::InProgress,
             Self::Archived => matches!(task.state, TaskState::Done | TaskState::Rejected),
-            Self::All => true,
+            Self::All => !matches!(task.state, TaskState::Done | TaskState::Rejected),
         }
     }
 }
@@ -721,10 +701,12 @@ struct TaskViewMenu {
     trigger: Button<AppMsg>,
     menu: Menu<TaskView>,
     pending_view: TaskViewChange,
+    active_view: ActiveTaskView,
 }
 
 impl TaskViewMenu {
-    fn new(pending_view: TaskViewChange, selected: TaskView) -> Self {
+    fn new(pending_view: TaskViewChange, active_view: ActiveTaskView) -> Self {
+        let selected = *active_view.borrow();
         let hotkey = keys::TASK_VIEW_MENU.hotkey();
         let trigger = Button::new(selected.menu_label())
             .hotkey(hotkey.clone())
@@ -738,6 +720,7 @@ impl TaskViewMenu {
             trigger,
             menu,
             pending_view,
+            active_view,
         }
     }
 
@@ -746,6 +729,7 @@ impl TaskViewMenu {
             return;
         };
         self.trigger.set_label(view.menu_label());
+        *self.active_view.borrow_mut() = view;
         *self.pending_view.borrow_mut() = Some(view);
         ctx.request_layout();
         ctx.request_redraw();
@@ -758,6 +742,8 @@ impl TuiNode<AppMsg> for TaskViewMenu {
     }
 
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
+        self.trigger
+            .set_label(self.active_view.borrow().menu_label());
         ctx.push_slot(ChildKey::new(TASK_VIEW_MENU_TRIGGER), area, |ctx| {
             self.trigger.layout(area, ctx);
         });
@@ -861,6 +847,8 @@ struct TaskWorkspace {
     layout: TaskWorkspaceLayout,
     task_view: TaskView,
     pending_task_view: TaskViewChange,
+    active_task_view: ActiveTaskView,
+    known_task_ids: Vec<String>,
     visible_task_ids: Vec<String>,
     visible_selection: VisibleTaskSelection,
     table_focused: bool,
@@ -911,8 +899,9 @@ impl TaskWorkspace {
         }
 
         let pending_task_view = Rc::new(RefCell::new(None));
+        let active_task_view = Rc::new(RefCell::new(task_view));
         let visible_selection = Rc::new(RefCell::new(selected_task_id.clone()));
-        let toolbar = task_toolbar(Rc::clone(&pending_task_view), task_view);
+        let toolbar = task_toolbar(Rc::clone(&pending_task_view), Rc::clone(&active_task_view));
         let pane = task_split(&context.store, task_view);
         let layout =
             Split::vertical(toolbar, pane).constraints(Constraint::Length(1), Constraint::Min(1));
@@ -923,6 +912,8 @@ impl TaskWorkspace {
             layout,
             task_view,
             pending_task_view,
+            active_task_view,
+            known_task_ids: state.tasks.iter().map(|task| task.id.clone()).collect(),
             visible_task_ids,
             visible_selection,
             table_focused: false,
@@ -953,6 +944,17 @@ impl TaskWorkspace {
         let external_refresh =
             self.observed_external_refresh_version != state.external_refresh_version;
         if self.observed_version != state.version || external_refresh {
+            let selected_new_todo = state
+                .selected_task_id
+                .as_deref()
+                .filter(|id| !self.known_task_ids.iter().any(|known| known == *id))
+                .and_then(|id| state.tasks.iter().find(|task| task.id == id))
+                .is_some_and(|task| task.state == TaskState::Todo);
+            if selected_new_todo && !matches!(self.task_view, TaskView::All | TaskView::Todo) {
+                self.table_mut().clear_search();
+                self.task_view = TaskView::All;
+                *self.active_task_view.borrow_mut() = TaskView::All;
+            }
             let protect_detail = external_refresh
                 && (self.detail_draft_protected || self.context.coordinator.borrow().has_pending());
             self.refresh_from_state(
@@ -961,6 +963,9 @@ impl TaskWorkspace {
                 !external_refresh,
                 external_refresh && !protect_detail,
             );
+            if selected_new_todo {
+                self.table_mut().reveal_highlighted();
+            }
         }
     }
 
@@ -991,20 +996,17 @@ impl TaskWorkspace {
         let selected_task_id = if select_first {
             rows.first().map(|task| task.id.clone())
         } else {
-            previous_task_id
+            state
+                .selected_task_id
+                .as_deref()
                 .filter(|id| contains_id(id))
+                .map(str::to_string)
+                .or_else(|| previous_task_id.filter(|id| contains_id(id)))
                 .or_else(|| {
                     previous_index.flatten().and_then(|index| {
                         rows.get(index.min(rows.len().saturating_sub(1)))
                             .map(|task| task.id.clone())
                     })
-                })
-                .or_else(|| {
-                    state
-                        .selected_task_id
-                        .as_deref()
-                        .filter(|id| contains_id(id))
-                        .map(str::to_string)
                 })
                 .or_else(|| rows.first().map(|task| task.id.clone()))
         };
@@ -1048,6 +1050,7 @@ impl TaskWorkspace {
             self.detail_mut().task_state = selected_task.map(|task| task.state);
         }
         self.detail_mut().set_save_error(save_error.as_deref());
+        self.known_task_ids = state.tasks.iter().map(|task| task.id.clone()).collect();
         self.observed_version = state.version;
         if !external_refresh || refresh_detail {
             self.observed_external_refresh_version = state.external_refresh_version;
@@ -1063,6 +1066,7 @@ impl TaskWorkspace {
         }
         self.table_mut().clear_search();
         self.task_view = next_view;
+        *self.active_task_view.borrow_mut() = next_view;
         let state = self.context.store.borrow().state().clone();
         self.refresh_from_state(&state, true, false, false);
         true
@@ -1175,25 +1179,23 @@ impl TaskWorkspace {
         if outcome.handled() {
             return outcome;
         }
-        let has_visible_task = self.visible_selection.borrow().is_some();
+        let visible_task_id = self.visible_selection.borrow().clone();
         let message = if self.table_focused
-            && has_visible_task
+            && visible_task_id.is_some()
             && app_keymap::matches_any(
                 event,
                 &[
                     keys::TASK_DELETE,
-                    keys::TASK_DELETE_ALT,
+                    keys::TASK_DELETE_X,
                     keys::TASK_DELETE_CTRL_X,
                 ],
             ) {
-            Some(AppMsg::OpenDeleteTask)
+            visible_task_id.map(AppMsg::OpenDeleteTask)
         } else if self.table_focused
-            && has_visible_task
-            && app_keymap::matches_any(event, &[keys::TASK_DISPOSITION, keys::TASK_DISPOSITION_X])
+            && visible_task_id.is_some()
+            && keys::TASK_SNOOZE.matches(event)
         {
-            Some(AppMsg::OpenTaskDisposition)
-        } else if self.table_focused && has_visible_task && keys::TASK_SNOOZE.matches(event) {
-            Some(AppMsg::OpenTaskSnooze)
+            visible_task_id.map(AppMsg::OpenTaskSnooze)
         } else {
             None
         };
@@ -1221,6 +1223,7 @@ impl TuiNode<AppMsg> for TaskWorkspace {
     }
 
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<AppMsg>) -> EventOutcome {
+        self.sync_store_version();
         let outcome = self.layout.event(event, ctx);
         let view_changed = self.sync_task_view_change();
         let detail_sync = self.sync_detail_changes();
@@ -1241,6 +1244,7 @@ impl TuiNode<AppMsg> for TaskWorkspace {
         event: &TuiEvent,
         ctx: &mut EventCtx<AppMsg>,
     ) -> EventOutcome {
+        self.sync_store_version();
         let outcome = self.layout.dispatch_event(route, event, ctx);
         let view_changed = self.sync_task_view_change();
         let detail_sync = self.sync_detail_changes();
@@ -1313,12 +1317,12 @@ enum AppDialog {
     DeleteManagement(ConfirmationDialog<AppMsg>),
     CreateTask(DialogHost<CreateTaskDialog, AppMsg>),
     DeleteTask(ConfirmationDialog<AppMsg>),
-    TaskDisposition(Dialog<AppMsg>),
+    Empty(Dialog<AppMsg>),
     Snooze(Box<SnoozeDialog>),
 }
 
 fn empty_app_dialog() -> AppDialog {
-    AppDialog::TaskDisposition(Dialog::new())
+    AppDialog::Empty(Dialog::new())
 }
 
 fn management_dialog(context: AppContext, kind: ManagementDialogKind) -> AppDialog {
@@ -1357,7 +1361,7 @@ impl TuiNode<AppMsg> for AppDialog {
                 .normalized(proposal)
             }
             Self::DeleteTask(dialog) => dialog.measure(proposal),
-            Self::TaskDisposition(dialog) => dialog.measure(proposal),
+            Self::Empty(dialog) => dialog.measure(proposal),
             Self::Snooze(dialog) => dialog.measure(proposal),
         }
     }
@@ -1371,7 +1375,7 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::DeleteManagement(dialog) => dialog.layout(area, ctx),
             Self::CreateTask(dialog) => dialog.layout(area, ctx),
             Self::DeleteTask(dialog) => dialog.layout(area, ctx),
-            Self::TaskDisposition(dialog) => dialog.layout(area, ctx),
+            Self::Empty(dialog) => dialog.layout(area, ctx),
             Self::Snooze(dialog) => dialog.layout(area, ctx),
         }
     }
@@ -1385,7 +1389,7 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::DeleteManagement(dialog) => dialog.render(frame, area),
             Self::CreateTask(dialog) => dialog.render(frame, area, ctx),
             Self::DeleteTask(dialog) => dialog.render(frame, area),
-            Self::TaskDisposition(dialog) => dialog.render(frame, area),
+            Self::Empty(dialog) => dialog.render(frame, area),
             Self::Snooze(dialog) => dialog.render(frame, area, ctx),
         }
     }
@@ -1399,7 +1403,7 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::DeleteManagement(dialog) => dialog.event(event, ctx),
             Self::CreateTask(dialog) => dialog.event(event, ctx),
             Self::DeleteTask(dialog) => dialog.event(event, ctx),
-            Self::TaskDisposition(dialog) => dialog.event(event, ctx),
+            Self::Empty(dialog) => dialog.event(event, ctx),
             Self::Snooze(dialog) => dialog.event(event, ctx),
         }
     }
@@ -1418,7 +1422,7 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::DeleteManagement(dialog) => dialog.dispatch_event(route, event, ctx),
             Self::CreateTask(dialog) => dialog.dispatch_event(route, event, ctx),
             Self::DeleteTask(dialog) => dialog.dispatch_event(route, event, ctx),
-            Self::TaskDisposition(dialog) => dialog.dispatch_event(route, event, ctx),
+            Self::Empty(dialog) => dialog.dispatch_event(route, event, ctx),
             Self::Snooze(dialog) => dialog.dispatch_event(route, event, ctx),
         }
     }
@@ -1432,7 +1436,7 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::DeleteManagement(dialog) => dialog.dispatch_focus(target, focused, ctx),
             Self::CreateTask(dialog) => dialog.dispatch_focus(target, focused, ctx),
             Self::DeleteTask(dialog) => dialog.dispatch_focus(target, focused, ctx),
-            Self::TaskDisposition(dialog) => dialog.dispatch_focus(target, focused, ctx),
+            Self::Empty(dialog) => dialog.dispatch_focus(target, focused, ctx),
             Self::Snooze(dialog) => dialog.dispatch_focus(target, focused, ctx),
         }
     }
@@ -1446,7 +1450,7 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::DeleteManagement(dialog) => dialog.tick(dt, settings),
             Self::CreateTask(dialog) => dialog.tick(dt, settings),
             Self::DeleteTask(dialog) => dialog.tick(dt, settings),
-            Self::TaskDisposition(dialog) => dialog.tick(dt, settings),
+            Self::Empty(dialog) => dialog.tick(dt, settings),
             Self::Snooze(dialog) => dialog.tick(dt, settings),
         }
     }
@@ -1460,7 +1464,7 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::DeleteManagement(dialog) => dialog.init(ctx),
             Self::CreateTask(dialog) => dialog.init(ctx),
             Self::DeleteTask(dialog) => dialog.init(ctx),
-            Self::TaskDisposition(dialog) => dialog.init(ctx),
+            Self::Empty(dialog) => dialog.init(ctx),
             Self::Snooze(dialog) => dialog.init(ctx),
         }
     }
@@ -1474,7 +1478,7 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::DeleteManagement(dialog) => dialog.mount(ctx),
             Self::CreateTask(dialog) => dialog.mount(ctx),
             Self::DeleteTask(dialog) => dialog.mount(ctx),
-            Self::TaskDisposition(dialog) => dialog.mount(ctx),
+            Self::Empty(dialog) => dialog.mount(ctx),
             Self::Snooze(dialog) => dialog.mount(ctx),
         }
     }
@@ -1488,7 +1492,7 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::DeleteManagement(dialog) => dialog.unmount(ctx),
             Self::CreateTask(dialog) => dialog.unmount(ctx),
             Self::DeleteTask(dialog) => dialog.unmount(ctx),
-            Self::TaskDisposition(dialog) => dialog.unmount(ctx),
+            Self::Empty(dialog) => dialog.unmount(ctx),
             Self::Snooze(dialog) => dialog.unmount(ctx),
         }
     }
@@ -1502,7 +1506,7 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::DeleteManagement(dialog) => dialog.destroy(ctx),
             Self::CreateTask(dialog) => dialog.destroy(ctx),
             Self::DeleteTask(dialog) => dialog.destroy(ctx),
-            Self::TaskDisposition(dialog) => dialog.destroy(ctx),
+            Self::Empty(dialog) => dialog.destroy(ctx),
             Self::Snooze(dialog) => dialog.destroy(ctx),
         }
     }
@@ -1595,34 +1599,6 @@ fn delete_task_dialog(task: &Task) -> AppDialog {
             }
         });
     AppDialog::DeleteTask(dialog)
-}
-
-fn task_disposition_dialog(task: &Task) -> AppDialog {
-    let done_task_id = task.id.clone();
-    let rejected_task_id = task.id.clone();
-    AppDialog::TaskDisposition(
-        Dialog::new()
-            .top_left("Resolve task")
-            .content([format!("Mark “{}” as done, or reject it?", task.title)])
-            .actions([
-                DialogAction::new("Done")
-                    .hotkey(KeySpec::plain('d'))
-                    .on_trigger(move || AppMsg::SetTaskState {
-                        task_id: done_task_id.clone(),
-                        state: TaskState::Done,
-                    }),
-                DialogAction::new("Reject")
-                    .hotkey(KeySpec::plain('r'))
-                    .on_trigger(move || AppMsg::SetTaskState {
-                        task_id: rejected_task_id.clone(),
-                        state: TaskState::Rejected,
-                    }),
-                DialogAction::new("Cancel")
-                    .hotkey(KeySpec::plain('c'))
-                    .on_trigger(|| AppMsg::CloseDialog),
-            ])
-            .on_close(|_| AppMsg::CloseDialog),
-    )
 }
 
 struct TaskDetailForm {
@@ -1759,8 +1735,8 @@ impl TuiNode<AppMsg> for TaskDetailForm {
     }
 }
 
-fn task_toolbar(pending_view: TaskViewChange, selected_view: TaskView) -> Flex<AppMsg> {
-    let view = TaskViewMenu::new(pending_view, selected_view);
+fn task_toolbar(pending_view: TaskViewChange, active_view: ActiveTaskView) -> Flex<AppMsg> {
+    let view = TaskViewMenu::new(pending_view, active_view);
     let new_task = Button::new("New")
         .hotkey(keys::TASK_QUICK_CREATE.hotkey())
         .on_press(|| AppMsg::OpenCreateTask);
@@ -2305,10 +2281,6 @@ fn state_choices() -> Vec<Choice> {
             label: "Done".to_string(),
         },
         Choice {
-            id: "snoozed".to_string(),
-            label: "Snoozed".to_string(),
-        },
-        Choice {
             id: "rejected".to_string(),
             label: "Rejected".to_string(),
         },
@@ -2490,6 +2462,7 @@ pub(crate) mod tests {
             pool,
             crate::storage::SqlDialect::Sqlite,
             runtime.handle().clone(),
+            None,
         )));
         let context = AppContext {
             store: Rc::clone(&store),
@@ -2576,20 +2549,20 @@ pub(crate) mod tests {
         assert_eq!(
             TaskView::OPTIONS,
             [
+                TaskView::All,
                 TaskView::Todo,
                 TaskView::Snoozed,
                 TaskView::InProgress,
                 TaskView::Archived,
-                TaskView::All,
             ]
         );
         assert_eq!(
             TaskView::OPTIONS.map(TaskView::label),
-            ["Todo", "Snoozed", "In progress", "Archived", "All"]
+            ["All", "Todo", "Snoozed", "In progress", "Archived"]
         );
         assert_eq!(
             TaskView::OPTIONS.map(TaskView::icon),
-            ["", "󰒲", "", "", ""]
+            ["", "", "󰒲", "", ""]
         );
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
             tasks: vec![test_task()],
@@ -2885,7 +2858,7 @@ pub(crate) mod tests {
             code: Key::Char('j'),
             modifiers: KeyModifiers::CONTROL,
         };
-        for key in [next, KeyEvent::from(Key::Enter)] {
+        for key in [next, next, KeyEvent::from(Key::Enter)] {
             let outcome = workspace.dispatch_event(
                 &panel_route,
                 &TuiEvent::Key(key),
@@ -2950,15 +2923,11 @@ pub(crate) mod tests {
         assert!(workspace.sync_task_view_change());
         workspace.layout(area, &mut LayoutCtx::new());
         let all = rendered_text(&workspace, area);
-        for title in [
-            "Active work",
-            "Todo work",
-            "Completed work",
-            "Rejected work",
-            "Snoozed work",
-        ] {
+        for title in ["Active work", "Todo work", "Snoozed work"] {
             assert!(all.contains(title), "missing task in All view: {title}");
         }
+        assert!(!all.contains("Completed work"));
+        assert!(!all.contains("Rejected work"));
     }
 
     #[test]
@@ -3206,7 +3175,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn created_todo_task_does_not_replace_in_progress_selection() {
+    fn created_todo_switches_hidden_view_to_all_and_selects_task() {
         let (_runtime, context, store) = test_context(WorkspaceSnapshot {
             tasks: vec![test_task()],
             people: Vec::new(),
@@ -3214,6 +3183,7 @@ pub(crate) mod tests {
             tags: Vec::new(),
         });
         let mut workspace = TaskWorkspace::new(context);
+        workspace.layout(Rect::new(0, 0, 120, 40), &mut LayoutCtx::new());
         let created = Task::quick_capture(
             "task-2".to_string(),
             "Captured".to_string(),
@@ -3228,17 +3198,51 @@ pub(crate) mod tests {
 
         assert_eq!(
             store.borrow().state().selected_task_id.as_deref(),
-            Some("task-1")
+            Some("task-2")
         );
+        assert_eq!(workspace.task_view, TaskView::All);
+        assert_eq!(*workspace.active_task_view.borrow(), TaskView::All);
         assert_eq!(
             workspace.table_mut().highlighted_id().as_deref(),
-            Some("task-1")
+            Some("task-2")
         );
         assert_eq!(
             workspace.table_mut().selected_id().as_deref(),
-            Some("task-1")
+            Some("task-2")
         );
-        assert_eq!(workspace.detail_mut().task_id.as_deref(), Some("task-1"));
+        assert_eq!(workspace.detail_mut().task_id.as_deref(), Some("task-2"));
+    }
+
+    #[test]
+    fn created_todo_stays_in_todo_view_and_selects_task() {
+        let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+            tasks: vec![test_task()],
+            people: Vec::new(),
+            projects: Vec::new(),
+            tags: Vec::new(),
+        });
+        let mut workspace = TaskWorkspace::new(context);
+        *workspace.pending_task_view.borrow_mut() = Some(TaskView::Todo);
+        workspace.sync_task_view_change();
+        workspace.layout(Rect::new(0, 0, 120, 40), &mut LayoutCtx::new());
+        let created = Task::quick_capture(
+            "task-2".to_string(),
+            "Captured".to_string(),
+            String::new(),
+            TaskSize::Small,
+        );
+
+        store
+            .borrow_mut()
+            .dispatch(AppEvent::TaskCreated(created.clone()));
+        workspace.layout(Rect::new(0, 0, 120, 40), &mut LayoutCtx::new());
+
+        assert_eq!(workspace.task_view, TaskView::Todo);
+        assert_eq!(
+            workspace.table().highlighted_id().as_deref(),
+            Some("task-2")
+        );
+        assert_eq!(workspace.detail().task_id.as_deref(), Some("task-2"));
     }
 
     #[test]
@@ -3274,7 +3278,10 @@ pub(crate) mod tests {
         let outcome = workspace.event(&TuiEvent::Key(KeyEvent::from(Key::Delete)), &mut ctx);
 
         assert!(outcome.handled());
-        assert!(matches!(ctx.messages(), [AppMsg::OpenDeleteTask]));
+        assert!(matches!(
+            ctx.messages(),
+            [AppMsg::OpenDeleteTask(task_id)] if task_id == "task-1"
+        ));
     }
 
     #[test]
@@ -3298,7 +3305,10 @@ pub(crate) mod tests {
         workspace.table_focused = true;
         let mut focused = EventCtx::default();
         assert!(workspace.event(&event, &mut focused).handled());
-        assert!(matches!(focused.messages(), [AppMsg::OpenTaskSnooze]));
+        assert!(matches!(
+            focused.messages(),
+            [AppMsg::OpenTaskSnooze(task_id)] if task_id == "task-1"
+        ));
 
         *workspace.visible_selection.borrow_mut() = None;
         let mut hidden = EventCtx::default();
@@ -3528,7 +3538,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn ctrl_backspace_opens_confirmation_from_focused_task_table() {
+    fn backspace_shortcuts_do_not_open_task_dialogs() {
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
             tasks: vec![test_task()],
             people: Vec::new(),
@@ -3537,52 +3547,45 @@ pub(crate) mod tests {
         });
         let mut workspace = TaskWorkspace::new(context);
         workspace.table_focused = true;
-        let mut ctx = EventCtx::default();
-        let key = KeyEvent {
-            code: Key::Backspace,
-            modifiers: KeyModifiers::CONTROL,
-        };
-
-        let outcome = workspace.event(&TuiEvent::Key(key), &mut ctx);
-
-        assert!(outcome.handled());
-        assert!(matches!(ctx.messages(), [AppMsg::OpenDeleteTask]));
+        for modifiers in [KeyModifiers::NONE, KeyModifiers::CONTROL] {
+            let mut ctx = EventCtx::default();
+            workspace.event(
+                &TuiEvent::Key(KeyEvent {
+                    code: Key::Backspace,
+                    modifiers,
+                }),
+                &mut ctx,
+            );
+            assert!(ctx.messages().is_empty());
+        }
     }
 
     #[test]
-    fn x_opens_disposition_dialog_from_focused_task_table() {
+    fn x_targets_visible_task_even_when_store_selection_is_stale() {
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
-            tasks: vec![test_task()],
+            tasks: vec![
+                test_task(),
+                task_with("task-2", "Second", TaskState::InProgress),
+            ],
             people: Vec::new(),
             projects: Vec::new(),
             tags: Vec::new(),
         });
         let mut workspace = TaskWorkspace::new(context);
         workspace.table_focused = true;
+        workspace.table_mut().highlight_id(&"task-2".to_string());
+        workspace.table_mut().select_id("task-2".to_string());
+        workspace.table_mut().take_events();
+        *workspace.visible_selection.borrow_mut() = Some("task-2".to_string());
         let mut ctx = EventCtx::default();
 
         let outcome = workspace.event(&TuiEvent::Key(KeyEvent::from(Key::Char('x'))), &mut ctx);
 
         assert!(outcome.handled());
-        assert!(matches!(ctx.messages(), [AppMsg::OpenTaskDisposition]));
-    }
-
-    #[test]
-    fn backspace_opens_disposition_dialog_from_focused_task_table() {
-        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
-            tasks: vec![test_task()],
-            people: Vec::new(),
-            projects: Vec::new(),
-            tags: Vec::new(),
-        });
-        let mut workspace = TaskWorkspace::new(context);
-        workspace.table_focused = true;
-        let mut ctx = EventCtx::default();
-
-        let outcome = workspace.event(&TuiEvent::Key(KeyEvent::from(Key::Backspace)), &mut ctx);
-
-        assert!(outcome.handled());
-        assert!(matches!(ctx.messages(), [AppMsg::OpenTaskDisposition]));
+        assert!(matches!(
+            ctx.messages(),
+            [AppMsg::OpenDeleteTask(task_id)] if task_id == "task-2"
+        ));
     }
 
     #[test]
@@ -3604,7 +3607,10 @@ pub(crate) mod tests {
         let outcome = workspace.event(&TuiEvent::Key(key), &mut ctx);
 
         assert!(outcome.handled());
-        assert!(matches!(ctx.messages(), [AppMsg::OpenDeleteTask]));
+        assert!(matches!(
+            ctx.messages(),
+            [AppMsg::OpenDeleteTask(task_id)] if task_id == "task-1"
+        ));
     }
 
     #[test]
@@ -3702,7 +3708,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn task_action_dialogs_fit_their_content() {
+    fn delete_task_dialog_fits_its_content() {
         let snapshot = WorkspaceSnapshot {
             tasks: vec![test_task()],
             people: Vec::new(),
@@ -3713,7 +3719,7 @@ pub(crate) mod tests {
         let mut app = App::new(context.store, context.coordinator);
         let area = Rect::new(0, 0, 120, 40);
 
-        app.open_delete_task_dialog(&mut EventCtx::default());
+        app.open_delete_task_dialog("task-1", &mut EventCtx::default());
         let mut delete_layout = LayoutCtx::new();
         app.layout(area, &mut delete_layout);
         let delete_area = delete_layout
@@ -3722,21 +3728,10 @@ pub(crate) mod tests {
             .expect("delete dialog should register an overlay")
             .area;
 
-        app.open_task_disposition_dialog(&mut EventCtx::default());
-        let mut resolve_layout = LayoutCtx::new();
-        app.layout(area, &mut resolve_layout);
-        let resolve_area = resolve_layout
-            .overlays()
-            .first()
-            .expect("resolve dialog should register an overlay")
-            .area;
-
-        for dialog_area in [delete_area, resolve_area] {
-            assert!(dialog_area.width > 20);
-            assert!(dialog_area.height >= 3);
-            assert!(dialog_area.width < area.width / 2);
-            assert!(dialog_area.height < area.height / 4);
-        }
+        assert!(delete_area.width > 20);
+        assert!(delete_area.height >= 3);
+        assert!(delete_area.width < area.width / 2);
+        assert!(delete_area.height < area.height / 4);
     }
 
     #[test]
@@ -3916,6 +3911,16 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn task_state_switcher_excludes_snoozed() {
+        let choice_ids = state_choices()
+            .into_iter()
+            .map(|choice| choice.id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(choice_ids, ["todo", "in_progress", "done", "rejected"]);
+    }
+
+    #[test]
     fn task_description_registers_edit_and_editor_hotkeys_and_requests_existing_value() {
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
             tasks: vec![test_task()],
@@ -3996,6 +4001,7 @@ pub(crate) mod tests {
             pool,
             crate::storage::SqlDialect::Sqlite,
             runtime.handle().clone(),
+            None,
         )));
         let mut workspace = TaskWorkspace::new(AppContext {
             store: Rc::clone(&store),

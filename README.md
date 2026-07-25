@@ -25,8 +25,29 @@ MCP client configuration:
 ```
 
 Set `TUIDO_DATABASE_URL` to use another SQLite database or Postgres. Otherwise Tuido uses its default local SQLite database.
+Default data locations follow each platform: `$XDG_DATA_HOME/tuido` (or
+`~/.local/share/tuido`) on Linux, `~/Library/Application Support/tuido` on macOS,
+and the local application-data directory on Windows. Path overrides
+`XDG_DATA_HOME`, `TUIDO_CONFIG_DIR`, and `TUIDO_MIGRATIONS_DIR` must be absolute.
+UI config files are optional and load from the platform config directory under
+`tuido`; set `TUIDO_CONFIG_DIR` to select another absolute directory. Existing
+`TUICORE_CONFIG_DIR` or `~/.tuicore` files take precedence for compatibility.
 
-## Build and install
+## Install
+
+On another machine:
+
+```bash
+cargo install tuido --locked
+```
+
+Update later:
+
+```bash
+cargo install tuido --locked --force
+```
+
+## Build from source
 
 ```bash
 cargo test
@@ -66,3 +87,12 @@ Postgres compatibility test is intentionally ignored by default. Run it explicit
 ```bash
 TUIDO_TEST_POSTGRES_URL=postgres://... cargo test --test postgres_service -- --ignored
 ```
+
+## Release
+
+Requires a clean Git tree and crates.io credentials from `cargo login`.
+Run `cargo patch`, `cargo minor`, or `cargo major`. Release workflow checks crates.io
+for latest stable Tuicore and release-version availability, updates dependency and
+lockfile when needed, then runs tests, package validation, and publish dry-run.
+After validation it shows exact versions and asks once before commit, tag, and live
+publish. It never pushes; follow printed push commands after successful publication.
