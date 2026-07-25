@@ -281,12 +281,12 @@ PY
 fi
 cargo update -p tuicore --precise "$latest_tuicore"
 
-python3 - "$old_version" "$new_version" <<'PY'
+python3 - "$old_version" "$new_version" "$crate_name" <<'PY'
 import pathlib
 import re
 import sys
 
-old, new = sys.argv[1:]
+old, new, crate_name = sys.argv[1:]
 manifest_path = pathlib.Path("Cargo.toml")
 manifest = manifest_path.read_text()
 package = re.search(r'(?ms)^\[package\]\s*$\n(?P<body>.*?)(?=^\[|\Z)', manifest)
@@ -308,10 +308,10 @@ matches = []
 for block in blocks:
     name = re.search(r'(?m)^name\s*=\s*["\']([^"\']+)["\']', block.group())
     version = re.search(r'(?m)^version\s*=\s*["\']([^"\']+)["\']', block.group())
-    if name and version and name.group(1) == "tuido" and version.group(1) == old:
+    if name and version and name.group(1) == crate_name and version.group(1) == old:
         matches.append((block, version))
 if len(matches) != 1:
-    raise SystemExit(f"error: expected one Tuido {old} lock entry, found {len(matches)}")
+    raise SystemExit(f"error: expected one {crate_name} {old} lock entry, found {len(matches)}")
 block, version = matches[0]
 start = block.start() + version.start(1)
 end = block.start() + version.end(1)
