@@ -1,0 +1,17 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "tuido": {
+      "type": "local",
+      "command": [
+        "cargo",
+        "run",
+        "--quiet",
+        "--",
+        "mcp"
+      ],
+      "enabled": true,
+      "env": {}
+    }
+  }
+}

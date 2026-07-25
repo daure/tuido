@@ -1,0 +1,767 @@
+use std::net::SocketAddr;
+
+use rmcp::{
+    Json, ServerHandler, ServiceExt,
+    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
+    model::{ServerCapabilities, ServerInfo},
+    tool, tool_handler, tool_router,
+    transport::{StreamableHttpServerConfig, StreamableHttpService, stdio},
+};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+use crate::{
+    domain::{TaskPatch, TaskState},
+    service::{
+        PersonInput, PersonView, ProjectInput, ProjectView, ServiceError, TagInput, TagView,
+        TaskCreate, TaskUpdate, TaskView, TuidoService, Versioned, WorkspaceFilter, WorkspaceView,
+    },
+};
+
+const MCP_INSTRUCTIONS: &str = "Full read/write Tuido task, people, project, and tag service. Treat task state as user-facing Status, not Type or Workflow. Task people are people involved besides the workspace owner; never describe them as assignees or owners. Revisions are internal optimistic-concurrency tokens: use the latest entity revision as expected_revision for mutations, but omit revisions from user-facing task tables and summaries unless the user asks for them.";
+
+#[derive(Clone)]
+struct McpServer {
+    service: TuidoService,
+    tool_router: ToolRouter<Self>,
+}
+
+impl McpServer {
+    fn new(service: TuidoService) -> Self {
+        Self {
+            service,
+            tool_router: Self::tool_router(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct Id {
+    id: String,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+struct Expected {
+    id: String,
+    #[schemars(schema_with = "crate::service::revision_schema")]
+    expected_revision: u64,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+struct TaskStateInput {
+    id: String,
+    #[schemars(schema_with = "crate::service::revision_schema")]
+    expected_revision: u64,
+    /// User-facing task status: todo, in_progress, done, or rejected.
+    state: String,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SnoozeInput {
+    id: String,
+    #[schemars(schema_with = "crate::service::revision_schema")]
+    expected_revision: u64,
+    until: String,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+struct PersonUpdate {
+    id: String,
+    #[schemars(schema_with = "crate::service::revision_schema")]
+    expected_revision: u64,
+    #[serde(flatten)]
+    value: PersonInput,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ProjectUpdate {
+    id: String,
+    #[schemars(schema_with = "crate::service::revision_schema")]
+    expected_revision: u64,
+    #[serde(flatten)]
+    value: ProjectInput,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+struct TagUpdate {
+    id: String,
+    #[schemars(schema_with = "crate::service::revision_schema")]
+    expected_revision: u64,
+    #[serde(flatten)]
+    value: TagInput,
+}
+#[derive(Debug, Serialize, JsonSchema)]
+struct DeletionResult {
+    deleted: bool,
+    entity: &'static str,
+    id: String,
+    #[schemars(schema_with = "crate::service::revision_schema")]
+    revision: u64,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct PeopleList {
+    people: Vec<Versioned<PersonView>>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct ProjectList {
+    projects: Vec<Versioned<ProjectView>>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct TagList {
+    tags: Vec<Versioned<TagView>>,
+}
+
+fn mcp_error(error: ServiceError) -> String {
+    error.to_string()
+}
+
+#[tool_router]
+impl McpServer {
+    #[tool(
+        description = "Get a normalized workspace graph. Excludes done and rejected tasks by default; set include_resolved=true to include them. Filters use OR within each property and AND across properties. Related entity collections contain only entities referenced by matching tasks unless include_all_entities=true. Task state is user-facing status. Task people are involved people besides the workspace owner, never assignees. Revisions are internal concurrency tokens and should normally be omitted from user-facing summaries."
+    )]
+    async fn get_workspace(
+        &self,
+        Parameters(filter): Parameters<WorkspaceFilter>,
+    ) -> Result<Json<WorkspaceView>, String> {
+        self.service
+            .filtered_workspace(filter)
+            .await
+            .map(Json)
+            .map_err(mcp_error)
+    }
+    #[tool(description = "Get one task by id with current revision")]
+    async fn get_task(
+        &self,
+        Parameters(v): Parameters<Id>,
+    ) -> Result<Json<Versioned<TaskView>>, String> {
+        self.service
+            .get_task(&v.id)
+            .await
+            .map(Json)
+            .map_err(mcp_error)
+    }
+    #[tool(description = "Create task")]
+    async fn create_task(
+        &self,
+        Parameters(v): Parameters<TaskCreate>,
+    ) -> Result<Json<Versioned<TaskView>>, String> {
+        self.service
+            .create_task(v)
+            .await
+            .map(Json)
+            .map_err(mcp_error)
+    }
+    #[tool(
+        description = "Replace all editable task fields and relations; expected_revision is required"
+    )]
+    async fn update_task(
+        &self,
+        Parameters(v): Parameters<TaskUpdate>,
+    ) -> Result<Json<Versioned<TaskView>>, String> {
+        self.service
+            .update_task(v)
+            .await
+            .map(Json)
+            .map_err(mcp_error)
+    }
+    #[tool(description = "Delete task conditionally by expected revision")]
+    async fn delete_task(
+        &self,
+        Parameters(v): Parameters<Expected>,
+    ) -> Result<Json<DeletionResult>, String> {
+        let result = DeletionResult {
+            deleted: true,
+            entity: "task",
+            id: v.id.clone(),
+            revision: v.expected_revision,
+        };
+        self.service
+            .delete_task(&v.id, v.expected_revision)
+            .await
+            .map(|_| Json(result))
+            .map_err(mcp_error)
+    }
+    #[tool(description = "Set task status (todo, in_progress, done, rejected)")]
+    async fn set_task_state(
+        &self,
+        Parameters(v): Parameters<TaskStateInput>,
+    ) -> Result<Json<Versioned<TaskView>>, String> {
+        let state = TaskState::parse(&v.state).ok_or_else(|| "invalid task state".to_string())?;
+        mutate_task(
+            &self.service,
+            v.id,
+            v.expected_revision,
+            TaskPatch::State(state),
+        )
+        .await
+    }
+    #[tool(description = "Mark task status done")]
+    async fn complete_task(
+        &self,
+        Parameters(v): Parameters<Expected>,
+    ) -> Result<Json<Versioned<TaskView>>, String> {
+        mutate_task(
+            &self.service,
+            v.id,
+            v.expected_revision,
+            TaskPatch::State(TaskState::Done),
+        )
+        .await
+    }
+    #[tool(description = "Reject task")]
+    async fn reject_task(
+        &self,
+        Parameters(v): Parameters<Expected>,
+    ) -> Result<Json<Versioned<TaskView>>, String> {
+        mutate_task(
+            &self.service,
+            v.id,
+            v.expected_revision,
+            TaskPatch::State(TaskState::Rejected),
+        )
+        .await
+    }
+    #[tool(description = "Snooze task until local datetime formatted YYYY-MM-DDTHH:MM:SS")]
+    async fn snooze_task(
+        &self,
+        Parameters(v): Parameters<SnoozeInput>,
+    ) -> Result<Json<Versioned<TaskView>>, String> {
+        let until = crate::snooze::parse_datetime(&v.until).map_err(|e| e.to_string())?;
+        mutate_task(
+            &self.service,
+            v.id,
+            v.expected_revision,
+            TaskPatch::Snooze {
+                until,
+                remember_custom: None,
+            },
+        )
+        .await
+    }
+    #[tool(description = "Unsnooze task and return it to todo")]
+    async fn unsnooze_task(
+        &self,
+        Parameters(v): Parameters<Expected>,
+    ) -> Result<Json<Versioned<TaskView>>, String> {
+        mutate_task(
+            &self.service,
+            v.id,
+            v.expected_revision,
+            TaskPatch::Unsnooze,
+        )
+        .await
+    }
+
+    #[tool(description = "List people with revisions")]
+    async fn list_people(&self) -> Result<Json<PeopleList>, String> {
+        Ok(Json(PeopleList {
+            people: self.service.workspace().await.map_err(mcp_error)?.people,
+        }))
+    }
+    #[tool(description = "Get person by id")]
+    async fn get_person(
+        &self,
+        Parameters(v): Parameters<Id>,
+    ) -> Result<Json<Versioned<PersonView>>, String> {
+        self.service
+            .workspace()
+            .await
+            .map_err(mcp_error)?
+            .people
+            .into_iter()
+            .find(|x| x.value.id == v.id)
+            .map(Json)
+            .ok_or_else(|| "person not found".into())
+    }
+    #[tool(description = "Create person")]
+    async fn create_person(
+        &self,
+        Parameters(v): Parameters<PersonInput>,
+    ) -> Result<Json<Versioned<PersonView>>, String> {
+        self.service
+            .create_person(v)
+            .await
+            .map(Json)
+            .map_err(mcp_error)
+    }
+    #[tool(description = "Replace person fields conditionally")]
+    async fn update_person(
+        &self,
+        Parameters(v): Parameters<PersonUpdate>,
+    ) -> Result<Json<Versioned<PersonView>>, String> {
+        self.service
+            .update_person(&v.id, v.expected_revision, v.value)
+            .await
+            .map(Json)
+            .map_err(mcp_error)
+    }
+    #[tool(description = "Delete person conditionally")]
+    async fn delete_person(
+        &self,
+        Parameters(v): Parameters<Expected>,
+    ) -> Result<Json<DeletionResult>, String> {
+        let result = deletion_result("person", &v);
+        self.service
+            .delete_person(&v.id, v.expected_revision)
+            .await
+            .map(|_| Json(result))
+            .map_err(mcp_error)
+    }
+
+    #[tool(description = "List projects with revisions")]
+    async fn list_projects(&self) -> Result<Json<ProjectList>, String> {
+        Ok(Json(ProjectList {
+            projects: self.service.workspace().await.map_err(mcp_error)?.projects,
+        }))
+    }
+    #[tool(description = "Get project by id")]
+    async fn get_project(
+        &self,
+        Parameters(v): Parameters<Id>,
+    ) -> Result<Json<Versioned<ProjectView>>, String> {
+        self.service
+            .workspace()
+            .await
+            .map_err(mcp_error)?
+            .projects
+            .into_iter()
+            .find(|x| x.value.id == v.id)
+            .map(Json)
+            .ok_or_else(|| "project not found".into())
+    }
+    #[tool(description = "Create project")]
+    async fn create_project(
+        &self,
+        Parameters(v): Parameters<ProjectInput>,
+    ) -> Result<Json<Versioned<ProjectView>>, String> {
+        self.service
+            .create_project(v)
+            .await
+            .map(Json)
+            .map_err(mcp_error)
+    }
+    #[tool(description = "Replace project fields conditionally")]
+    async fn update_project(
+        &self,
+        Parameters(v): Parameters<ProjectUpdate>,
+    ) -> Result<Json<Versioned<ProjectView>>, String> {
+        self.service
+            .update_project(&v.id, v.expected_revision, v.value)
+            .await
+            .map(Json)
+            .map_err(mcp_error)
+    }
+    #[tool(description = "Delete project conditionally")]
+    async fn delete_project(
+        &self,
+        Parameters(v): Parameters<Expected>,
+    ) -> Result<Json<DeletionResult>, String> {
+        let result = deletion_result("project", &v);
+        self.service
+            .delete_project(&v.id, v.expected_revision)
+            .await
+            .map(|_| Json(result))
+            .map_err(mcp_error)
+    }
+
+    #[tool(description = "List tags/labels with revisions")]
+    async fn list_tags(&self) -> Result<Json<TagList>, String> {
+        Ok(Json(TagList {
+            tags: self.service.workspace().await.map_err(mcp_error)?.tags,
+        }))
+    }
+    #[tool(description = "Get tag/label by id")]
+    async fn get_tag(
+        &self,
+        Parameters(v): Parameters<Id>,
+    ) -> Result<Json<Versioned<TagView>>, String> {
+        self.service
+            .workspace()
+            .await
+            .map_err(mcp_error)?
+            .tags
+            .into_iter()
+            .find(|x| x.value.id == v.id)
+            .map(Json)
+            .ok_or_else(|| "tag not found".into())
+    }
+    #[tool(description = "Create tag/label")]
+    async fn create_tag(
+        &self,
+        Parameters(v): Parameters<TagInput>,
+    ) -> Result<Json<Versioned<TagView>>, String> {
+        self.service
+            .create_tag(v)
+            .await
+            .map(Json)
+            .map_err(mcp_error)
+    }
+    #[tool(description = "Rename tag/label conditionally")]
+    async fn update_tag(
+        &self,
+        Parameters(v): Parameters<TagUpdate>,
+    ) -> Result<Json<Versioned<TagView>>, String> {
+        self.service
+            .update_tag(&v.id, v.expected_revision, v.value)
+            .await
+            .map(Json)
+            .map_err(mcp_error)
+    }
+    #[tool(description = "Delete tag/label conditionally")]
+    async fn delete_tag(
+        &self,
+        Parameters(v): Parameters<Expected>,
+    ) -> Result<Json<DeletionResult>, String> {
+        let result = deletion_result("tag", &v);
+        self.service
+            .delete_tag(&v.id, v.expected_revision)
+            .await
+            .map(|_| Json(result))
+            .map_err(mcp_error)
+    }
+}
+
+fn deletion_result(entity: &'static str, expected: &Expected) -> DeletionResult {
+    DeletionResult {
+        deleted: true,
+        entity,
+        id: expected.id.clone(),
+        revision: expected.expected_revision,
+    }
+}
+
+async fn mutate_task(
+    service: &TuidoService,
+    id: String,
+    expected_revision: u64,
+    patch: TaskPatch,
+) -> Result<Json<Versioned<TaskView>>, String> {
+    service
+        .patch_task(id.clone(), expected_revision, patch)
+        .await
+        .map_err(mcp_error)?;
+    service.get_task(&id).await.map(Json).map_err(mcp_error)
+}
+
+#[tool_handler(router = self.tool_router)]
+impl ServerHandler for McpServer {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo {
+            instructions: Some(MCP_INSTRUCTIONS.into()),
+            capabilities: ServerCapabilities::builder().enable_tools().build(),
+            ..Default::default()
+        }
+    }
+}
+
+pub async fn run_stdio() -> Result<(), Box<dyn std::error::Error>> {
+    let service = TuidoService::connect().await?;
+    McpServer::new(service)
+        .serve(stdio())
+        .await?
+        .waiting()
+        .await?;
+    Ok(())
+}
+
+pub async fn run_http(addr: SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
+    run_http_inner(addr, None).await
+}
+
+pub(crate) async fn run_http_with_startup(
+    addr: SocketAddr,
+    startup: std::sync::mpsc::Sender<Result<(), String>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    run_http_inner(addr, Some(startup)).await
+}
+
+async fn run_http_inner(
+    addr: SocketAddr,
+    startup: Option<std::sync::mpsc::Sender<Result<(), String>>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !addr.ip().is_loopback() {
+        if let Some(startup) = startup {
+            let _ = startup.send(Err("MCP HTTP bind must be loopback".into()));
+        }
+        return Err("MCP HTTP bind must be loopback".into());
+    }
+    let service = match TuidoService::connect().await {
+        Ok(service) => service,
+        Err(error) => {
+            if let Some(startup) = startup {
+                let _ = startup.send(Err(error.to_string()));
+            }
+            return Err(Box::new(error));
+        }
+    };
+    let mcp: StreamableHttpService<McpServer> = StreamableHttpService::new(
+        move || Ok(McpServer::new(service.clone())),
+        Default::default(),
+        StreamableHttpServerConfig {
+            stateful_mode: true,
+            sse_keep_alive: None,
+        },
+    );
+    let router = axum::Router::new().nest_service("/mcp", mcp);
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(listener) => listener,
+        Err(error) => {
+            if let Some(startup) = startup {
+                let _ = startup.send(Err(error.to_string()));
+            }
+            return Err(Box::new(error));
+        }
+    };
+    if let Some(startup) = startup {
+        let _ = startup.send(Ok(()));
+    }
+    axum::serve(listener, router)
+        .with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
+        .await?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        domain::{Task, TaskSize},
+        storage::SqlDialect,
+    };
+    use sqlx::any::AnyPoolOptions;
+
+    fn collect_formats(value: &serde_json::Value, formats: &mut Vec<String>) {
+        match value {
+            serde_json::Value::Object(object) => {
+                if let Some(format) = object.get("format").and_then(serde_json::Value::as_str) {
+                    formats.push(format.to_owned());
+                }
+                for value in object.values() {
+                    collect_formats(value, formats);
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    collect_formats(value, formats);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn tool_schemas_use_only_standard_json_schema_formats() {
+        let tools = serde_json::to_value(McpServer::tool_router().list_all()).unwrap();
+        let mut formats = Vec::new();
+        collect_formats(&tools, &mut formats);
+
+        assert!(!formats.iter().any(|format| format == "uint64"));
+    }
+
+    #[test]
+    fn mcp_contract_distinguishes_status_people_and_internal_revisions() {
+        let tools = serde_json::to_string(&McpServer::tool_router().list_all()).unwrap();
+
+        assert!(MCP_INSTRUCTIONS.contains("state as user-facing Status"));
+        assert!(MCP_INSTRUCTIONS.contains("never describe them as assignees or owners"));
+        assert!(MCP_INSTRUCTIONS.contains("omit revisions from user-facing task tables"));
+        assert!(tools.contains("Task state is user-facing status"));
+        assert!(tools.contains("never assignees"));
+        assert!(tools.contains("should normally be omitted from user-facing summaries"));
+    }
+
+    #[test]
+    fn workspace_and_list_tools_return_object_shaped_structured_content() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            sqlx::any::install_default_drivers();
+            let pool = AnyPoolOptions::new()
+                .max_connections(1)
+                .connect("sqlite::memory:")
+                .await
+                .unwrap();
+            sqlx::migrate!().run(&pool).await.unwrap();
+            let service = TuidoService::from_parts(pool, SqlDialect::Sqlite);
+            service
+                .create_task_entity(Task::quick_capture(
+                    "task".into(),
+                    "Original".into(),
+                    String::new(),
+                    TaskSize::Small,
+                ))
+                .await
+                .unwrap();
+            let server = McpServer::new(service);
+
+            let responses = [
+                serde_json::to_value(
+                    server
+                        .get_workspace(Parameters(WorkspaceFilter::default()))
+                        .await
+                        .unwrap()
+                        .0,
+                )
+                .unwrap(),
+                serde_json::to_value(server.list_people().await.unwrap().0).unwrap(),
+                serde_json::to_value(server.list_projects().await.unwrap().0).unwrap(),
+                serde_json::to_value(server.list_tags().await.unwrap().0).unwrap(),
+            ];
+
+            for response in responses {
+                assert!(response.is_object());
+            }
+        });
+    }
+
+    #[test]
+    fn task_actions_return_canonical_revision_and_malformed_update_does_not_persist() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            sqlx::any::install_default_drivers();
+            let pool = AnyPoolOptions::new()
+                .max_connections(1)
+                .connect("sqlite::memory:")
+                .await
+                .unwrap();
+            sqlx::migrate!().run(&pool).await.unwrap();
+            let service = TuidoService::from_parts(pool, SqlDialect::Sqlite);
+            service
+                .create_task_entity(Task::quick_capture(
+                    "task".into(),
+                    "Original".into(),
+                    String::new(),
+                    TaskSize::Small,
+                ))
+                .await
+                .unwrap();
+            let server = McpServer::new(service.clone());
+
+            let malformed = server
+                .update_task(Parameters(TaskUpdate {
+                    id: "task".into(),
+                    expected_revision: 1,
+                    title: "Poisoned".into(),
+                    state: "todo".into(),
+                    size: "small".into(),
+                    priority: "medium".into(),
+                    start_date: None,
+                    due_date: None,
+                    snoozed_until: Some("malformed".into()),
+                    people_ids: Vec::new(),
+                    project_ids: Vec::new(),
+                    tag_ids: Vec::new(),
+                    detail: String::new(),
+                }))
+                .await;
+            assert!(malformed.is_err());
+            assert_eq!(service.get_task("task").await.unwrap().revision, 1);
+
+            let completed = server
+                .complete_task(Parameters(Expected {
+                    id: "task".into(),
+                    expected_revision: 1,
+                }))
+                .await
+                .unwrap()
+                .0;
+            assert_eq!(completed.revision, 2);
+            assert_eq!(completed.value.state, "done");
+
+            let deleted = server
+                .delete_task(Parameters(Expected {
+                    id: "task".into(),
+                    expected_revision: 2,
+                }))
+                .await
+                .unwrap()
+                .0;
+            assert!(deleted.deleted);
+            assert_eq!(deleted.entity, "task");
+            assert_eq!(deleted.id, "task");
+            assert_eq!(deleted.revision, 2);
+        });
+    }
+
+    #[test]
+    fn task_update_rejects_invalid_dates_and_contradictory_snooze_fields() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            sqlx::any::install_default_drivers();
+            let pool = AnyPoolOptions::new()
+                .max_connections(1)
+                .connect("sqlite::memory:")
+                .await
+                .unwrap();
+            sqlx::migrate!().run(&pool).await.unwrap();
+            let service = TuidoService::from_parts(pool, SqlDialect::Sqlite);
+            service
+                .create_task_entity(Task::quick_capture(
+                    "task".into(),
+                    "Original".into(),
+                    String::new(),
+                    TaskSize::Small,
+                ))
+                .await
+                .unwrap();
+            let server = McpServer::new(service.clone());
+
+            for (state, start_date, snoozed_until) in [
+                ("todo", Some("2026-02-30"), None),
+                ("snoozed", None, None),
+                ("todo", None, Some("2026-07-25T08:00:00")),
+            ] {
+                let result = server
+                    .update_task(Parameters(TaskUpdate {
+                        id: "task".into(),
+                        expected_revision: 1,
+                        title: "Changed".into(),
+                        state: state.into(),
+                        size: "small".into(),
+                        priority: "medium".into(),
+                        start_date: start_date.map(str::to_string),
+                        due_date: None,
+                        snoozed_until: snoozed_until.map(str::to_string),
+                        people_ids: Vec::new(),
+                        project_ids: Vec::new(),
+                        tag_ids: Vec::new(),
+                        detail: String::new(),
+                    }))
+                    .await;
+                assert!(result.is_err());
+            }
+            assert_eq!(service.get_task("task").await.unwrap().revision, 1);
+        });
+    }
+
+    #[test]
+    fn set_task_state_rejects_legacy_aliases_before_mutation() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let service = TuidoService::connect_url("sqlite::memory:").await.unwrap();
+            let server = McpServer::new(service);
+
+            for state in ["clarify", "next", "waiting", "doing"] {
+                let result = server
+                    .set_task_state(Parameters(TaskStateInput {
+                        id: "missing".into(),
+                        expected_revision: 1,
+                        state: state.into(),
+                    }))
+                    .await;
+                assert_eq!(result.err().as_deref(), Some("invalid task state"));
+            }
+        });
+    }
+}

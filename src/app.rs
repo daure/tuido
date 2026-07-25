@@ -9,6 +9,7 @@ use crate::domain::{
     reduce_app_state,
 };
 use crate::persistence_coordinator::{AppStore, PersistenceCommand, PersistenceCoordinator};
+use crate::service::TuidoService;
 use crate::snooze::{SnoozeDialog, local_now};
 use crate::storage::Storage;
 use crate::ui::management::{ManagementDialogKind, people, projects, tags};
@@ -79,9 +80,12 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         .build()?;
     let storage = runtime.block_on(Storage::connect_from_env())?;
     runtime.block_on(storage.migrate())?;
-    let snapshot = runtime.block_on(storage.load_workspace())?;
     let last_custom_snooze = runtime.block_on(storage.load_last_custom_snooze())?;
-    let mut app_state = AppState::from_snapshot(snapshot);
+    let service = TuidoService::from_storage(&storage);
+    let workspace = runtime.block_on(service.consistent_workspace())?;
+    let mut app_state = AppState::from_snapshot(workspace.snapshot);
+    app_state.workspace_revision = workspace.revision;
+    app_state.entity_revisions = workspace.entity_revisions;
     app_state.last_custom_snooze = last_custom_snooze;
     let store = Rc::new(RefCell::new(Store::new(
         app_state,
@@ -617,9 +621,12 @@ impl TuiNode<AppMsg> for App {
         if self.context.coordinator.borrow_mut().poll() {
             result = result.merge(TickResult::CHANGED);
         }
-        if self.context.coordinator.borrow().has_pending() {
-            result = result.merge(TickResult::scheduled_after(Duration::from_millis(50)));
-        }
+        let delay = if self.context.coordinator.borrow().has_pending() {
+            50
+        } else {
+            500
+        };
+        result = result.merge(TickResult::scheduled_after(Duration::from_millis(delay)));
         result
     }
 
@@ -857,7 +864,9 @@ struct TaskWorkspace {
     visible_task_ids: Vec<String>,
     visible_selection: VisibleTaskSelection,
     table_focused: bool,
+    detail_draft_protected: bool,
     observed_version: u64,
+    observed_external_refresh_version: u64,
 }
 
 #[derive(Debug, Default)]
@@ -908,6 +917,7 @@ impl TaskWorkspace {
         let layout =
             Split::vertical(toolbar, pane).constraints(Constraint::Length(1), Constraint::Min(1));
         let observed_version = context.store.borrow().state().version;
+        let observed_external_refresh_version = state.external_refresh_version;
         Self {
             context,
             layout,
@@ -916,7 +926,9 @@ impl TaskWorkspace {
             visible_task_ids,
             visible_selection,
             table_focused: false,
+            detail_draft_protected: false,
             observed_version,
+            observed_external_refresh_version,
         }
     }
 
@@ -938,17 +950,36 @@ impl TaskWorkspace {
 
     fn sync_store_version(&mut self) {
         let state = self.context.store.borrow().state().clone();
-        if self.observed_version != state.version {
-            self.refresh_from_state(&state, false);
+        let external_refresh =
+            self.observed_external_refresh_version != state.external_refresh_version;
+        if self.observed_version != state.version || external_refresh {
+            let protect_detail = external_refresh
+                && (self.detail_draft_protected || self.context.coordinator.borrow().has_pending());
+            self.refresh_from_state(
+                &state,
+                false,
+                !external_refresh,
+                external_refresh && !protect_detail,
+            );
         }
     }
 
-    fn refresh_from_state(&mut self, state: &AppState, select_first: bool) {
+    fn refresh_from_state(
+        &mut self,
+        state: &AppState,
+        select_first: bool,
+        preserve_position: bool,
+        refresh_detail: bool,
+    ) {
+        let external_refresh =
+            self.observed_external_refresh_version != state.external_refresh_version;
         let previous_task_id = self.table().highlighted_id();
-        let previous_index = previous_task_id.as_ref().and_then(|id| {
-            self.visible_task_ids
-                .iter()
-                .position(|visible_id| visible_id == id)
+        let previous_index = preserve_position.then(|| {
+            previous_task_id.as_ref().and_then(|id| {
+                self.visible_task_ids
+                    .iter()
+                    .position(|visible_id| visible_id == id)
+            })
         });
         let rows = state
             .tasks
@@ -963,7 +994,7 @@ impl TaskWorkspace {
             previous_task_id
                 .filter(|id| contains_id(id))
                 .or_else(|| {
-                    previous_index.and_then(|index| {
+                    previous_index.flatten().and_then(|index| {
                         rows.get(index.min(rows.len().saturating_sub(1)))
                             .map(|task| task.id.clone())
                     })
@@ -981,7 +1012,7 @@ impl TaskWorkspace {
             .as_deref()
             .and_then(|id| state.tasks.iter().find(|task| task.id == id));
         let save_error = selected_task
-            .and_then(|task| state.task_save_error(&task.id))
+            .and_then(|task| state.task_status_error(&task.id))
             .map(str::to_string);
 
         self.visible_task_ids = rows.iter().map(|task| task.id.clone()).collect();
@@ -1004,7 +1035,7 @@ impl TaskWorkspace {
 
         let detail_needs_refresh = self.detail().task_id.as_deref() != selected_task_id.as_deref()
             || self.detail().task_state != selected_task.map(|task| task.state);
-        if detail_needs_refresh {
+        if detail_needs_refresh || refresh_detail {
             self.detail_mut().set_task(
                 selected_task,
                 &state.people,
@@ -1018,6 +1049,9 @@ impl TaskWorkspace {
         }
         self.detail_mut().set_save_error(save_error.as_deref());
         self.observed_version = state.version;
+        if !external_refresh || refresh_detail {
+            self.observed_external_refresh_version = state.external_refresh_version;
+        }
     }
 
     fn sync_task_view_change(&mut self) -> bool {
@@ -1030,7 +1064,7 @@ impl TaskWorkspace {
         self.table_mut().clear_search();
         self.task_view = next_view;
         let state = self.context.store.borrow().state().clone();
-        self.refresh_from_state(&state, true);
+        self.refresh_from_state(&state, true, false, false);
         true
     }
 
@@ -1076,7 +1110,7 @@ impl TaskWorkspace {
             .dispatch(AppEvent::SelectTask(id.to_string()));
         let state = self.context.store.borrow().state().clone();
         let selected_task = state.tasks.iter().find(|task| task.id == id);
-        let save_error = selected_task.and_then(|task| state.task_save_error(&task.id));
+        let save_error = selected_task.and_then(|task| state.task_status_error(&task.id));
         self.detail_mut().set_task(
             selected_task,
             &state.people,
@@ -1101,9 +1135,10 @@ impl TaskWorkspace {
         if !self.drain_detail_patches() {
             return TaskDetailSync::default();
         }
+        self.detail_draft_protected = false;
         let previous_task_id = self.table().highlighted_id();
         let state = self.context.store.borrow().state().clone();
-        self.refresh_from_state(&state, false);
+        self.refresh_from_state(&state, false, true, false);
         let selected_task_id = self.table().highlighted_id();
         TaskDetailSync {
             changed: true,
@@ -1229,6 +1264,15 @@ impl TuiNode<AppMsg> for TaskWorkspace {
             self.table_focused = focused;
         } else if focused {
             self.table_focused = false;
+        }
+        let detail_targeted = target
+            .for_child(&ChildKey::second())
+            .and_then(|target| target.for_child(&ChildKey::second()))
+            .is_some();
+        if detail_targeted {
+            self.detail_draft_protected = focused;
+        } else if focused {
+            self.detail_draft_protected = false;
         }
         self.layout.dispatch_focus(target, focused, ctx);
         let detail_sync = self.sync_detail_changes();
@@ -1746,7 +1790,7 @@ fn task_split(store: &AppStore, task_view: TaskView) -> TaskPane {
     });
     let table = task_table(rows, selected);
     let selected_task = selected.and_then(|id| state.tasks.iter().find(|task| task.id == id));
-    let save_error = selected_task.and_then(|task| state.task_save_error(&task.id));
+    let save_error = selected_task.and_then(|task| state.task_status_error(&task.id));
     let detail = TaskDetailForm::new(
         selected_task,
         &state.people,
@@ -2467,6 +2511,44 @@ pub(crate) mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect()
+    }
+
+    #[test]
+    fn external_refresh_repopulates_selected_task_detail_once_draft_is_safe() {
+        let task = test_task();
+        let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+            tasks: vec![task.clone()],
+            people: vec![],
+            projects: vec![],
+            tags: vec![],
+        });
+        let mut workspace = TaskWorkspace::new(context);
+        workspace.detail_draft_protected = true;
+        let mut refreshed = task;
+        refreshed.title = "Externally changed".into();
+        store.borrow_mut().dispatch(AppEvent::WorkspaceRefreshed {
+            snapshot: WorkspaceSnapshot {
+                tasks: vec![refreshed],
+                people: vec![],
+                projects: vec![],
+                tags: vec![],
+            },
+            revision: 1,
+            entity_revisions: std::collections::HashMap::new(),
+        });
+        let area = Rect::new(0, 0, 100, 30);
+
+        workspace.layout(area, &mut LayoutCtx::new());
+        assert!(rendered_text(workspace.detail(), area).contains("Original"));
+
+        workspace.detail_draft_protected = false;
+        workspace.layout(area, &mut LayoutCtx::new());
+        let detail = rendered_text(workspace.detail(), area);
+        assert!(detail.contains("Externally changed"));
+        assert_eq!(
+            workspace.table().highlighted_id().as_deref(),
+            Some("task-1")
+        );
     }
 
     fn rendered_area_has_focus_style(

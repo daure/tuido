@@ -37,26 +37,37 @@ pub(crate) struct TagsWorkspace {
     context: AppContext,
     split: Split<TagTable, TagDetailForm>,
     observed_version: u64,
+    observed_external_refresh_version: u64,
     table_focused: bool,
+    detail_draft_protected: bool,
 }
 impl TagsWorkspace {
     fn new(context: AppContext) -> Self {
         let split = tag_split(&context);
         let observed_version = context.store.borrow().state().version;
+        let observed_external_refresh_version =
+            context.store.borrow().state().external_refresh_version;
         Self {
             context,
             split,
             observed_version,
+            observed_external_refresh_version,
             table_focused: false,
+            detail_draft_protected: false,
         }
     }
     fn sync_store_version(&mut self) {
         let store = self.context.store.borrow();
         let state = store.state();
         let version = state.version;
-        if self.observed_version == version {
+        let external_refresh =
+            self.observed_external_refresh_version != state.external_refresh_version;
+        if self.observed_version == version && !external_refresh {
             return;
         }
+        let protect_detail = external_refresh
+            && (self.detail_draft_protected || self.context.coordinator.borrow().has_pending());
+        let external_refresh_version = state.external_refresh_version;
         let rows = state.tags.clone();
         let selected_id = state.selected_tag_id.clone();
         let tag = selected_id
@@ -74,7 +85,9 @@ impl TagsWorkspace {
             self.split.first_mut().select_id(id.clone());
         }
         self.split.first_mut().take_events();
-        if self.split.second().tag_id.as_deref() != selected_id.as_deref() {
+        if self.split.second().tag_id.as_deref() != selected_id.as_deref()
+            || (external_refresh && !protect_detail)
+        {
             self.split.second_mut().set_tag(
                 tag.as_ref(),
                 error.as_deref(),
@@ -84,6 +97,9 @@ impl TagsWorkspace {
             self.split.second_mut().set_save_error(error.as_deref());
         }
         self.observed_version = version;
+        if !protect_detail {
+            self.observed_external_refresh_version = external_refresh_version;
+        }
     }
     fn sync_table_events(&mut self, ctx: &mut EventCtx<AppMsg>) {
         let events = self.split.first_mut().take_events();
@@ -146,6 +162,7 @@ impl TagsWorkspace {
             }
         }
         if changed {
+            self.detail_draft_protected = false;
             let store = self.context.store.borrow();
             let state = store.state();
             self.split.first_mut().set_rows(state.tags.clone());
@@ -223,6 +240,11 @@ impl TuiNode<AppMsg> for TagsWorkspace {
             self.table_focused = focused;
         } else if focused {
             self.table_focused = false;
+        }
+        if target.for_child(&ChildKey::second()).is_some() {
+            self.detail_draft_protected = focused;
+        } else if focused {
+            self.detail_draft_protected = false;
         }
         self.split.dispatch_focus(target, focused, ctx);
         if self.sync_detail_changes() {

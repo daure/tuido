@@ -1,12 +1,16 @@
 pub mod app;
 pub mod app_keymap;
 mod calendar;
+pub mod cli;
 mod create_management_dialog;
 mod create_task_dialog;
 mod domain;
+mod mcp;
 mod persistence_coordinator;
+pub mod service;
 mod snooze;
 mod storage;
 mod ui;
 
 pub use app::run;
+pub use mcp::{run_http, run_stdio};

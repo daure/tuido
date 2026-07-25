@@ -22,8 +22,12 @@ pub struct AppState {
     pub selected_project_id: Option<String>,
     pub selected_tag_id: Option<String>,
     pub save_errors: HashMap<SaveTarget, String>,
+    pub refresh_error: Option<String>,
     pub last_custom_snooze: Option<PrimitiveDateTime>,
     pub version: u64,
+    pub external_refresh_version: u64,
+    pub workspace_revision: u64,
+    pub entity_revisions: HashMap<String, u64>,
 }
 
 impl AppState {
@@ -46,12 +50,21 @@ impl AppState {
             tags: snapshot.tags,
             last_custom_snooze,
             save_errors: HashMap::new(),
+            refresh_error: None,
             version: 0,
+            external_refresh_version: 0,
+            workspace_revision: 0,
+            entity_revisions: HashMap::new(),
         }
     }
 
     pub fn task_save_error(&self, task_id: &str) -> Option<&str> {
         self.save_error_for(task_id, |field| matches!(field, SaveEntityField::Task(_)))
+    }
+
+    pub fn task_status_error(&self, task_id: &str) -> Option<&str> {
+        self.task_save_error(task_id)
+            .or(self.refresh_error.as_deref())
     }
 
     pub fn person_save_error(&self, person_id: &str) -> Option<&str> {
@@ -171,6 +184,18 @@ pub enum AppEvent {
         target: SaveTarget,
         error: Option<String>,
     },
+    EntityRevisionCommitted {
+        key: String,
+        revision: Option<u64>,
+    },
+    EntityRevisionsMerged(HashMap<String, u64>),
+    WorkspaceRefreshed {
+        snapshot: WorkspaceSnapshot,
+        revision: u64,
+        entity_revisions: HashMap<String, u64>,
+    },
+    RefreshFailed(String),
+    RefreshSucceeded,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -489,7 +514,74 @@ pub fn reduce_app_state(state: &mut AppState, event: AppEvent) -> DispatchOutcom
                 DispatchOutcome::unchanged()
             }
         }
+        AppEvent::EntityRevisionCommitted { key, revision } => {
+            if let Some(revision) = revision {
+                state.entity_revisions.insert(key, revision);
+            } else {
+                state.entity_revisions.remove(&key);
+            }
+            state.workspace_revision += 1;
+            DispatchOutcome::unchanged()
+        }
+        AppEvent::EntityRevisionsMerged(revisions) => {
+            state.entity_revisions.extend(revisions);
+            DispatchOutcome::unchanged()
+        }
+        AppEvent::WorkspaceRefreshed {
+            snapshot,
+            revision,
+            entity_revisions,
+        } => {
+            let selected_task = state.selected_task_id.clone();
+            let selected_person = state.selected_person_id.clone();
+            let selected_project = state.selected_project_id.clone();
+            let selected_tag = state.selected_tag_id.clone();
+            state.tasks = snapshot.tasks;
+            state.people = snapshot.people;
+            state.projects = snapshot.projects;
+            state.tags = snapshot.tags;
+            state.selected_task_id = retained_selection(selected_task, &state.tasks, |v| &v.id);
+            state.selected_person_id =
+                retained_selection(selected_person, &state.people, |v| &v.id);
+            state.selected_project_id =
+                retained_selection(selected_project, &state.projects, |v| &v.id);
+            state.selected_tag_id = retained_selection(selected_tag, &state.tags, |v| &v.id);
+            state.workspace_revision = revision;
+            state.entity_revisions = entity_revisions;
+            state.refresh_error = None;
+            state.external_refresh_version += 1;
+            state.version += 1;
+            DispatchOutcome::layout()
+        }
+        AppEvent::RefreshFailed(error) => {
+            let message = format!("Workspace refresh failed: {error}");
+            if state.refresh_error.as_deref() == Some(&message) {
+                DispatchOutcome::unchanged()
+            } else {
+                state.refresh_error = Some(message);
+                state.version += 1;
+                DispatchOutcome::changed()
+            }
+        }
+        AppEvent::RefreshSucceeded => {
+            if state.refresh_error.take().is_some() {
+                state.version += 1;
+                DispatchOutcome::changed()
+            } else {
+                DispatchOutcome::unchanged()
+            }
+        }
     }
+}
+
+fn retained_selection<T>(
+    selected: Option<String>,
+    values: &[T],
+    id: impl Fn(&T) -> &String,
+) -> Option<String> {
+    selected
+        .filter(|selected| values.iter().any(|value| id(value) == selected))
+        .or_else(|| values.first().map(id).cloned())
 }
 
 #[derive(Debug, Clone)]
@@ -754,12 +846,20 @@ impl TaskState {
 
     pub fn parse(value: &str) -> Option<Self> {
         match value {
-            "todo" | "clarify" | "next" | "waiting" => Some(Self::Todo),
-            "in_progress" | "doing" => Some(Self::InProgress),
+            "todo" => Some(Self::Todo),
+            "in_progress" => Some(Self::InProgress),
             "done" => Some(Self::Done),
             "snoozed" => Some(Self::Snoozed),
             "rejected" => Some(Self::Rejected),
             _ => None,
+        }
+    }
+
+    pub(crate) fn parse_persisted(value: &str) -> Option<Self> {
+        match value {
+            "clarify" | "next" | "waiting" => Some(Self::Todo),
+            "doing" => Some(Self::InProgress),
+            value => Self::parse(value),
         }
     }
 }
@@ -852,6 +952,9 @@ fn apply_task_patch(task: &mut Task, available_tags: &mut Vec<Tag>, patch: &Task
         }
         TaskPatch::State(value) if task.state != *value => {
             task.state = *value;
+            if *value != TaskState::Snoozed {
+                task.snoozed_until = None;
+            }
             true
         }
         TaskPatch::Size(value) if task.size != *value => {
@@ -1290,4 +1393,29 @@ mod tests {
             Some("person-1")
         );
     }
+}
+#[test]
+fn completing_snoozed_task_clears_snooze_timestamp() {
+    let mut task =
+        Task::quick_capture("task".into(), "Task".into(), String::new(), TaskSize::Small);
+    task.state = TaskState::Snoozed;
+    task.snoozed_until = Some(time::macros::datetime!(2026-07-25 08:00));
+    let mut state = AppState::from_snapshot(WorkspaceSnapshot {
+        tasks: vec![task],
+        people: Vec::new(),
+        projects: Vec::new(),
+        tags: Vec::new(),
+    });
+
+    let outcome = reduce_app_state(
+        &mut state,
+        AppEvent::PatchTask {
+            task_id: "task".into(),
+            patch: TaskPatch::State(TaskState::Done),
+        },
+    );
+
+    assert!(outcome.changed);
+    assert_eq!(state.tasks[0].state, TaskState::Done);
+    assert_eq!(state.tasks[0].snoozed_until, None);
 }

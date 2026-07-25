@@ -38,18 +38,24 @@ pub(crate) struct PeopleWorkspace {
     context: AppContext,
     split: Split<PersonTable, PersonDetailForm>,
     observed_version: u64,
+    observed_external_refresh_version: u64,
     table_focused: bool,
+    detail_draft_protected: bool,
 }
 
 impl PeopleWorkspace {
     fn new(context: AppContext) -> Self {
         let split = person_split(&context);
         let observed_version = context.store.borrow().state().version;
+        let observed_external_refresh_version =
+            context.store.borrow().state().external_refresh_version;
         Self {
             context,
             split,
             observed_version,
+            observed_external_refresh_version,
             table_focused: false,
+            detail_draft_protected: false,
         }
     }
 
@@ -57,9 +63,14 @@ impl PeopleWorkspace {
         let store = self.context.store.borrow();
         let state = store.state();
         let version = state.version;
-        if self.observed_version == version {
+        let external_refresh =
+            self.observed_external_refresh_version != state.external_refresh_version;
+        if self.observed_version == version && !external_refresh {
             return;
         }
+        let protect_detail = external_refresh
+            && (self.detail_draft_protected || self.context.coordinator.borrow().has_pending());
+        let external_refresh_version = state.external_refresh_version;
         let rows = state.people.clone();
         let selected_id = state.selected_person_id.clone();
         let person = selected_id
@@ -77,7 +88,9 @@ impl PeopleWorkspace {
             self.split.first_mut().select_id(id.clone());
         }
         self.split.first_mut().take_events();
-        if self.split.second().person_id.as_deref() != selected_id.as_deref() {
+        if self.split.second().person_id.as_deref() != selected_id.as_deref()
+            || (external_refresh && !protect_detail)
+        {
             self.split.second_mut().set_person(
                 person.as_ref(),
                 save_error.as_deref(),
@@ -89,6 +102,9 @@ impl PeopleWorkspace {
                 .set_save_error(save_error.as_deref());
         }
         self.observed_version = version;
+        if !protect_detail {
+            self.observed_external_refresh_version = external_refresh_version;
+        }
     }
 
     fn sync_table_events(&mut self, ctx: &mut EventCtx<AppMsg>) {
@@ -154,6 +170,7 @@ impl PeopleWorkspace {
             }
         }
         if changed {
+            self.detail_draft_protected = false;
             let store = self.context.store.borrow();
             let state = store.state();
             self.split.first_mut().set_rows(state.people.clone());
@@ -239,6 +256,11 @@ impl TuiNode<AppMsg> for PeopleWorkspace {
             self.table_focused = focused;
         } else if focused {
             self.table_focused = false;
+        }
+        if target.for_child(&ChildKey::second()).is_some() {
+            self.detail_draft_protected = focused;
+        } else if focused {
+            self.detail_draft_protected = false;
         }
         self.split.dispatch_focus(target, focused, ctx);
         if self.sync_detail_changes() {
@@ -546,6 +568,44 @@ mod tests {
             matches!(patches.as_slice(), [(id, PersonPatch::Name(name))] if id == "person-1" && name == "Ada Lovelace")
         );
         assert!(rendered_text(&workspace, area).contains("Save failed"));
+    }
+
+    #[test]
+    fn external_refresh_repopulates_selected_person_detail_once_draft_is_safe() {
+        let person = Person::new("person-1".into(), "Ada".into(), String::new());
+        let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+            tasks: vec![],
+            people: vec![person.clone()],
+            projects: vec![],
+            tags: vec![],
+        });
+        let mut workspace = PeopleWorkspace::new(context);
+        workspace.detail_draft_protected = true;
+        let mut refreshed = person;
+        refreshed.name = "Ada Lovelace".into();
+        store.borrow_mut().dispatch(AppEvent::WorkspaceRefreshed {
+            snapshot: WorkspaceSnapshot {
+                tasks: vec![],
+                people: vec![refreshed],
+                projects: vec![],
+                tags: vec![],
+            },
+            revision: 1,
+            entity_revisions: std::collections::HashMap::new(),
+        });
+        let area = Rect::new(0, 0, 100, 30);
+
+        workspace.layout(area, &mut LayoutCtx::new());
+        assert!(rendered_text(workspace.split.second(), area).contains("Ada"));
+        assert!(!rendered_text(workspace.split.second(), area).contains("Ada Lovelace"));
+
+        workspace.detail_draft_protected = false;
+        workspace.layout(area, &mut LayoutCtx::new());
+        assert!(rendered_text(workspace.split.second(), area).contains("Ada Lovelace"));
+        assert_eq!(
+            workspace.split.first().highlighted_id().as_deref(),
+            Some("person-1")
+        );
     }
 
     #[test]

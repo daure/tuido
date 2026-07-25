@@ -15,7 +15,8 @@ use crate::{
         AppEvent, AppState, Person, PersonDeletion, PersonPatch, Project, ProjectDeletion,
         ProjectPatch, SaveTarget, Tag, TagDeletion, TagPatch, Task, TaskField, TaskPatch,
     },
-    storage::{self, SqlDialect},
+    service::TuidoService,
+    storage::SqlDialect,
 };
 
 pub(crate) type AppStore =
@@ -67,18 +68,30 @@ struct Completion {
     sequence: u64,
     command: PersistenceCommand,
     error: Option<String>,
+    related_revisions: HashMap<String, u64>,
+}
+
+struct RefreshCompletion {
+    snapshot: crate::domain::WorkspaceSnapshot,
+    revision: u64,
+    revisions: HashMap<String, u64>,
 }
 
 pub(crate) struct PersistenceCoordinator {
     store: AppStore,
-    pool: AnyPool,
-    dialect: SqlDialect,
+    service: TuidoService,
     runtime: Handle,
     completion_tx: mpsc::Sender<Completion>,
     completion_rx: mpsc::Receiver<Completion>,
     active: HashMap<CommandKey, u64>,
+    active_expected: HashMap<u64, Option<u64>>,
     queued: HashMap<CommandKey, VecDeque<PersistenceCommand>>,
     next_sequence: u64,
+    refresh_tx: mpsc::Sender<Result<RefreshCompletion, String>>,
+    refresh_rx: mpsc::Receiver<Result<RefreshCompletion, String>>,
+    refresh_inflight: bool,
+    reconcile_required: bool,
+    last_refresh_check: Instant,
 }
 
 impl PersistenceCoordinator {
@@ -89,16 +102,22 @@ impl PersistenceCoordinator {
         runtime: Handle,
     ) -> Self {
         let (completion_tx, completion_rx) = mpsc::channel();
+        let (refresh_tx, refresh_rx) = mpsc::channel();
         Self {
             store,
-            pool,
-            dialect,
+            service: TuidoService::from_parts(pool, dialect),
             runtime,
             completion_tx,
             completion_rx,
             active: HashMap::new(),
+            active_expected: HashMap::new(),
             queued: HashMap::new(),
             next_sequence: 0,
+            refresh_tx,
+            refresh_rx,
+            refresh_inflight: false,
+            reconcile_required: false,
+            last_refresh_check: Instant::now(),
         }
     }
 
@@ -147,7 +166,68 @@ impl PersistenceCoordinator {
         while let Ok(completion) = self.completion_rx.try_recv() {
             changed |= self.finish(completion);
         }
+        while let Ok(result) = self.refresh_rx.try_recv() {
+            self.refresh_inflight = false;
+            match result {
+                Ok(refresh) if !self.has_pending() => {
+                    let current = self.store.borrow().state().workspace_revision;
+                    if self.reconcile_required || refresh.revision != current {
+                        self.reconcile_required = false;
+                        changed |= self
+                            .store
+                            .borrow_mut()
+                            .dispatch(AppEvent::WorkspaceRefreshed {
+                                snapshot: refresh.snapshot,
+                                revision: refresh.revision,
+                                entity_revisions: refresh.revisions,
+                            })
+                            .changed;
+                    } else {
+                        changed |= self
+                            .store
+                            .borrow_mut()
+                            .dispatch(AppEvent::RefreshSucceeded)
+                            .changed;
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    changed |= self
+                        .store
+                        .borrow_mut()
+                        .dispatch(AppEvent::RefreshFailed(error))
+                        .changed;
+                }
+            }
+        }
+        if !self.refresh_inflight
+            && !self.has_pending()
+            && (self.reconcile_required
+                || self.last_refresh_check.elapsed() >= Duration::from_millis(500))
+        {
+            self.start_refresh();
+        }
         changed
+    }
+
+    fn start_refresh(&mut self) {
+        self.refresh_inflight = true;
+        self.last_refresh_check = Instant::now();
+        let service = self.service.clone();
+        let tx = self.refresh_tx.clone();
+        self.runtime.spawn(async move {
+            let result = async {
+                let workspace = service.consistent_workspace().await?;
+                Ok(RefreshCompletion {
+                    revision: workspace.revision,
+                    revisions: workspace.entity_revisions,
+                    snapshot: workspace.snapshot,
+                })
+            }
+            .await
+            .map_err(|e: crate::service::ServiceError| e.to_string());
+            let _ = tx.send(result);
+        });
     }
 
     pub(crate) fn has_pending(&self) -> bool {
@@ -176,16 +256,29 @@ impl PersistenceCoordinator {
         let sequence = self.next_sequence;
         self.next_sequence += 1;
         self.active.insert(key.clone(), sequence);
-        let pool = self.pool.clone();
-        let dialect = self.dialect;
+        let service = self.service.clone();
+        let expected_revision = command_entity(&command).and_then(|(kind, id)| {
+            self.store
+                .borrow()
+                .state()
+                .entity_revisions
+                .get(&format!("{kind}:{id}"))
+                .copied()
+        });
+        self.active_expected.insert(sequence, expected_revision);
         let tx = self.completion_tx.clone();
         self.runtime.spawn(async move {
-            let result = execute(pool, dialect, command.clone()).await;
+            let result = execute(service, command.clone(), expected_revision).await;
+            let (error, related_revisions) = match result {
+                Ok(revisions) => (None, revisions),
+                Err(error) => (Some(error.to_string()), HashMap::new()),
+            };
             let _ = tx.send(Completion {
                 key,
                 sequence,
                 command,
-                error: result.err().map(|error| error.to_string()),
+                error,
+                related_revisions,
             });
         });
     }
@@ -195,7 +288,34 @@ impl PersistenceCoordinator {
             return false;
         }
         self.active.remove(&completion.key);
+        let committed_expected = self.active_expected.remove(&completion.sequence).flatten();
+        if completion.error.is_none()
+            && let Some((key, revision)) = revision_update(&completion.command, committed_expected)
+        {
+            self.store
+                .borrow_mut()
+                .dispatch(AppEvent::EntityRevisionCommitted { key, revision });
+        }
+        if completion.error.is_none() {
+            let cascade_revisions = cascade_revision_updates(
+                &completion.command,
+                &self.store.borrow().state().entity_revisions,
+            );
+            if !cascade_revisions.is_empty() {
+                self.store
+                    .borrow_mut()
+                    .dispatch(AppEvent::EntityRevisionsMerged(cascade_revisions));
+            }
+        }
+        if !completion.related_revisions.is_empty() {
+            self.store
+                .borrow_mut()
+                .dispatch(AppEvent::EntityRevisionsMerged(
+                    completion.related_revisions.clone(),
+                ));
+        }
         if completion.error.is_some() {
+            self.reconcile_required = true;
             preserve_failed_active_custom(
                 &completion.command,
                 self.queued.get_mut(&completion.key),
@@ -381,42 +501,156 @@ impl PersistenceCoordinator {
 }
 
 async fn execute(
-    pool: AnyPool,
-    dialect: SqlDialect,
+    service: TuidoService,
     command: PersistenceCommand,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    expected_revision: Option<u64>,
+) -> Result<HashMap<String, u64>, Box<dyn std::error::Error + Send + Sync>> {
+    let expected = || -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+        expected_revision.ok_or_else(|| "missing entity revision; refresh required".into())
+    };
+    let related_revisions = match command {
+        PersistenceCommand::CreateTask(task) => service
+            .create_task_entity(task)
+            .await
+            .map(|_| HashMap::new())
+            .map_err(boxed_service_error),
+        PersistenceCommand::DeleteTask(task) => service
+            .delete_task(&task.id, expected()?)
+            .await
+            .map(|_| HashMap::new())
+            .map_err(boxed_service_error),
+        PersistenceCommand::CreatePerson(person) => service
+            .create_person_entity(person)
+            .await
+            .map(|_| HashMap::new())
+            .map_err(boxed_service_error),
+        PersistenceCommand::DeletePerson(deletion) => service
+            .delete_person(&deletion.person.id, expected()?)
+            .await
+            .map(|_| HashMap::new())
+            .map_err(boxed_service_error),
+        PersistenceCommand::CreateProject(project) => service
+            .create_project_entity(project)
+            .await
+            .map(|_| HashMap::new())
+            .map_err(boxed_service_error),
+        PersistenceCommand::DeleteProject(deletion) => service
+            .delete_project(&deletion.project.id, expected()?)
+            .await
+            .map(|_| HashMap::new())
+            .map_err(boxed_service_error),
+        PersistenceCommand::CreateTag(tag) => service
+            .create_tag_entity(tag)
+            .await
+            .map(|_| HashMap::new())
+            .map_err(boxed_service_error),
+        PersistenceCommand::DeleteTag(deletion) => service
+            .delete_tag(&deletion.tag.id, expected()?)
+            .await
+            .map(|_| HashMap::new())
+            .map_err(boxed_service_error),
+        PersistenceCommand::PatchTask(id, patch) => service
+            .patch_task(id, expected()?, patch)
+            .await
+            .map(|result| result.related_revisions)
+            .map_err(boxed_service_error),
+        PersistenceCommand::PatchPerson(id, patch) => service
+            .patch_person(id, expected()?, patch)
+            .await
+            .map(|_| HashMap::new())
+            .map_err(boxed_service_error),
+        PersistenceCommand::PatchProject(id, patch) => service
+            .patch_project(id, expected()?, patch)
+            .await
+            .map(|_| HashMap::new())
+            .map_err(boxed_service_error),
+        PersistenceCommand::PatchTag(id, patch) => service
+            .patch_tag(id, expected()?, patch)
+            .await
+            .map(|_| HashMap::new())
+            .map_err(boxed_service_error),
+    }?;
+    Ok(related_revisions)
+}
+
+fn boxed_service_error(
+    error: crate::service::ServiceError,
+) -> Box<dyn std::error::Error + Send + Sync> {
+    Box::new(error)
+}
+
+fn command_entity(command: &PersistenceCommand) -> Option<(&'static str, &str)> {
     match command {
-        PersistenceCommand::CreateTask(task) => storage::create_task(pool, dialect, task).await,
-        PersistenceCommand::DeleteTask(task) => storage::delete_task(pool, dialect, task.id).await,
-        PersistenceCommand::CreatePerson(person) => {
-            storage::create_person(pool, dialect, person).await
+        PersistenceCommand::CreateTask(_)
+        | PersistenceCommand::CreatePerson(_)
+        | PersistenceCommand::CreateProject(_)
+        | PersistenceCommand::CreateTag(_) => None,
+        PersistenceCommand::DeleteTask(v) => Some(("task", &v.id)),
+        PersistenceCommand::PatchTask(id, _) => Some(("task", id)),
+        PersistenceCommand::DeletePerson(v) => Some(("person", &v.person.id)),
+        PersistenceCommand::PatchPerson(id, _) => Some(("person", id)),
+        PersistenceCommand::DeleteProject(v) => Some(("project", &v.project.id)),
+        PersistenceCommand::PatchProject(id, _) => Some(("project", id)),
+        PersistenceCommand::DeleteTag(v) => Some(("tag", &v.tag.id)),
+        PersistenceCommand::PatchTag(id, _) => Some(("tag", id)),
+    }
+}
+
+fn revision_update(
+    command: &PersistenceCommand,
+    expected: Option<u64>,
+) -> Option<(String, Option<u64>)> {
+    if let Some((kind, id)) = command_entity(command) {
+        let key = format!("{kind}:{id}");
+        if matches!(
+            command,
+            PersistenceCommand::DeleteTask(_)
+                | PersistenceCommand::DeletePerson(_)
+                | PersistenceCommand::DeleteProject(_)
+                | PersistenceCommand::DeleteTag(_)
+        ) {
+            Some((key, None))
+        } else {
+            expected.map(|expected| (key, Some(expected + 1)))
         }
+    } else {
+        let (kind, id) = match command {
+            PersistenceCommand::CreateTask(v) => ("task", v.id.as_str()),
+            PersistenceCommand::CreatePerson(v) => ("person", v.id.as_str()),
+            PersistenceCommand::CreateProject(v) => ("project", v.id.as_str()),
+            PersistenceCommand::CreateTag(v) => ("tag", v.id.as_str()),
+            _ => return None,
+        };
+        Some((format!("{kind}:{id}"), Some(1)))
+    }
+}
+
+fn cascade_revision_updates(
+    command: &PersistenceCommand,
+    current: &HashMap<String, u64>,
+) -> HashMap<String, u64> {
+    let mut keys = Vec::new();
+    match command {
         PersistenceCommand::DeletePerson(deletion) => {
-            storage::delete_person(pool, dialect, deletion.person.id).await
-        }
-        PersistenceCommand::CreateProject(project) => {
-            storage::create_project(pool, dialect, project).await
+            keys.extend(deletion.task_ids.iter().map(|id| format!("task:{id}")));
+            keys.extend(
+                deletion
+                    .lead_project_ids
+                    .iter()
+                    .map(|id| format!("project:{id}")),
+            );
         }
         PersistenceCommand::DeleteProject(deletion) => {
-            storage::delete_project(pool, dialect, deletion.project.id).await
+            keys.extend(deletion.task_ids.iter().map(|id| format!("task:{id}")));
         }
-        PersistenceCommand::CreateTag(tag) => storage::create_tag(pool, dialect, tag).await,
         PersistenceCommand::DeleteTag(deletion) => {
-            storage::delete_tag(pool, dialect, deletion.tag.id).await
+            keys.extend(deletion.task_ids.iter().map(|id| format!("task:{id}")));
         }
-        PersistenceCommand::PatchTask(id, patch) => {
-            storage::save_patch(pool, dialect, id, patch).await
-        }
-        PersistenceCommand::PatchPerson(id, patch) => {
-            storage::save_person_patch(pool, dialect, id, patch).await
-        }
-        PersistenceCommand::PatchProject(id, patch) => {
-            storage::save_project_patch(pool, dialect, id, patch).await
-        }
-        PersistenceCommand::PatchTag(id, patch) => {
-            storage::save_tag_patch(pool, dialect, id, patch).await
-        }
+        _ => {}
     }
+    keys.into_iter()
+        .filter_map(|key| current.get(&key).map(|revision| (key, revision + 1)))
+        .collect()
 }
 
 fn coalesce_task_field(patch: &TaskPatch) -> TaskField {
@@ -543,13 +777,19 @@ mod tests {
     }
 
     fn test_store(tasks: Vec<Task>) -> AppStore {
+        let revisions = tasks
+            .iter()
+            .map(|task| (format!("task:{}", task.id), 1))
+            .collect();
+        let mut state = AppState::from_snapshot(WorkspaceSnapshot {
+            tasks,
+            people: Vec::new(),
+            projects: Vec::new(),
+            tags: Vec::new(),
+        });
+        state.entity_revisions = revisions;
         Rc::new(RefCell::new(Store::new(
-            AppState::from_snapshot(WorkspaceSnapshot {
-                tasks,
-                people: Vec::new(),
-                projects: Vec::new(),
-                tags: Vec::new(),
-            }),
+            state,
             reduce_app_state as fn(&mut AppState, AppEvent) -> tuicore::DispatchOutcome,
         )))
     }
@@ -587,6 +827,26 @@ mod tests {
         )
     }
 
+    fn persist_task(runtime: &tokio::runtime::Runtime, pool: &AnyPool, task: Task) {
+        runtime
+            .block_on(
+                TuidoService::from_parts(pool.clone(), SqlDialect::Sqlite).create_task_entity(task),
+            )
+            .expect("task creates through service");
+    }
+
+    fn settle(coordinator: &mut PersistenceCoordinator) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while coordinator.has_pending()
+            || coordinator.reconcile_required
+            || coordinator.refresh_inflight
+        {
+            assert!(Instant::now() < deadline, "coordinator settles");
+            coordinator.poll();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     #[test]
     fn create_finishes_before_queued_patch() {
         let (runtime, pool) = test_database();
@@ -606,6 +866,167 @@ mod tests {
             .try_get("title")
             .expect("title decodes");
         assert_eq!(title, "Patched");
+    }
+
+    #[test]
+    fn stale_patch_reloads_authoritative_task_after_pending_write_drains() {
+        let (runtime, pool) = test_database();
+        let task = test_task("task-1");
+        persist_task(&runtime, &pool, task.clone());
+        let store = test_store(vec![task]);
+        let service = TuidoService::from_parts(pool.clone(), SqlDialect::Sqlite);
+        runtime
+            .block_on(service.patch_task(
+                "task-1".into(),
+                1,
+                TaskPatch::Title("External winner".into()),
+            ))
+            .unwrap();
+        store.borrow_mut().dispatch(AppEvent::PatchTask {
+            task_id: "task-1".into(),
+            patch: TaskPatch::Title("Optimistic loser".into()),
+        });
+        let mut coordinator = test_coordinator(&runtime, &pool, Rc::clone(&store));
+
+        coordinator.submit(PersistenceCommand::PatchTask(
+            "task-1".into(),
+            TaskPatch::Title("Optimistic loser".into()),
+        ));
+        settle(&mut coordinator);
+
+        let state = store.borrow();
+        assert_eq!(state.state().tasks[0].title, "External winner");
+        assert!(state.state().task_save_error("task-1").is_some());
+        assert_eq!(state.state().entity_revisions["task:task-1"], 2);
+    }
+
+    #[test]
+    fn invalid_snoozed_state_patch_reloads_authoritative_task() {
+        let (runtime, pool) = test_database();
+        let task = test_task("task-1");
+        persist_task(&runtime, &pool, task.clone());
+        let store = test_store(vec![task]);
+        store.borrow_mut().dispatch(AppEvent::PatchTask {
+            task_id: "task-1".into(),
+            patch: TaskPatch::State(crate::domain::TaskState::Snoozed),
+        });
+        let mut coordinator = test_coordinator(&runtime, &pool, Rc::clone(&store));
+
+        coordinator.submit(PersistenceCommand::PatchTask(
+            "task-1".into(),
+            TaskPatch::State(crate::domain::TaskState::Snoozed),
+        ));
+        settle(&mut coordinator);
+
+        let state = store.borrow();
+        assert_eq!(state.state().tasks[0].state, crate::domain::TaskState::Todo);
+        assert!(state.state().task_save_error("task-1").is_some());
+    }
+
+    #[test]
+    fn snoozed_to_done_success_clears_optimistic_and_persisted_timestamp() {
+        let (runtime, pool) = test_database();
+        let mut task = test_task("task-1");
+        task.state = crate::domain::TaskState::Snoozed;
+        task.snoozed_until = Some(time::macros::datetime!(2026-07-25 08:00));
+        persist_task(&runtime, &pool, task.clone());
+        let store = test_store(vec![task]);
+        store.borrow_mut().dispatch(AppEvent::PatchTask {
+            task_id: "task-1".into(),
+            patch: TaskPatch::State(crate::domain::TaskState::Done),
+        });
+        let mut coordinator = test_coordinator(&runtime, &pool, Rc::clone(&store));
+
+        coordinator.submit(PersistenceCommand::PatchTask(
+            "task-1".into(),
+            TaskPatch::State(crate::domain::TaskState::Done),
+        ));
+        assert!(coordinator.drain(Duration::from_secs(2)));
+
+        {
+            let state = store.borrow();
+            let optimistic = &state.state().tasks[0];
+            assert_eq!(optimistic.state, crate::domain::TaskState::Done);
+            assert_eq!(optimistic.snoozed_until, None);
+        }
+        let persisted = runtime
+            .block_on(TuidoService::from_parts(pool, SqlDialect::Sqlite).get_task("task-1"))
+            .unwrap();
+        assert_eq!(persisted.value.state, "done");
+        assert_eq!(persisted.value.snoozed_until, None);
+    }
+
+    #[test]
+    fn refresh_failure_is_visible_and_success_clears_it() {
+        let (runtime, pool) = test_database();
+        let store = test_store(Vec::new());
+        let mut coordinator = test_coordinator(&runtime, &pool, Rc::clone(&store));
+        coordinator
+            .refresh_tx
+            .send(Err("database unavailable".into()))
+            .unwrap();
+
+        assert!(coordinator.poll());
+        assert_eq!(
+            store.borrow().state().refresh_error.as_deref(),
+            Some("Workspace refresh failed: database unavailable")
+        );
+
+        coordinator
+            .refresh_tx
+            .send(Ok(RefreshCompletion {
+                snapshot: WorkspaceSnapshot {
+                    tasks: Vec::new(),
+                    people: Vec::new(),
+                    projects: Vec::new(),
+                    tags: Vec::new(),
+                },
+                revision: 1,
+                revisions: HashMap::new(),
+            }))
+            .unwrap();
+        assert!(coordinator.poll());
+        assert_eq!(store.borrow().state().refresh_error, None);
+    }
+
+    #[test]
+    fn duplicate_tag_patch_reloads_authoritative_label() {
+        let (runtime, pool) = test_database();
+        let service = TuidoService::from_parts(pool.clone(), SqlDialect::Sqlite);
+        let first = Tag::new("tag-1".into(), "api".into());
+        let second = Tag::new("tag-2".into(), "backend".into());
+        runtime
+            .block_on(service.create_tag_entity(first.clone()))
+            .unwrap();
+        runtime
+            .block_on(service.create_tag_entity(second.clone()))
+            .unwrap();
+        let mut state = AppState::from_snapshot(WorkspaceSnapshot {
+            tasks: Vec::new(),
+            people: Vec::new(),
+            projects: Vec::new(),
+            tags: vec![first, second],
+        });
+        state.entity_revisions = HashMap::from([("tag:tag-1".into(), 1), ("tag:tag-2".into(), 1)]);
+        let store = Rc::new(RefCell::new(Store::new(
+            state,
+            reduce_app_state as fn(&mut AppState, AppEvent) -> tuicore::DispatchOutcome,
+        )));
+        store.borrow_mut().dispatch(AppEvent::PatchTag {
+            tag_id: "tag-2".into(),
+            patch: TagPatch::Label("api".into()),
+        });
+        let mut coordinator = test_coordinator(&runtime, &pool, Rc::clone(&store));
+
+        coordinator.submit(PersistenceCommand::PatchTag(
+            "tag-2".into(),
+            TagPatch::Label("api".into()),
+        ));
+        settle(&mut coordinator);
+
+        let state = store.borrow();
+        assert_eq!(state.state().tags[1].label, "backend");
+        assert!(state.state().tag_save_error("tag-2").is_some());
     }
 
     #[test]
@@ -682,13 +1103,7 @@ mod tests {
     fn failed_active_patch_defers_completion_to_successful_queued_patch() {
         let (runtime, pool) = test_database();
         let task = test_task("task-1");
-        runtime
-            .block_on(storage::create_task(
-                pool.clone(),
-                SqlDialect::Sqlite,
-                task.clone(),
-            ))
-            .expect("task creates");
+        persist_task(&runtime, &pool, task.clone());
         let store = test_store(vec![task]);
         store.borrow_mut().dispatch(AppEvent::SaveCompleted {
             target: SaveTarget::task("task-1".to_string(), crate::domain::TaskField::Detail),
@@ -715,6 +1130,7 @@ mod tests {
                 TaskPatch::Title("Superseded".to_string()),
             ),
             error: Some("active title failure".to_string()),
+            related_revisions: HashMap::new(),
         }));
         assert!(coordinator.drain(Duration::from_secs(2)));
 
@@ -727,13 +1143,7 @@ mod tests {
     fn custom_snooze_then_state_then_quick_keeps_last_custom_and_latest_workflow_order() {
         let (runtime, pool) = test_database();
         let task = test_task("task-1");
-        runtime
-            .block_on(storage::create_task(
-                pool.clone(),
-                SqlDialect::Sqlite,
-                task.clone(),
-            ))
-            .unwrap();
+        persist_task(&runtime, &pool, task.clone());
         let mut coordinator = test_coordinator(&runtime, &pool, test_store(vec![task]));
         let key = CommandKey::Task;
         coordinator.active.insert(key.clone(), 41);
@@ -788,6 +1198,7 @@ mod tests {
                 TaskPatch::Title("active".into()),
             ),
             error: None,
+            related_revisions: HashMap::new(),
         });
         assert!(coordinator.drain(Duration::from_secs(2)));
 
@@ -820,13 +1231,7 @@ mod tests {
     fn custom_snooze_replaced_before_execution_preserves_remembered_value() {
         let (runtime, pool) = test_database();
         let task = test_task("task-1");
-        runtime
-            .block_on(storage::create_task(
-                pool.clone(),
-                SqlDialect::Sqlite,
-                task.clone(),
-            ))
-            .unwrap();
+        persist_task(&runtime, &pool, task.clone());
         let mut coordinator = test_coordinator(&runtime, &pool, test_store(vec![task]));
         let key = CommandKey::Task;
         coordinator.active.insert(key.clone(), 42);
@@ -868,6 +1273,7 @@ mod tests {
                 TaskPatch::Detail("active".into()),
             ),
             error: None,
+            related_revisions: HashMap::new(),
         });
         assert!(coordinator.drain(Duration::from_secs(2)));
         let task_row = runtime
@@ -896,9 +1302,7 @@ mod tests {
         let task_a = test_task("task-a");
         let task_b = test_task("task-b");
         for task in [task_a.clone(), task_b.clone()] {
-            runtime
-                .block_on(storage::create_task(pool.clone(), SqlDialect::Sqlite, task))
-                .unwrap();
+            persist_task(&runtime, &pool, task);
         }
         let mut coordinator = test_coordinator(&runtime, &pool, test_store(vec![task_a, task_b]));
         let key = CommandKey::Task;
@@ -970,6 +1374,7 @@ mod tests {
                 TaskPatch::Title("active".into()),
             ),
             error: None,
+            related_revisions: HashMap::new(),
         });
         assert!(coordinator.drain(Duration::from_secs(2)));
 
@@ -996,13 +1401,7 @@ mod tests {
     fn custom_snooze_then_unsnooze_preserves_setting_and_latest_workflow_order() {
         let (runtime, pool) = test_database();
         let task = test_task("task-1");
-        runtime
-            .block_on(storage::create_task(
-                pool.clone(),
-                SqlDialect::Sqlite,
-                task.clone(),
-            ))
-            .unwrap();
+        persist_task(&runtime, &pool, task.clone());
         let mut coordinator = test_coordinator(&runtime, &pool, test_store(vec![task]));
         let key = CommandKey::Task;
         coordinator.active.insert(key.clone(), 45);
@@ -1038,6 +1437,7 @@ mod tests {
                 TaskPatch::Detail("active".into()),
             ),
             error: None,
+            related_revisions: HashMap::new(),
         });
         assert!(coordinator.drain(Duration::from_secs(2)));
 
@@ -1067,13 +1467,7 @@ mod tests {
     fn failed_active_custom_snooze_is_not_suppressed_by_queued_state() {
         let (runtime, pool) = test_database();
         let task = test_task("task-1");
-        runtime
-            .block_on(storage::create_task(
-                pool.clone(),
-                SqlDialect::Sqlite,
-                task.clone(),
-            ))
-            .unwrap();
+        persist_task(&runtime, &pool, task.clone());
         let store = test_store(vec![task]);
         let mut coordinator = test_coordinator(&runtime, &pool, Rc::clone(&store));
         let key = CommandKey::Task;
@@ -1095,6 +1489,7 @@ mod tests {
                 },
             ),
             error: Some("custom snooze failed".into()),
+            related_revisions: HashMap::new(),
         }));
         assert!(coordinator.drain(Duration::from_secs(2)));
 
@@ -1111,13 +1506,7 @@ mod tests {
     fn failed_active_custom_merges_into_queued_quick_compound_snooze() {
         let (runtime, pool) = test_database();
         let task = test_task("task-1");
-        runtime
-            .block_on(storage::create_task(
-                pool.clone(),
-                SqlDialect::Sqlite,
-                task.clone(),
-            ))
-            .unwrap();
+        persist_task(&runtime, &pool, task.clone());
         let store = test_store(vec![task]);
         let mut coordinator = test_coordinator(&runtime, &pool, Rc::clone(&store));
         let key = CommandKey::Task;
@@ -1143,6 +1532,7 @@ mod tests {
                 },
             ),
             error: Some("custom snooze failed".into()),
+            related_revisions: HashMap::new(),
         }));
         assert!(coordinator.drain(Duration::from_secs(2)));
 
@@ -1173,9 +1563,7 @@ mod tests {
         let first = test_task("task-1");
         let second = test_task("task-2");
         for task in [first.clone(), second.clone()] {
-            runtime
-                .block_on(storage::create_task(pool.clone(), SqlDialect::Sqlite, task))
-                .unwrap();
+            persist_task(&runtime, &pool, task);
         }
         let mut coordinator = test_coordinator(&runtime, &pool, test_store(vec![first, second]));
         let first_custom = time::macros::datetime!(2026-09-06 14:00);
@@ -1234,6 +1622,7 @@ mod tests {
                 TaskPatch::Title("Superseded".to_string()),
             ),
             error: None,
+            related_revisions: HashMap::new(),
         }));
         assert!(store.borrow().state().save_errors.contains_key(&target));
         assert_eq!(store.borrow().state().version, initial_version);
@@ -1370,5 +1759,61 @@ mod tests {
         assert_eq!(state.state().people[0].id, "person-1");
         assert_eq!(state.state().projects[0].id, "project-1");
         assert_eq!(state.state().tags[0].id, "tag-1");
+    }
+
+    #[test]
+    fn inline_task_tag_revision_supports_followup_edit_and_delete() {
+        let (runtime, pool) = test_database();
+        let task = test_task("task-1");
+        persist_task(&runtime, &pool, task.clone());
+        let tag = Tag::new("tag-inline".into(), "api".into());
+        let store = test_store(vec![task]);
+        store
+            .borrow_mut()
+            .dispatch(AppEvent::TagCreated(tag.clone()));
+        let mut coordinator = test_coordinator(&runtime, &pool, Rc::clone(&store));
+
+        coordinator.submit(PersistenceCommand::PatchTask(
+            "task-1".into(),
+            TaskPatch::Tags(vec![tag.clone()]),
+        ));
+        assert!(coordinator.drain(Duration::from_secs(2)));
+        assert_eq!(
+            store
+                .borrow()
+                .state()
+                .entity_revisions
+                .get("tag:tag-inline"),
+            Some(&1)
+        );
+
+        coordinator.submit(PersistenceCommand::PatchTag(
+            tag.id.clone(),
+            TagPatch::Label("backend".into()),
+        ));
+        assert!(coordinator.drain(Duration::from_secs(2)));
+        assert_eq!(
+            store
+                .borrow()
+                .state()
+                .entity_revisions
+                .get("tag:tag-inline"),
+            Some(&2)
+        );
+
+        coordinator.submit(PersistenceCommand::DeleteTag(TagDeletion {
+            tag,
+            task_ids: vec!["task-1".into()],
+        }));
+        assert!(coordinator.drain(Duration::from_secs(2)));
+        let count: i64 = runtime
+            .block_on(
+                sqlx::query("SELECT COUNT(*) AS count FROM tags WHERE id = 'tag-inline'")
+                    .fetch_one(&pool),
+            )
+            .unwrap()
+            .try_get("count")
+            .unwrap();
+        assert_eq!(count, 0);
     }
 }
