@@ -173,7 +173,7 @@ async fn load_workspace(
     let tags = load_tags(pool).await?;
     let mut tasks = Vec::new();
     let rows = sqlx::query(
-        "SELECT id, title, workflow_state, CAST(CASE WHEN rejected THEN 1 ELSE 0 END AS BIGINT) AS rejected, size, priority, start_date, due_date, snoozed_until, detail FROM tasks ORDER BY created_at, id",
+        "SELECT id, title, workflow_state, CAST(CASE WHEN rejected THEN 1 ELSE 0 END AS BIGINT) AS rejected, size, priority, start_date, due_date, snoozed_until, description FROM tasks ORDER BY created_at, id",
     )
     .fetch_all(pool)
     .await?;
@@ -205,7 +205,7 @@ async fn load_workspace(
             project_ids,
             tag_ids,
             links,
-            detail: row.try_get("detail")?,
+            description: row.try_get("description")?,
         };
         tasks.push(task);
     }
@@ -445,6 +445,43 @@ mod tests {
                 assert!(snapshot.people.is_empty());
                 assert!(snapshot.projects.is_empty());
                 assert!(snapshot.tags.is_empty());
+            });
+    }
+
+    #[test]
+    fn task_description_migration_preserves_existing_data() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                sqlx::any::install_default_drivers();
+                let pool = AnyPoolOptions::new()
+                    .max_connections(1)
+                    .connect("sqlite::memory:")
+                    .await
+                    .unwrap();
+                sqlx::query(
+                    "CREATE TABLE tasks (id TEXT PRIMARY KEY, detail TEXT NOT NULL DEFAULT '')",
+                )
+                .execute(&pool)
+                .await
+                .unwrap();
+                sqlx::query("INSERT INTO tasks (id, detail) VALUES ('task-1', 'Keep me')")
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+
+                sqlx::query(include_str!("../migrations/0008_task_description.sql"))
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+
+                let row = sqlx::query("SELECT description FROM tasks WHERE id = 'task-1'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+                assert_eq!(row.try_get::<String, _>("description").unwrap(), "Keep me");
             });
     }
 

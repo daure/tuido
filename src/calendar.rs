@@ -239,7 +239,7 @@ mod tests {
             project_ids: Vec::new(),
             tag_ids: Vec::new(),
             links: Vec::new(),
-            detail: String::new(),
+            description: String::new(),
         }
     }
 

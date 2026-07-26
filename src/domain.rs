@@ -695,11 +695,11 @@ pub struct Task {
     pub project_ids: Vec<String>,
     pub tag_ids: Vec<String>,
     pub links: Vec<String>,
-    pub detail: String,
+    pub description: String,
 }
 
 impl Task {
-    pub fn quick_capture(id: String, title: String, detail: String, size: TaskSize) -> Self {
+    pub fn quick_capture(id: String, title: String, description: String, size: TaskSize) -> Self {
         Self {
             id,
             title: title.trim().to_string(),
@@ -713,7 +713,7 @@ impl Task {
             project_ids: Vec::new(),
             tag_ids: Vec::new(),
             links: Vec::new(),
-            detail,
+            description,
         }
     }
 }
@@ -795,7 +795,7 @@ pub struct TagDeletion {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TaskField {
     Title,
-    Detail,
+    Description,
     State,
     Size,
     Priority,
@@ -831,7 +831,7 @@ pub enum TagField {
 #[derive(Debug, Clone)]
 pub enum TaskPatch {
     Title(String),
-    Detail(String),
+    Description(String),
     State(TaskState),
     Size(TaskSize),
     Priority(TaskPriority),
@@ -852,7 +852,7 @@ impl TaskPatch {
     pub fn field(&self) -> TaskField {
         match self {
             Self::Title(_) => TaskField::Title,
-            Self::Detail(_) => TaskField::Detail,
+            Self::Description(_) => TaskField::Description,
             Self::State(_) => TaskField::State,
             Self::Size(_) => TaskField::Size,
             Self::Priority(_) => TaskField::Priority,
@@ -1048,8 +1048,8 @@ fn apply_task_patch(task: &mut Task, available_tags: &mut Vec<Tag>, patch: &Task
             task.title = title.trim().to_string();
             true
         }
-        TaskPatch::Detail(detail) if task.detail != *detail => {
-            task.detail = detail.clone();
+        TaskPatch::Description(description) if task.description != *description => {
+            task.description = description.clone();
             true
         }
         TaskPatch::State(value) if task.state != *value => {
@@ -1320,7 +1320,7 @@ mod tests {
             projects: Vec::new(),
             tags: Vec::new(),
         });
-        let target = SaveTarget::task("T-1".to_string(), TaskField::Detail);
+        let target = SaveTarget::task("T-1".to_string(), TaskField::Description);
 
         let success = reduce_app_state(
             &mut state,

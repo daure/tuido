@@ -4,6 +4,8 @@ Tuido exposes full create/read/update/delete tools for tasks, people, projects, 
 
 Task `state` is the user-facing **Status** (`todo`, `in_progress`, `snoozed`, `done`, or `rejected`). `people_ids` links people involved in the task besides the workspace owner; it does not represent assignment or ownership. Entity and workspace revisions are internal synchronization and optimistic-concurrency tokens. Clients should use them for mutations and refresh detection, but should not show them as ordinary task metadata unless the user requests them.
 
+Task create, update, and read payloads use `description` for free-form task context.
+
 `get_workspace` filters its task collection while always returning the complete people, project, and tag catalogs. This gives clients the available relation IDs needed to create or update tasks without separate catalog requests.
 
 ## Stdio (recommended)

@@ -2045,14 +2045,14 @@ fn detail_form(
         .child(
             "description",
             TextareaInput::<AppMsg>::new()
-                .value(task.detail.clone())
+                .value(task.description.clone())
                 .panel("Description")
                 .hotkey(keys::TASK_DESCRIPTION_FIELD.hotkey())
                 .editor_hotkey(keys::TASK_DESCRIPTION_EDITOR.hotkey())
                 .on_edit_end({
                     let patch_sink = Rc::clone(&patch_sink);
                     move |value| {
-                        patch_sink.borrow_mut().push(TaskPatch::Detail(value));
+                        patch_sink.borrow_mut().push(TaskPatch::Description(value));
                         AppMsg::Noop
                     }
                 })

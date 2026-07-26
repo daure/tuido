@@ -437,7 +437,7 @@ fn create_multiple_patches_then_delete_drains_to_absent() {
     ));
     coordinator.submit(PersistenceCommand::PatchTask(
         task.id.clone(),
-        TaskPatch::Detail("Details".to_string()),
+        TaskPatch::Description("Details".to_string()),
     ));
     coordinator.submit(PersistenceCommand::DeleteTask(task));
 
@@ -464,7 +464,7 @@ fn latest_queued_same_field_patch_keeps_other_field_order() {
     ));
     coordinator.submit(PersistenceCommand::PatchTask(
         "task-1".to_string(),
-        TaskPatch::Detail("Details".to_string()),
+        TaskPatch::Description("Details".to_string()),
     ));
     coordinator.submit(PersistenceCommand::PatchTask(
         "task-1".to_string(),
@@ -477,7 +477,7 @@ fn latest_queued_same_field_patch_keeps_other_field_order() {
         .expect("task queue exists");
     assert!(matches!(
         &queue[0],
-        PersistenceCommand::PatchTask(_, TaskPatch::Detail(value)) if value == "Details"
+        PersistenceCommand::PatchTask(_, TaskPatch::Description(value)) if value == "Details"
     ));
     assert!(matches!(
         &queue[1],
@@ -487,11 +487,12 @@ fn latest_queued_same_field_patch_keeps_other_field_order() {
     assert!(coordinator.drain(Duration::from_secs(2)));
     let row = runtime
         .block_on(
-            sqlx::query("SELECT title, detail FROM tasks WHERE id = 'task-1'").fetch_one(&pool),
+            sqlx::query("SELECT title, description FROM tasks WHERE id = 'task-1'")
+                .fetch_one(&pool),
         )
         .expect("task reloads");
     assert_eq!(row.try_get::<String, _>("title").unwrap(), "Latest");
-    assert_eq!(row.try_get::<String, _>("detail").unwrap(), "Details");
+    assert_eq!(row.try_get::<String, _>("description").unwrap(), "Details");
 }
 
 #[test]
@@ -501,7 +502,7 @@ fn failed_active_patch_defers_completion_to_successful_queued_patch() {
     persist_task(&runtime, &pool, task.clone());
     let store = test_store(vec![task]);
     store.borrow_mut().dispatch(AppEvent::SaveCompleted {
-        target: SaveTarget::task("task-1".to_string(), crate::domain::TaskField::Detail),
+        target: SaveTarget::task("task-1".to_string(), crate::domain::TaskField::Description),
         error: Some("old detail failure".to_string()),
     });
     let initial_version = store.borrow().state().version;
@@ -514,7 +515,7 @@ fn failed_active_patch_defers_completion_to_successful_queued_patch() {
     ));
     coordinator.submit(PersistenceCommand::PatchTask(
         "task-1".to_string(),
-        TaskPatch::Detail("Latest detail".to_string()),
+        TaskPatch::Description("Latest detail".to_string()),
     ));
 
     assert!(!coordinator.finish(Completion {
@@ -658,7 +659,10 @@ fn custom_snooze_replaced_before_execution_preserves_remembered_value() {
     coordinator.finish(Completion {
         key,
         sequence: 42,
-        command: PersistenceCommand::PatchTask("task-1".into(), TaskPatch::Detail("active".into())),
+        command: PersistenceCommand::PatchTask(
+            "task-1".into(),
+            TaskPatch::Description("active".into()),
+        ),
         error: None,
         related_revisions: HashMap::new(),
     });
@@ -815,7 +819,10 @@ fn custom_snooze_then_unsnooze_keeps_workflow_without_persisting_last() {
     coordinator.finish(Completion {
         key,
         sequence: 45,
-        command: PersistenceCommand::PatchTask("task-1".into(), TaskPatch::Detail("active".into())),
+        command: PersistenceCommand::PatchTask(
+            "task-1".into(),
+            TaskPatch::Description("active".into()),
+        ),
         error: None,
         related_revisions: HashMap::new(),
     });

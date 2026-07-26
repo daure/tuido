@@ -657,6 +657,20 @@ mod tests {
     }
 
     #[test]
+    fn task_mcp_schemas_use_description_not_detail() {
+        for (name, schema) in [
+            ("TaskView", schemars::schema_for!(TaskView)),
+            ("TaskCreate", schemars::schema_for!(TaskCreate)),
+            ("TaskUpdate", schemars::schema_for!(TaskUpdate)),
+        ] {
+            let schema = serde_json::to_value(schema).unwrap();
+            let properties = schema["properties"].as_object().unwrap();
+            assert!(properties.contains_key("description"), "{name}");
+            assert!(!properties.contains_key("detail"), "{name}");
+        }
+    }
+
+    #[test]
     fn workspace_and_list_tools_return_object_shaped_structured_content() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -743,7 +757,7 @@ mod tests {
                     project_ids: Vec::new(),
                     tag_ids: Vec::new(),
                     links: Vec::new(),
-                    detail: String::new(),
+                    description: String::new(),
                 }))
                 .await;
             assert!(malformed.is_err());
@@ -791,7 +805,7 @@ mod tests {
             let server = McpServer::new(service.clone());
             let create = |title: &str| TaskCreate {
                 title: title.into(),
-                detail: String::new(),
+                description: String::new(),
                 size: "small".into(),
                 state: "snoozed".into(),
                 priority: "medium".into(),
@@ -853,7 +867,7 @@ mod tests {
             let task = server
                 .create_task(Parameters(TaskCreate {
                     title: "Expired".into(),
-                    detail: String::new(),
+                    description: String::new(),
                     size: "small".into(),
                     state: "snoozed".into(),
                     priority: "medium".into(),
@@ -914,7 +928,7 @@ mod tests {
             let task = server
                 .create_task(Parameters(TaskCreate {
                     title: "Tagged".into(),
-                    detail: String::new(),
+                    description: String::new(),
                     size: "small".into(),
                     state: "todo".into(),
                     priority: "medium".into(),
@@ -956,7 +970,7 @@ mod tests {
             let created = server
                 .create_task(Parameters(TaskCreate {
                     title: "Linked task".into(),
-                    detail: String::new(),
+                    description: String::new(),
                     size: "small".into(),
                     state: "todo".into(),
                     priority: "medium".into(),
@@ -1058,7 +1072,7 @@ mod tests {
                         project_ids: Vec::new(),
                         tag_ids: Vec::new(),
                         links: Vec::new(),
-                        detail: String::new(),
+                        description: String::new(),
                     }))
                     .await;
                 assert!(result.is_err());

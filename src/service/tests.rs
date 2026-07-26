@@ -65,7 +65,7 @@ fn explicit_expiry_processing_unsnoozes_due_tasks() {
         let service = test_service().await;
         let create = |title: &str, snoozed_until: &str| TaskCreate {
             title: title.into(),
-            detail: String::new(),
+            description: String::new(),
             size: "small".into(),
             state: "snoozed".into(),
             priority: "medium".into(),
@@ -141,7 +141,7 @@ fn task_tags_by_label_reuse_create_replace_clear_and_rollback_atomically() {
         let task = service
             .create_task(TaskCreate {
                 title: "Tagged".into(),
-                detail: String::new(),
+                description: String::new(),
                 size: "small".into(),
                 state: "todo".into(),
                 priority: "medium".into(),
@@ -273,7 +273,7 @@ fn filtered_workspace_filters_tasks_and_returns_complete_entity_catalogs() {
         service
             .create_task(TaskCreate {
                 title: "Keep selection stable".into(),
-                detail: "Select task after refresh".into(),
+                description: "Select task after refresh".into(),
                 size: "small".into(),
                 state: "todo".into(),
                 priority: "high".into(),
@@ -290,7 +290,7 @@ fn filtered_workspace_filters_tasks_and_returns_complete_entity_catalogs() {
         service
             .create_task(TaskCreate {
                 title: "Resolved task".into(),
-                detail: String::new(),
+                description: String::new(),
                 size: "medium".into(),
                 state: "done".into(),
                 priority: "medium".into(),
@@ -382,7 +382,7 @@ fn public_task_inputs_reject_legacy_state_aliases() {
             let create = service
                 .create_task(TaskCreate {
                     title: format!("Legacy {alias}"),
-                    detail: String::new(),
+                    description: String::new(),
                     size: "small".into(),
                     state: alias.into(),
                     priority: "medium".into(),
@@ -409,7 +409,7 @@ fn public_task_inputs_reject_legacy_state_aliases() {
         let task = service
             .create_task(TaskCreate {
                 title: "Canonical".into(),
-                detail: String::new(),
+                description: String::new(),
                 size: "small".into(),
                 state: "todo".into(),
                 priority: "medium".into(),
@@ -438,7 +438,7 @@ fn public_task_inputs_reject_legacy_state_aliases() {
                 project_ids: Vec::new(),
                 tag_ids: Vec::new(),
                 links: Vec::new(),
-                detail: String::new(),
+                description: String::new(),
             })
             .await;
         assert!(matches!(update, Err(ServiceError::Invalid(_))));
@@ -564,7 +564,7 @@ fn malformed_task_snooze_update_is_rejected_without_poisoning_workspace() {
                 project_ids: Vec::new(),
                 tag_ids: Vec::new(),
                 links: Vec::new(),
-                detail: String::new(),
+                description: String::new(),
             })
             .await
             .unwrap_err();

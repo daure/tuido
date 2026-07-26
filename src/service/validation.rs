@@ -137,7 +137,7 @@ pub(super) fn task_matches_workspace_filter(task: &TaskView, filter: &WorkspaceF
     {
         let query = query.to_lowercase();
         if !task.title.to_lowercase().contains(&query)
-            && !task.detail.to_lowercase().contains(&query)
+            && !task.description.to_lowercase().contains(&query)
         {
             return false;
         }

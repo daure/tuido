@@ -20,7 +20,7 @@ fn test_task() -> Task {
         project_ids: Vec::new(),
         tag_ids: Vec::new(),
         links: Vec::new(),
-        detail: "Existing detail".to_string(),
+        description: "Existing detail".to_string(),
     }
 }
 
@@ -439,7 +439,7 @@ fn yanking_highlighted_task_copies_pretty_resolved_agent_json() {
     };
     let first = task_with("task-first", "Wrong highlighted task", TaskState::Todo);
     let mut highlighted = task_with("task-highlighted", "Ship agent export", TaskState::Snoozed);
-    highlighted.detail = "Full detail\nwith context".into();
+    highlighted.description = "Full detail\nwith context".into();
     highlighted.size = TaskSize::Big;
     highlighted.priority = TaskPriority::High;
     highlighted.start_date = None;
@@ -475,7 +475,8 @@ fn yanking_highlighted_task_copies_pretty_resolved_agent_json() {
     );
     assert_eq!(json["id"], "task-highlighted");
     assert_eq!(json["title"], "Ship agent export");
-    assert_eq!(json["detail"], "Full detail\nwith context");
+    assert_eq!(json["description"], "Full detail\nwith context");
+    assert!(json.get("detail").is_none());
     assert_eq!(json["state"], "snoozed");
     assert_eq!(json["size"], "big");
     assert_eq!(json["priority"], "high");
@@ -1940,7 +1941,7 @@ fn create_task_submission_formats_title_and_uses_quick_capture_defaults() {
     let state = store.borrow();
     let task = state.state().tasks.first().expect("task should be created");
     assert_eq!(task.title, "Fix don't crash");
-    assert_eq!(task.detail, "");
+    assert_eq!(task.description, "");
     assert_eq!(task.size, TaskSize::Small);
 }
 
@@ -2182,7 +2183,7 @@ fn title_blur_during_description_hotkey_preserves_description_focus() {
                 project_ids: Vec::new(),
                 tag_ids: Vec::new(),
                 links: Vec::new(),
-                detail: "Existing detail".to_string(),
+                description: "Existing detail".to_string(),
             }],
             people: Vec::new(),
             projects: Vec::new(),
@@ -2371,7 +2372,7 @@ fn save_failure_and_recovery_preserve_focused_task_description_state() {
     ));
 
     store.borrow_mut().dispatch(AppEvent::SaveCompleted {
-        target: SaveTarget::task("task-1".to_string(), TaskField::Detail),
+        target: SaveTarget::task("task-1".to_string(), TaskField::Description),
         error: Some("offline".to_string()),
     });
     let mut failed_layout = LayoutCtx::new();
@@ -2393,7 +2394,7 @@ fn save_failure_and_recovery_preserve_focused_task_description_state() {
     assert_eq!(after_failure.outcome, EventOutcome::Handled);
 
     store.borrow_mut().dispatch(AppEvent::SaveCompleted {
-        target: SaveTarget::task("task-1".to_string(), TaskField::Detail),
+        target: SaveTarget::task("task-1".to_string(), TaskField::Description),
         error: None,
     });
     let mut recovered_layout = LayoutCtx::new();

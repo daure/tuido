@@ -1,7 +1,7 @@
 Load architecture.md before starting any work.
 Always load ~/dev/tuicore/SKILL.md on startup.
 
-Persistence: tasks are stored in SQL through SQLx. Default DB is SQLite unless TUIDO_DATABASE_URL points elsewhere; Postgres is supported by config. Run migrations from migrations/ before app use. Task detail edits for size, state, and entities save immediately.
+Persistence: tasks are stored in SQL through SQLx. Default DB is SQLite unless TUIDO_DATABASE_URL points elsewhere; Postgres is supported by config. Run migrations from migrations/ before app use. Task description edits, size, state, and entities save immediately.
 
 Service boundary: `TuidoService` is public application API and database authority. TUI, MCP, and future adapters call it for every persistence mutation. Adapters must not issue SQL or reproduce domain mutation rules.
 

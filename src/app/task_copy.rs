@@ -56,7 +56,7 @@ impl TaskCopyContext {
 struct TaskExport<'a> {
     id: &'a str,
     title: &'a str,
-    detail: &'a str,
+    description: &'a str,
     state: &'static str,
     size: &'static str,
     priority: &'static str,
@@ -107,7 +107,7 @@ impl<'a> TaskExport<'a> {
         Ok(Self {
             id: &task.id,
             title: &task.title,
-            detail: &task.detail,
+            description: &task.description,
             state: task.state.id(),
             size: task.size.id(),
             priority: task.priority.id(),

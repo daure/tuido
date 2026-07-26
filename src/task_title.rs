@@ -215,6 +215,24 @@ mod tests {
     }
 
     #[test]
+    fn evaluation_recognizes_tuido_recommended_verbs() {
+        for title in [
+            "Spike auth options",
+            "Decide release scope",
+            "Scope migration work",
+            "QA checkout flow",
+            "Break down launch plan",
+            "Follow up with vendor",
+        ] {
+            assert_eq!(
+                evaluate_title(title)[0].level,
+                TitleLevel::Perfect,
+                "{title}"
+            );
+        }
+    }
+
+    #[test]
     fn evaluation_labels_describe_measured_proxies() {
         assert_eq!(
             evaluate_title("Fix login").map(|check| check.label),

@@ -11,7 +11,7 @@ fn task_input(
 ) -> TaskCreate {
     TaskCreate {
         title,
-        detail: "postgres contract".into(),
+        description: "postgres contract".into(),
         size: "small".into(),
         state: "todo".into(),
         priority: "high".into(),
@@ -81,7 +81,7 @@ async fn postgres_migrations_crud_concurrency_and_transactions_hold() {
             project_ids: vec![project.value.id.clone()],
             tag_ids: vec![tag.value.id.clone()],
             links: vec!["file:///tmp/task.txt".into()],
-            detail: "updated".into(),
+            description: "updated".into(),
         })
         .await
         .unwrap();
@@ -100,7 +100,7 @@ async fn postgres_migrations_crud_concurrency_and_transactions_hold() {
             project_ids: Vec::new(),
             tag_ids: Vec::new(),
             links: Vec::new(),
-            detail: String::new(),
+            description: String::new(),
         })
         .await
         .unwrap_err();
@@ -122,7 +122,7 @@ async fn postgres_migrations_crud_concurrency_and_transactions_hold() {
             project_ids: Vec::new(),
             tag_ids: Vec::new(),
             links: updated.value.links.clone(),
-            detail: updated.value.detail.clone(),
+            description: updated.value.description.clone(),
         })
         .await;
     assert!(relation_error.is_err());

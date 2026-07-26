@@ -140,7 +140,7 @@ pub struct TaskView {
     pub tag_ids: Vec<String>,
     /// Task URLs, deduplicated and sorted lexicographically.
     pub links: Vec<String>,
-    pub detail: String,
+    pub description: String,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -168,7 +168,7 @@ pub struct TagView {
 pub struct TaskCreate {
     pub title: String,
     #[serde(default)]
-    pub detail: String,
+    pub description: String,
     #[serde(default = "default_size")]
     #[schemars(extend("enum" = ["small", "medium", "big"]))]
     pub size: String,
@@ -230,7 +230,7 @@ pub struct TaskUpdate {
     /// Complete task URL set. Values require an explicit scheme or a www. prefix.
     pub links: Vec<String>,
     #[serde(default)]
-    pub detail: String,
+    pub description: String,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -498,7 +498,7 @@ impl TuidoService {
         normalize_task_links(&mut task.links);
         validation::validate_task_links(&task.links)?;
         let sql = format!(
-            "INSERT INTO tasks (id, title, state, workflow_state, rejected, size, priority, start_date, due_date, snoozed_until, detail, created_at, updated_at) VALUES ({}, {}, 'next', {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
+            "INSERT INTO tasks (id, title, state, workflow_state, rejected, size, priority, start_date, due_date, snoozed_until, description, created_at, updated_at) VALUES ({}, {}, 'next', {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
             self.dialect.placeholder(1),
             self.dialect.placeholder(2),
             self.dialect.placeholder(3),
@@ -524,7 +524,7 @@ impl TuidoService {
             .bind(&task.start_date)
             .bind(&task.due_date)
             .bind(task.snoozed_until.map(crate::snooze::format_datetime))
-            .bind(&task.detail)
+            .bind(&task.description)
             .bind(&now)
             .bind(&now)
             .execute(&mut *tx)
@@ -584,7 +584,7 @@ impl TuidoService {
             project_ids: input.project_ids,
             tag_ids: input.tag_ids,
             links: input.links,
-            detail: input.detail,
+            description: input.description,
         })
         .await
     }
@@ -603,7 +603,7 @@ impl TuidoService {
         self.claim(&mut tx, "tasks", "task", &input.id, input.expected_revision)
             .await?;
         let sql = format!(
-            "UPDATE tasks SET title = {}, workflow_state = {}, rejected = {}, size = {}, priority = {}, start_date = {}, due_date = {}, snoozed_until = {}, detail = {}, updated_at = {} WHERE id = {}",
+            "UPDATE tasks SET title = {}, workflow_state = {}, rejected = {}, size = {}, priority = {}, start_date = {}, due_date = {}, snoozed_until = {}, description = {}, updated_at = {} WHERE id = {}",
             self.dialect.placeholder(1),
             self.dialect.placeholder(2),
             self.dialect.placeholder(3),
@@ -625,7 +625,7 @@ impl TuidoService {
             .bind(&input.start_date)
             .bind(&input.due_date)
             .bind(&snoozed_until)
-            .bind(&input.detail)
+            .bind(&input.description)
             .bind(now_text())
             .bind(&input.id)
             .execute(&mut *tx)
@@ -1333,7 +1333,7 @@ fn task_view(v: Task) -> TaskView {
         project_ids: v.project_ids,
         tag_ids: v.tag_ids,
         links: v.links,
-        detail: v.detail,
+        description: v.description,
     }
 }
 
@@ -1377,7 +1377,7 @@ async fn apply_task_patch(
 ) -> ServiceResult<()> {
     let (columns, values): (Vec<&str>, Vec<Value>) = match patch {
         TaskPatch::Title(v) => (vec!["title"], vec![Value::Text(v.trim().into())]),
-        TaskPatch::Detail(v) => (vec!["detail"], vec![Value::Text(v)]),
+        TaskPatch::Description(v) => (vec!["description"], vec![Value::Text(v)]),
         TaskPatch::State(v) => (
             vec!["workflow_state", "rejected", "snoozed_until"],
             vec![

@@ -9,7 +9,7 @@ async fn external_client_can_use_public_service_dtos() {
     let created = service
         .create_task(TaskCreate {
             title: "External API".into(),
-            detail: String::new(),
+            description: String::new(),
             size: "small".into(),
             state: "todo".into(),
             priority: "medium".into(),
@@ -38,7 +38,7 @@ async fn external_client_can_use_public_service_dtos() {
             project_ids: Vec::new(),
             tag_ids: Vec::new(),
             links: vec!["file:///tmp/task.txt".into()],
-            detail: "public DTO mutation".into(),
+            description: "public DTO mutation".into(),
         })
         .await
         .unwrap();
@@ -76,7 +76,7 @@ async fn public_service_accepts_www_links_and_rejects_other_protocol_free_links(
     let result = service
         .create_task(TaskCreate {
             title: "Invalid link".into(),
-            detail: String::new(),
+            description: String::new(),
             size: "small".into(),
             state: "todo".into(),
             priority: "medium".into(),
@@ -96,7 +96,7 @@ async fn public_service_accepts_www_links_and_rejects_other_protocol_free_links(
     let created = service
         .create_task(TaskCreate {
             title: "WWW link".into(),
-            detail: String::new(),
+            description: String::new(),
             size: "small".into(),
             state: "todo".into(),
             priority: "medium".into(),
