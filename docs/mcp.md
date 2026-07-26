@@ -21,7 +21,7 @@ Stdout carries MCP protocol only. `TUIDO_DATABASE_URL` selects database; otherwi
 
 ## Development HTTP
 
-`tuido dev` runs TUI and Streamable HTTP MCP at `http://127.0.0.1:7345/mcp`. Both share database-backed `TuidoService`; TUI observes MCP writes by workspace-revision polling.
+`tuido dev` runs TUI and Streamable HTTP MCP at `http://127.0.0.1:7346/mcp`. Both share database-backed `TuidoService`; TUI observes MCP writes by workspace-revision polling. The separate development port allows the installed service to keep running on `127.0.0.1:7345`; override the development address with `--bind` when needed.
 
 ## Foreground and installed service
 

@@ -11,6 +11,9 @@ mod persistence_coordinator;
 pub mod service;
 mod snooze;
 mod storage;
+mod task_title;
+mod title_feedback;
+mod title_input;
 mod ui;
 
 pub use app::run;

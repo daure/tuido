@@ -12,6 +12,7 @@ use crate::persistence_coordinator::{AppStore, PersistenceCommand, PersistenceCo
 use crate::service::TuidoService;
 use crate::snooze::{SnoozeDialog, local_now};
 use crate::storage::Storage;
+use crate::task_title::format_title;
 use crate::ui::management::{ManagementDialogKind, people, projects, tags};
 use crate::ui::save_status::SaveStatusLine;
 use ratatui::{
@@ -38,6 +39,26 @@ use uuid::Uuid;
 const PEOPLE_MENU_ID: &str = "people";
 const PROJECTS_MENU_ID: &str = "projects";
 const TAGS_MENU_ID: &str = "tags";
+const STATUS_BAR_MENU_ITEMS: [StatusBarMenuItem; 5] = [
+    StatusBarMenuItem::Custom {
+        id: PEOPLE_MENU_ID,
+        label: "People",
+    },
+    StatusBarMenuItem::Custom {
+        id: PROJECTS_MENU_ID,
+        label: "Projects",
+    },
+    StatusBarMenuItem::Custom {
+        id: TAGS_MENU_ID,
+        label: "Tags",
+    },
+    StatusBarMenuItem::Theme,
+    StatusBarMenuItem::WeatherForecast,
+];
+
+fn weather_provider_config() -> WeatherProviderConfig {
+    WeatherProviderConfig::new().enabled(true)
+}
 
 #[derive(Debug)]
 pub(crate) enum AppMsg {
@@ -164,22 +185,8 @@ impl App {
         let root = Flex::column().child("tabs", tabs, FlexItem::fill(1)).child(
             "footer",
             StatusBar::new()
-                .menu_items([
-                    StatusBarMenuItem::Custom {
-                        id: PEOPLE_MENU_ID,
-                        label: "People",
-                    },
-                    StatusBarMenuItem::Custom {
-                        id: PROJECTS_MENU_ID,
-                        label: "Projects",
-                    },
-                    StatusBarMenuItem::Custom {
-                        id: TAGS_MENU_ID,
-                        label: "Tags",
-                    },
-                    StatusBarMenuItem::Theme,
-                ])
-                .weather_provider(WeatherProviderConfig::new().enabled(false))
+                .menu_items(STATUS_BAR_MENU_ITEMS)
+                .weather_provider(weather_provider_config())
                 .on_custom_menu_item(|id| match id {
                     PEOPLE_MENU_ID => AppMsg::OpenManagementDialog(ManagementDialogKind::People),
                     PROJECTS_MENU_ID => {
@@ -411,7 +418,7 @@ impl App {
     }
 
     fn submit_create_task(&mut self, draft: CreateTaskDraft, ctx: &mut EventCtx<AppMsg>) {
-        let title = draft.title.trim();
+        let title = format_title(&draft.title);
         if title.is_empty() {
             ctx.notify(tuicore::Notification::warning(
                 "Task title required",
@@ -422,9 +429,9 @@ impl App {
 
         let task = Task::quick_capture(
             Uuid::new_v4().to_string(),
-            title.to_string(),
-            draft.description,
-            draft.size,
+            title,
+            String::new(),
+            TaskSize::Small,
         );
         self.context
             .store
@@ -1341,25 +1348,7 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::Tags(dialog) => dialog.measure(proposal),
             Self::CreateManagement(dialog) => measure_dialog_host(dialog, proposal),
             Self::DeleteManagement(dialog) => dialog.measure(proposal),
-            Self::CreateTask(dialog) => {
-                let body = dialog.child().measure(proposal);
-                let chrome = dialog.dialog().measure(proposal);
-                let width = match proposal.width {
-                    AxisProposal::AtMost(width) | AxisProposal::Exact(width) => width,
-                    AxisProposal::Unbounded => body
-                        .preferred
-                        .width
-                        .saturating_add(2)
-                        .max(chrome.preferred.width),
-                };
-                LayoutSizeHint::content(
-                    width,
-                    body.preferred
-                        .height
-                        .saturating_add(chrome.preferred.height),
-                )
-                .normalized(proposal)
-            }
+            Self::CreateTask(dialog) => measure_dialog_host(dialog, proposal),
             Self::DeleteTask(dialog) => dialog.measure(proposal),
             Self::Empty(dialog) => dialog.measure(proposal),
             Self::Snooze(dialog) => dialog.measure(proposal),
@@ -2359,6 +2348,12 @@ pub(crate) mod tests {
             tag_ids: Vec::new(),
             detail: "Existing detail".to_string(),
         }
+    }
+
+    #[test]
+    fn status_bar_enables_weather_and_exposes_forecast_menu() {
+        assert!(weather_provider_config().is_enabled());
+        assert!(STATUS_BAR_MENU_ITEMS.contains(&StatusBarMenuItem::WeatherForecast));
     }
 
     #[test]
@@ -3754,9 +3749,37 @@ pub(crate) mod tests {
             .first()
             .expect("create task dialog should register an overlay")
             .area;
+        let measured_height = create_task_dialog_host()
+            .measure(LayoutProposal::at_most(dialog_area.width, area.height))
+            .preferred
+            .height;
 
         assert_eq!(dialog_area.width, 80);
-        assert_eq!(dialog_area.height, 14);
+        assert_eq!(dialog_area.height, measured_height);
+    }
+
+    #[test]
+    fn create_task_submission_formats_title_and_uses_quick_capture_defaults() {
+        let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+            tasks: Vec::new(),
+            people: Vec::new(),
+            projects: Vec::new(),
+            tags: Vec::new(),
+        });
+        let mut app = App::new(context.store, context.coordinator);
+
+        app.submit_create_task(
+            CreateTaskDraft {
+                title: "  fix   dont crash... ".to_string(),
+            },
+            &mut EventCtx::default(),
+        );
+
+        let state = store.borrow();
+        let task = state.state().tasks.first().expect("task should be created");
+        assert_eq!(task.title, "Fix don't crash");
+        assert_eq!(task.detail, "");
+        assert_eq!(task.size, TaskSize::Small);
     }
 
     #[test]
@@ -3767,6 +3790,8 @@ pub(crate) mod tests {
                 create_management_dialog_host(ManagementDialogKind::Projects),
                 KeyEvent::from(Key::Esc),
                 true,
+                "textarea",
+                1,
             ),
             (
                 create_task_dialog_host(),
@@ -3775,24 +3800,30 @@ pub(crate) mod tests {
                     modifiers: KeyModifiers::CONTROL,
                 },
                 false,
+                "input",
+                2,
             ),
         ];
 
-        for (mut dialog, key, management) in cases {
+        for (mut dialog, key, management, focus_id, presses) in cases {
             let mut layout = LayoutCtx::new();
             dialog.layout(area, &mut layout);
             let target = layout
                 .focus_targets()
                 .iter()
-                .find(|target| target.id.as_str() == "textarea")
-                .expect("creation textarea should be focusable")
+                .find(|target| target.id.as_str() == focus_id)
+                .expect("creation input should be focusable")
                 .clone();
             let mut ctx = EventCtx::default();
 
-            let outcome =
-                dialog.dispatch_event(&EventRoute::new(target.path), &TuiEvent::Key(key), &mut ctx);
-
-            assert!(outcome.handled());
+            for _ in 0..presses {
+                ctx = EventCtx::default();
+                dialog.dispatch_event(
+                    &EventRoute::new(target.path.clone()),
+                    &TuiEvent::Key(key),
+                    &mut ctx,
+                );
+            }
             if management {
                 assert!(matches!(ctx.messages(), [AppMsg::CloseManagementOverlay]));
             } else {

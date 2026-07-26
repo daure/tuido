@@ -8,7 +8,7 @@ Keyboard-first task manager with optional MCP access.
 # TUI only
 cargo run
 
-# TUI + HTTP MCP at http://127.0.0.1:7345/mcp
+# TUI + HTTP MCP at http://127.0.0.1:7346/mcp
 cargo run -- dev
 
 # stdio MCP only
@@ -21,7 +21,7 @@ cargo run -- serve
 MCP client configuration:
 
 ```json
-{"command":"cargo","args":["run","--","mcp"]}
+{"type":"remote","url":"http://127.0.0.1:7346/mcp","enabled":true}
 ```
 
 Set `TUIDO_DATABASE_URL` to use another SQLite database or Postgres. Otherwise Tuido uses its default local SQLite database.
@@ -60,7 +60,7 @@ After installation:
 ```bash
 tuido             # TUI
 tuido mcp         # stdio MCP
-tuido dev         # TUI + HTTP MCP
+tuido dev         # TUI + HTTP MCP on development port 7346
 tuido serve       # foreground HTTP MCP
 ```
 

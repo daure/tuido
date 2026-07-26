@@ -7,7 +7,7 @@ const ABOUT: &str = "Keyboard-first task manager with full read/write MCP access
 Run `tuido` for TUI. MCP clients normally spawn stdio server with config:
   {\"command\": \"tuido\", \"args\": [\"mcp\"]}
 
-`tuido dev` runs TUI plus Streamable HTTP MCP at http://127.0.0.1:7345/mcp.
+`tuido dev` runs TUI plus Streamable HTTP MCP at http://127.0.0.1:7346/mcp.
 `tuido serve` runs HTTP MCP in foreground until signal/session ends.
 HTTP is loopback-only. Installed service has no bearer middleware in current rmcp integration;
 local-only binding is security boundary. Configure database with TUIDO_DATABASE_URL.
@@ -30,9 +30,12 @@ enum Commands {
     Mcp,
     #[command(
         about = "Run TUI and loopback HTTP MCP for development",
-        long_about = "Run TUI plus Streamable HTTP MCP at http://127.0.0.1:7345/mcp. Server ends with process."
+        long_about = "Run TUI plus Streamable HTTP MCP at http://127.0.0.1:7346/mcp. Server ends with process."
     )]
-    Dev,
+    Dev {
+        #[arg(long, default_value="127.0.0.1:7346", value_parser=parse_loopback)]
+        bind: SocketAddr,
+    },
     #[command(about = "Run loopback Streamable HTTP MCP in foreground")]
     Serve {
         #[arg(long, default_value="127.0.0.1:7345", value_parser=parse_loopback)]
@@ -70,16 +73,14 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         None => crate::app::run(),
         Some(Commands::Mcp) => runtime()?.block_on(crate::run_stdio()),
         Some(Commands::Serve { bind }) => runtime()?.block_on(crate::run_http(bind)),
-        Some(Commands::Dev) => {
+        Some(Commands::Dev { bind }) => {
             let (startup_tx, startup_rx) = std::sync::mpsc::channel();
             thread::Builder::new()
                 .name("tuido-mcp-http".into())
-                .spawn(|| {
+                .spawn(move || {
                     if let Ok(rt) = runtime()
-                        && let Err(error) = rt.block_on(crate::mcp::run_http_with_startup(
-                            "127.0.0.1:7345".parse().expect("static address"),
-                            startup_tx,
-                        ))
+                        && let Err(error) =
+                            rt.block_on(crate::mcp::run_http_with_startup(bind, startup_tx))
                     {
                         eprintln!("HTTP MCP stopped: {error}");
                     }
@@ -273,6 +274,16 @@ fn launchd_definition(exe: &std::path::Path, database_url: Option<&str>) -> Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dev_uses_separate_http_port_by_default() {
+        let cli = Cli::try_parse_from(["tuido", "dev"]).unwrap();
+
+        let Some(Commands::Dev { bind }) = cli.command else {
+            panic!("expected dev command");
+        };
+        assert_eq!(bind, "127.0.0.1:7346".parse().unwrap());
+    }
 
     #[test]
     fn service_definition_values_are_escaped() {

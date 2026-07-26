@@ -2,41 +2,28 @@ use std::{cell::RefCell, rc::Rc, time::Duration};
 
 use ratatui::{Frame, layout::Rect};
 use tuicore::{
-    AnimationSettings, DialogAction, Dropdown, DropdownCommitMode, DropdownPopupDirection,
-    DropdownSearchMode, EventCtx, EventOutcome, EventRoute, Flex, FlexItem, FocusCtx, FocusTarget,
-    Key, KeyEvent, KeySpec, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx,
-    RenderCtx, TextInput, TextareaInput, TickResult, TuiEvent, TuiNode,
+    AnimationSettings, DialogAction, EventCtx, EventOutcome, EventRoute, Flex, FlexItem, FocusCtx,
+    FocusTarget, Key, KeyEvent, KeySpec, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint,
+    LifecycleCtx, RenderCtx, TextInput, TickResult, TuiEvent, TuiNode,
 };
 
-use crate::{app::AppMsg, domain::TaskSize};
+use crate::{app::AppMsg, title_feedback::TitleFeedback, title_input::TitleInput};
 
 #[derive(Debug, Clone)]
 pub(crate) struct CreateTaskDraft {
     pub(crate) title: String,
-    pub(crate) description: String,
-    pub(crate) size: TaskSize,
-}
-
-struct SizeChoice {
-    id: String,
-    label: String,
 }
 
 pub(crate) struct CreateTaskDialog {
     root: Flex<AppMsg>,
     title: Rc<RefCell<String>>,
-    description: Rc<RefCell<String>>,
-    size: Rc<RefCell<TaskSize>>,
 }
 
 impl CreateTaskDialog {
     pub(crate) fn new() -> Self {
         let title = Rc::new(RefCell::new(String::new()));
-        let description = Rc::new(RefCell::new(String::new()));
-        let size = Rc::new(RefCell::new(TaskSize::Small));
         let mut input = TextInput::new()
-            .panel("Title")
-            .placeholder("Task title")
+            .placeholder("Title")
             .focused(true)
             .on_change({
                 let title = Rc::clone(&title);
@@ -49,61 +36,25 @@ impl CreateTaskDialog {
             &TuiEvent::Key(KeyEvent::from(Key::Enter)),
             &mut EventCtx::default(),
         );
-        let description_input = TextareaInput::new()
-            .panel("Description")
-            .placeholder("Task description")
-            .min_rows(4)
-            .max_rows(10)
-            .on_change({
-                let description = Rc::clone(&description);
-                move |value| {
-                    *description.borrow_mut() = value;
-                    AppMsg::Noop
-                }
-            });
-        let size_input = Dropdown::single(
-            size_choices(),
-            |row: &SizeChoice| row.id.clone(),
-            |row| row.label.clone(),
-        )
-        .label("Size")
-        .selected_one(TaskSize::Small.id().to_string())
-        .search_mode(DropdownSearchMode::Contains)
-        .commit_mode(DropdownCommitMode::Explicit)
-        .popup_direction(DropdownPopupDirection::Up)
-        .on_select({
-            let size = Rc::clone(&size);
-            move |ids| {
-                if let Some(value) = ids.into_iter().next().and_then(|id| TaskSize::parse(&id)) {
-                    *size.borrow_mut() = value;
-                }
-            }
-        });
+        let input = TitleInput::new(input, Rc::clone(&title))
+            .on_ctrl_enter(|title| AppMsg::CreateTaskSubmitted(CreateTaskDraft { title }));
+        let feedback = TitleFeedback::new(Rc::clone(&title));
         let root = Flex::column()
-            .child("title", input, FlexItem::fixed(3))
-            .child("description", description_input, FlexItem::content())
-            .child("size", size_input, FlexItem::fixed(3));
+            .gap(1)
+            .child("title", input, FlexItem::content())
+            .child("feedback", feedback, FlexItem::content());
 
-        Self {
-            root,
-            title,
-            description,
-            size,
-        }
+        Self { root, title }
     }
 
     pub(crate) fn actions(&self) -> [DialogAction<AppMsg>; 2] {
         let title = Rc::clone(&self.title);
-        let description = Rc::clone(&self.description);
-        let size = Rc::clone(&self.size);
         [
             DialogAction::new("OK")
                 .hotkey(KeySpec::plain('o'))
                 .on_trigger(move || {
                     AppMsg::CreateTaskSubmitted(CreateTaskDraft {
                         title: title.borrow().clone(),
-                        description: description.borrow().clone(),
-                        size: *size.borrow(),
                     })
                 }),
             DialogAction::new("Cancel")
@@ -111,16 +62,6 @@ impl CreateTaskDialog {
                 .on_trigger(|| AppMsg::CloseDialog),
         ]
     }
-}
-
-fn size_choices() -> Vec<SizeChoice> {
-    [TaskSize::Small, TaskSize::Medium, TaskSize::Big]
-        .into_iter()
-        .map(|size| SizeChoice {
-            id: size.id().to_string(),
-            label: size.label().to_string(),
-        })
-        .collect()
 }
 
 impl TuiNode<AppMsg> for CreateTaskDialog {
@@ -177,20 +118,64 @@ impl TuiNode<AppMsg> for CreateTaskDialog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tuicore::{Key, KeyEvent, LayoutProposal};
+    use ratatui::{Terminal, backend::TestBackend};
+    use tuicore::{ChildKey, FocusTarget, Key, KeyEvent, KeyModifiers, LayoutProposal};
+
+    const AREA: Rect = Rect::new(0, 0, 50, 20);
+
+    fn focus_title(dialog: &mut CreateTaskDialog) -> FocusTarget {
+        let mut layout = LayoutCtx::new();
+        dialog.layout(AREA, &mut layout);
+        let target = layout
+            .focus_targets()
+            .first()
+            .expect("title should be first focus target")
+            .clone();
+        dialog.dispatch_focus(&target, true, &mut FocusCtx::default());
+        target
+    }
+
+    fn type_title(dialog: &mut CreateTaskDialog, target: &FocusTarget, value: &str) {
+        for character in value.chars() {
+            let outcome = dialog.dispatch_event(
+                &EventRoute::new(target.path.clone()),
+                &TuiEvent::Key(KeyEvent::from(Key::Char(character))),
+                &mut EventCtx::default(),
+            );
+            assert!(outcome.handled());
+        }
+    }
+
+    fn rendered(dialog: &CreateTaskDialog) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(AREA.width, AREA.height)).unwrap();
+        terminal
+            .draw(|frame| dialog.render(frame, AREA, &mut RenderCtx::new()))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
 
     #[test]
-    fn controls_are_adjacent_without_gap_rows() {
-        let dialog = CreateTaskDialog::new();
-
-        assert_eq!(
-            dialog
-                .root
-                .measure(LayoutProposal::unbounded())
-                .preferred
-                .height,
-            12
+    fn preferred_height_includes_one_row_between_title_and_feedback() {
+        let mut dialog = CreateTaskDialog::new();
+        let preferred = dialog.root.measure(LayoutProposal::unbounded()).preferred;
+        dialog.layout(
+            Rect::new(0, 0, preferred.width, preferred.height),
+            &mut LayoutCtx::new(),
         );
+        let title = dialog.root.child_rect(&ChildKey::from("title")).unwrap();
+        let feedback = dialog.root.child_rect(&ChildKey::from("feedback")).unwrap();
+
+        assert_eq!(feedback.y, title.y + title.height + 1);
+        assert_eq!(title.height, 1);
+        assert_eq!(feedback.height, 3);
+        assert_eq!(preferred.height, title.height + 1 + feedback.height);
+        assert_eq!(preferred.height, 5);
     }
 
     #[test]
@@ -211,16 +196,8 @@ mod tests {
 
     #[test]
     fn title_accepts_typing_immediately_after_focus() {
-        let area = Rect::new(0, 0, 50, 20);
         let mut dialog = CreateTaskDialog::new();
-        let mut layout = LayoutCtx::new();
-        dialog.layout(area, &mut layout);
-        let target = layout
-            .focus_targets()
-            .first()
-            .expect("title should be first focus target")
-            .clone();
-        dialog.dispatch_focus(&target, true, &mut FocusCtx::default());
+        let target = focus_title(&mut dialog);
 
         let outcome = dialog.dispatch_event(
             &EventRoute::new(target.path),
@@ -230,5 +207,96 @@ mod tests {
 
         assert!(outcome.handled());
         assert_eq!(dialog.title.borrow().as_str(), "a");
+    }
+
+    #[test]
+    fn title_feedback_tracks_raw_input_while_typing() {
+        let mut dialog = CreateTaskDialog::new();
+        let target = focus_title(&mut dialog);
+
+        type_title(&mut dialog, &target, "fix   dont crash...");
+
+        assert_eq!(dialog.title.borrow().as_str(), "fix   dont crash...");
+        assert_eq!(rendered(&dialog).matches("Perfect").count(), 3);
+    }
+
+    #[test]
+    fn enter_formats_shared_and_rendered_title_after_editing() {
+        let mut dialog = CreateTaskDialog::new();
+        let target = focus_title(&mut dialog);
+        type_title(&mut dialog, &target, "Theres five and ill do it");
+        let mut ctx = EventCtx::default();
+
+        let outcome = dialog.dispatch_event(
+            &EventRoute::new(target.path),
+            &TuiEvent::Key(KeyEvent::from(Key::Enter)),
+            &mut ctx,
+        );
+
+        assert!(outcome.handled());
+        assert!(ctx.redraw_requested());
+        assert!(ctx.messages().is_empty());
+        assert_eq!(
+            dialog.title.borrow().as_str(),
+            "There's five and I'll do it"
+        );
+        let rendered = rendered(&dialog);
+        assert!(rendered.contains("There's five and I'll do it"));
+        assert!(!rendered.contains("Theres five and ill do it"));
+    }
+
+    #[test]
+    fn ctrl_enter_formats_title_and_submits_once_after_editing() {
+        let mut dialog = CreateTaskDialog::new();
+        let target = focus_title(&mut dialog);
+        type_title(&mut dialog, &target, "Theres five and ill do it");
+        let mut ctx = EventCtx::default();
+
+        let outcome = dialog.dispatch_event(
+            &EventRoute::new(target.path),
+            &TuiEvent::Key(KeyEvent {
+                code: Key::Enter,
+                modifiers: KeyModifiers::CONTROL,
+            }),
+            &mut ctx,
+        );
+
+        assert!(outcome.handled());
+        assert!(ctx.redraw_requested());
+        assert_eq!(
+            dialog.title.borrow().as_str(),
+            "There's five and I'll do it"
+        );
+        assert!(matches!(
+            ctx.messages(),
+            [AppMsg::CreateTaskSubmitted(CreateTaskDraft { title })]
+                if title == "There's five and I'll do it"
+        ));
+        assert!(rendered(&dialog).contains("There's five and I'll do it"));
+    }
+
+    #[test]
+    fn ctrl_enter_on_inactive_title_does_not_submit() {
+        let mut dialog = CreateTaskDialog::new();
+        let target = focus_title(&mut dialog);
+        type_title(&mut dialog, &target, "fix   dont crash...");
+        dialog.dispatch_event(
+            &EventRoute::new(target.path.clone()),
+            &TuiEvent::Key(KeyEvent::from(Key::Enter)),
+            &mut EventCtx::default(),
+        );
+        let mut ctx = EventCtx::default();
+
+        dialog.dispatch_event(
+            &EventRoute::new(target.path),
+            &TuiEvent::Key(KeyEvent {
+                code: Key::Enter,
+                modifiers: KeyModifiers::CONTROL,
+            }),
+            &mut ctx,
+        );
+
+        assert!(ctx.messages().is_empty());
+        assert_eq!(dialog.title.borrow().as_str(), "Fix don't crash");
     }
 }
