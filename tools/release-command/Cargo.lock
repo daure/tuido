@@ -5,3 +5,7 @@ version = 4
 [[package]]
 name = "tuido-release-command"
 version = "0.0.0"
+
+[[patch.unused]]
+name = "tuicore"
+version = "0.6.0"
