@@ -11,7 +11,6 @@ use crate::domain::{
     Person, Project, Tag, Task, TaskPriority, TaskSize, TaskState, WorkspaceSnapshot,
 };
 use crate::snooze::parse_datetime;
-use time::PrimitiveDateTime;
 
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
@@ -147,17 +146,6 @@ impl Storage {
         }
         Ok(())
     }
-
-    pub async fn load_last_custom_snooze(
-        &self,
-    ) -> Result<Option<PrimitiveDateTime>, Box<dyn std::error::Error>> {
-        let row = sqlx::query("SELECT value FROM settings WHERE key = 'last_custom_snooze'")
-            .fetch_optional(&self.pool)
-            .await?;
-        let Some(row) = row else { return Ok(None) };
-        let value: String = row.try_get("value")?;
-        Ok(Some(parse_datetime(&value)?))
-    }
 }
 
 fn sqlite_pool_options() -> AnyPoolOptions {
@@ -195,6 +183,7 @@ async fn load_workspace(
         let people_ids = load_task_people(pool, dialect, &id).await?;
         let project_ids = load_task_projects(pool, dialect, &id).await?;
         let tag_ids = load_task_tags(pool, dialect, &id).await?;
+        let links = load_task_links(pool, dialect, &id).await?;
 
         let task = Task {
             id,
@@ -215,6 +204,7 @@ async fn load_workspace(
             people_ids,
             project_ids,
             tag_ids,
+            links,
             detail: row.try_get("detail")?,
         };
         tasks.push(task);
@@ -338,6 +328,27 @@ async fn load_task_tags(
     rows.into_iter()
         .map(|row| Ok(row.try_get("tag_id")?))
         .collect()
+}
+
+async fn load_task_links(
+    pool: &AnyPool,
+    dialect: SqlDialect,
+    task_id: &str,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let query = format!(
+        "SELECT url FROM task_links WHERE task_id = {}",
+        dialect.placeholder(1)
+    );
+    let rows = sqlx::query(AssertSqlSafe(query.as_str()))
+        .bind(task_id)
+        .fetch_all(pool)
+        .await?;
+    let mut links = rows
+        .into_iter()
+        .map(|row| Ok(row.try_get("url")?))
+        .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+    links.sort();
+    Ok(links)
 }
 
 fn default_sqlite_path() -> Result<PathBuf, Box<dyn std::error::Error>> {

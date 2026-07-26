@@ -280,6 +280,7 @@ pub mod keys {
     pub const TASK_PROJECTS_FIELD: AppBinding =
         AppBinding::new_sequence("TASK_PROJECTS_FIELD", "pro");
     pub const TASK_TAGS_FIELD: AppBinding = AppBinding::new_sequence("TASK_TAGS_FIELD", "ta");
+    pub const TASK_LINKS_FIELD: AppBinding = AppBinding::new_sequence("TASK_LINKS_FIELD", "li");
     pub const TASK_START_DATE_FIELD: AppBinding =
         AppBinding::new_sequence("TASK_START_DATE_FIELD", "sd");
     pub const TASK_END_DATE_FIELD: AppBinding =
@@ -383,6 +384,7 @@ pub mod keys {
         TASK_PEOPLE_FIELD,
         TASK_PROJECTS_FIELD,
         TASK_TAGS_FIELD,
+        TASK_LINKS_FIELD,
         TASK_START_DATE_FIELD,
         TASK_END_DATE_FIELD,
         TASK_SNOOZED_UNTIL_FIELD,

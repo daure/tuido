@@ -36,12 +36,14 @@ rmcp = { version = "0.8", features = ["server", "macros", "transport-io", "trans
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tuicore = "0.5.0"
+tuicore = "0.6.0"
 ratatui = "0.30"
+regex = "1"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "any", "sqlite", "postgres", "migrate", "macros"] }
 tokio = { version = "1", features = ["rt-multi-thread", "time", "signal", "net", "macros"] }
 time = { version = "0.3", features = ["formatting", "parsing", "macros", "local-offset", "serde"] }
 uuid = { version = "1", features = ["v4"] }
+webbrowser = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"

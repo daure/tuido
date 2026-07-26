@@ -21,6 +21,7 @@ fn task_input(
         people_ids,
         project_ids,
         tag_ids,
+        links: vec!["https://example.com/task".into()],
     }
 }
 
@@ -79,6 +80,7 @@ async fn postgres_migrations_crud_concurrency_and_transactions_hold() {
             people_ids: vec![person.value.id.clone()],
             project_ids: vec![project.value.id.clone()],
             tag_ids: vec![tag.value.id.clone()],
+            links: vec!["file:///tmp/task.txt".into()],
             detail: "updated".into(),
         })
         .await
@@ -97,6 +99,7 @@ async fn postgres_migrations_crud_concurrency_and_transactions_hold() {
             people_ids: Vec::new(),
             project_ids: Vec::new(),
             tag_ids: Vec::new(),
+            links: Vec::new(),
             detail: String::new(),
         })
         .await
@@ -118,6 +121,7 @@ async fn postgres_migrations_crud_concurrency_and_transactions_hold() {
             people_ids: vec![format!("missing-{suffix}")],
             project_ids: Vec::new(),
             tag_ids: Vec::new(),
+            links: updated.value.links.clone(),
             detail: updated.value.detail.clone(),
         })
         .await;

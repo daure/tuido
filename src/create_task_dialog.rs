@@ -276,7 +276,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_enter_on_inactive_title_does_not_submit() {
+    fn ctrl_enter_on_inactive_title_submits_dialog() {
         let mut dialog = CreateTaskDialog::new();
         let target = focus_title(&mut dialog);
         type_title(&mut dialog, &target, "fix   dont crash...");
@@ -296,7 +296,11 @@ mod tests {
             &mut ctx,
         );
 
-        assert!(ctx.messages().is_empty());
         assert_eq!(dialog.title.borrow().as_str(), "Fix don't crash");
+        assert!(matches!(
+            ctx.messages(),
+            [AppMsg::CreateTaskSubmitted(CreateTaskDraft { title })]
+                if title == "Fix don't crash"
+        ));
     }
 }

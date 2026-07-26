@@ -1,4 +1,8 @@
-use std::{collections::HashMap, error::Error, fmt};
+use std::{
+    collections::{HashMap, HashSet},
+    error::Error,
+    fmt,
+};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -13,6 +17,7 @@ use crate::{
     storage::{self, SqlDialect, Storage},
 };
 
+mod settings;
 mod validation;
 
 use validation::{
@@ -102,8 +107,11 @@ pub struct WorkspaceFilter {
     /// Include done and rejected tasks, which are excluded by default.
     pub include_resolved: bool,
     /// Match user-facing task statuses such as todo, in_progress, snoozed, done, or rejected.
+    #[schemars(extend("items" = {"type": "string", "enum": ["todo", "in_progress", "snoozed", "done", "rejected"]}))]
     pub states: Vec<String>,
+    #[schemars(extend("items" = {"type": "string", "enum": ["low", "medium", "high"]}))]
     pub priorities: Vec<String>,
+    #[schemars(extend("items" = {"type": "string", "enum": ["small", "medium", "big"]}))]
     pub sizes: Vec<String>,
     /// Match tasks involving any of these people. People are not assignees or owners.
     pub person_ids: Vec<String>,
@@ -130,6 +138,8 @@ pub struct TaskView {
     pub people_ids: Vec<String>,
     pub project_ids: Vec<String>,
     pub tag_ids: Vec<String>,
+    /// Task URLs, deduplicated and sorted lexicographically.
+    pub links: Vec<String>,
     pub detail: String,
 }
 
@@ -160,11 +170,14 @@ pub struct TaskCreate {
     #[serde(default)]
     pub detail: String,
     #[serde(default = "default_size")]
+    #[schemars(extend("enum" = ["small", "medium", "big"]))]
     pub size: String,
     #[serde(default = "default_state")]
     /// User-facing task status: todo, in_progress, snoozed, done, or rejected.
+    #[schemars(extend("enum" = ["todo", "in_progress", "snoozed", "done", "rejected"]))]
     pub state: String,
     #[serde(default = "default_priority")]
+    #[schemars(extend("enum" = ["low", "medium", "high"]))]
     pub priority: String,
     pub start_date: Option<String>,
     pub due_date: Option<String>,
@@ -176,6 +189,9 @@ pub struct TaskCreate {
     pub project_ids: Vec<String>,
     #[serde(default)]
     pub tag_ids: Vec<String>,
+    #[serde(default)]
+    /// Task URLs. Values require an explicit scheme or a www. prefix.
+    pub links: Vec<String>,
 }
 fn default_size() -> String {
     "medium".into()
@@ -194,8 +210,11 @@ pub struct TaskUpdate {
     pub expected_revision: u64,
     pub title: String,
     /// User-facing task status: todo, in_progress, snoozed, done, or rejected.
+    #[schemars(extend("enum" = ["todo", "in_progress", "snoozed", "done", "rejected"]))]
     pub state: String,
+    #[schemars(extend("enum" = ["small", "medium", "big"]))]
     pub size: String,
+    #[schemars(extend("enum" = ["low", "medium", "high"]))]
     pub priority: String,
     pub start_date: Option<String>,
     pub due_date: Option<String>,
@@ -207,6 +226,9 @@ pub struct TaskUpdate {
     pub project_ids: Vec<String>,
     #[serde(default)]
     pub tag_ids: Vec<String>,
+    #[serde(default)]
+    /// Complete task URL set. Values require an explicit scheme or a www. prefix.
+    pub links: Vec<String>,
     #[serde(default)]
     pub detail: String,
 }
@@ -278,6 +300,51 @@ impl TuidoService {
         row.try_get::<i64, _>("revision")
             .map(|v| v as u64)
             .map_err(storage_error)
+    }
+
+    pub async fn process_snooze_expirations(&self) -> ServiceResult<()> {
+        let now = crate::snooze::local_now().map_err(storage_error)?;
+        self.process_snooze_expirations_at(now).await
+    }
+
+    async fn process_snooze_expirations_at(
+        &self,
+        now: time::PrimitiveDateTime,
+    ) -> ServiceResult<()> {
+        let cutoff = crate::snooze::format_datetime(now);
+        let select = format!(
+            "SELECT id, revision FROM tasks WHERE workflow_state = 'snoozed' AND rejected = false AND snoozed_until IS NOT NULL AND snoozed_until <= {}",
+            self.dialect.placeholder(1)
+        );
+        let mut tx = self.pool.begin().await.map_err(storage_error)?;
+        let due = sqlx::query(AssertSqlSafe(select.as_str()))
+            .bind(&cutoff)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(storage_error)?;
+        let update = format!(
+            "UPDATE tasks SET workflow_state = 'todo', rejected = false, snoozed_until = NULL, revision = revision + 1, updated_at = {} WHERE id = {} AND revision = {} AND workflow_state = 'snoozed' AND rejected = false AND snoozed_until IS NOT NULL AND snoozed_until <= {}",
+            self.dialect.placeholder(1),
+            self.dialect.placeholder(2),
+            self.dialect.placeholder(3),
+            self.dialect.placeholder(4)
+        );
+        let mut changed = false;
+        for row in due {
+            let result = sqlx::query(AssertSqlSafe(update.as_str()))
+                .bind(now_text())
+                .bind(row.try_get::<String, _>("id").map_err(storage_error)?)
+                .bind(row.try_get::<i64, _>("revision").map_err(storage_error)?)
+                .bind(&cutoff)
+                .execute(&mut *tx)
+                .await
+                .map_err(storage_error)?;
+            changed |= result.rows_affected() == 1;
+        }
+        if changed {
+            bump_workspace(&mut tx, self.dialect).await?;
+        }
+        tx.commit().await.map_err(storage_error)
     }
 
     pub async fn workspace(&self) -> ServiceResult<WorkspaceView> {
@@ -417,7 +484,7 @@ impl TuidoService {
 
     pub(crate) async fn create_task_entity(
         &self,
-        task: Task,
+        mut task: Task,
     ) -> ServiceResult<Versioned<TaskView>> {
         if task.title.trim().is_empty() {
             return Err(ServiceError::Invalid("task title is required".into()));
@@ -428,6 +495,8 @@ impl TuidoService {
             task.due_date.as_deref(),
             task.snoozed_until.is_some(),
         )?;
+        normalize_task_links(&mut task.links);
+        validation::validate_task_links(&task.links)?;
         let sql = format!(
             "INSERT INTO tasks (id, title, state, workflow_state, rejected, size, priority, start_date, due_date, snoozed_until, detail, created_at, updated_at) VALUES ({}, {}, 'next', {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
             self.dialect.placeholder(1),
@@ -479,6 +548,8 @@ impl TuidoService {
         .await?;
         self.replace_links(&mut tx, "task_tags", "tag_id", &task.id, &task.tag_ids)
             .await?;
+        self.replace_task_links(&mut tx, &task.id, &task.links)
+            .await?;
         bump_workspace(&mut tx, self.dialect).await?;
         tx.commit().await.map_err(storage_error)?;
         Ok(Versioned {
@@ -512,12 +583,14 @@ impl TuidoService {
             people_ids: input.people_ids,
             project_ids: input.project_ids,
             tag_ids: input.tag_ids,
+            links: input.links,
             detail: input.detail,
         })
         .await
     }
 
-    pub async fn update_task(&self, input: TaskUpdate) -> ServiceResult<Versioned<TaskView>> {
+    pub async fn update_task(&self, mut input: TaskUpdate) -> ServiceResult<Versioned<TaskView>> {
+        normalize_task_links(&mut input.links);
         validate_task_update(&input)?;
         let snoozed_until = input
             .snoozed_until
@@ -576,6 +649,8 @@ impl TuidoService {
         .await?;
         self.replace_links(&mut tx, "task_tags", "tag_id", &input.id, &input.tag_ids)
             .await?;
+        self.replace_task_links(&mut tx, &input.id, &input.links)
+            .await?;
         bump_workspace(&mut tx, self.dialect).await?;
         tx.commit().await.map_err(storage_error)?;
         self.get_task(&input.id).await
@@ -585,8 +660,11 @@ impl TuidoService {
         &self,
         id: String,
         expected: u64,
-        patch: TaskPatch,
+        mut patch: TaskPatch,
     ) -> ServiceResult<TaskPatchResult> {
+        if let TaskPatch::Links(links) = &mut patch {
+            normalize_task_links(links);
+        }
         validate_task_patch(&patch)?;
         let mut tx = self.pool.begin().await.map_err(storage_error)?;
         self.claim(&mut tx, "tasks", "task", &id, expected).await?;
@@ -634,6 +712,7 @@ impl TuidoService {
                 self.replace_links(&mut tx, "task_tags", "tag_id", &id, &ids)
                     .await?;
             }
+            TaskPatch::Links(links) => self.replace_task_links(&mut tx, &id, &links).await?,
             patch => apply_task_patch(&mut tx, self.dialect, &id, patch).await?,
         }
         let touch = format!(
@@ -653,6 +732,37 @@ impl TuidoService {
             revision: expected + 1,
             related_revisions,
         })
+    }
+
+    pub async fn set_task_links(
+        &self,
+        id: String,
+        expected_revision: u64,
+        links: Vec<String>,
+    ) -> ServiceResult<Versioned<TaskView>> {
+        self.patch_task(id.clone(), expected_revision, TaskPatch::Links(links))
+            .await?;
+        self.get_task(&id).await
+    }
+
+    pub async fn set_task_tags_by_label(
+        &self,
+        id: String,
+        expected_revision: u64,
+        labels: Vec<String>,
+    ) -> ServiceResult<Versioned<TaskView>> {
+        let mut seen = HashSet::new();
+        let mut tags = Vec::new();
+        for label in labels {
+            validate_required("tag label", &label)?;
+            let label = label.trim().to_string();
+            if seen.insert(label.clone()) {
+                tags.push(Tag::new(Uuid::new_v4().to_string(), label));
+            }
+        }
+        self.patch_task(id.clone(), expected_revision, TaskPatch::Tags(tags))
+            .await?;
+        self.get_task(&id).await
     }
 
     pub async fn delete_task(&self, id: &str, expected: u64) -> ServiceResult<()> {
@@ -1040,6 +1150,36 @@ impl TuidoService {
         }
         Ok(())
     }
+    async fn replace_task_links(
+        &self,
+        tx: &mut Transaction<'_, Any>,
+        task_id: &str,
+        links: &[String],
+    ) -> ServiceResult<()> {
+        let delete = format!(
+            "DELETE FROM task_links WHERE task_id = {}",
+            self.dialect.placeholder(1)
+        );
+        sqlx::query(AssertSqlSafe(delete.as_str()))
+            .bind(task_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(storage_error)?;
+        let insert = format!(
+            "INSERT INTO task_links (task_id, url) VALUES ({}, {})",
+            self.dialect.placeholder(1),
+            self.dialect.placeholder(2)
+        );
+        for link in links {
+            sqlx::query(AssertSqlSafe(insert.as_str()))
+                .bind(task_id)
+                .bind(link)
+                .execute(&mut **tx)
+                .await
+                .map_err(storage_error)?;
+        }
+        Ok(())
+    }
     async fn delete(
         &self,
         table: &'static str,
@@ -1192,8 +1332,14 @@ fn task_view(v: Task) -> TaskView {
         people_ids: v.people_ids,
         project_ids: v.project_ids,
         tag_ids: v.tag_ids,
+        links: v.links,
         detail: v.detail,
     }
+}
+
+fn normalize_task_links(links: &mut Vec<String>) {
+    links.sort();
+    links.dedup();
 }
 
 fn storage_state(v: &str) -> &str {
@@ -1229,12 +1375,6 @@ async fn apply_task_patch(
     id: &str,
     patch: TaskPatch,
 ) -> ServiceResult<()> {
-    let remembered_custom = match &patch {
-        TaskPatch::Snooze {
-            remember_custom, ..
-        } => *remember_custom,
-        _ => None,
-    };
     let (columns, values): (Vec<&str>, Vec<Value>) = match patch {
         TaskPatch::Title(v) => (vec!["title"], vec![Value::Text(v.trim().into())]),
         TaskPatch::Detail(v) => (vec!["detail"], vec![Value::Text(v)]),
@@ -1270,7 +1410,10 @@ async fn apply_task_patch(
                 Value::Optional(None),
             ],
         ),
-        TaskPatch::People(_) | TaskPatch::Projects(_) | TaskPatch::Tags(_) => {
+        TaskPatch::People(_)
+        | TaskPatch::Projects(_)
+        | TaskPatch::Tags(_)
+        | TaskPatch::Links(_) => {
             return Err(ServiceError::Invalid(
                 "relation patch requires full task update".into(),
             ));
@@ -1290,650 +1433,9 @@ async fn apply_task_patch(
         }
         .map_err(storage_error)?;
     }
-    if let Some(custom) = remembered_custom {
-        let sql = format!(
-            "INSERT INTO settings (key, value) VALUES ('last_custom_snooze', {}) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            dialect.placeholder(1)
-        );
-        sqlx::query(AssertSqlSafe(sql.as_str()))
-            .bind(crate::snooze::format_datetime(custom))
-            .execute(&mut **tx)
-            .await
-            .map_err(storage_error)?;
-    }
     Ok(())
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::domain::{TaskSize, TaskState};
-    use sqlx::any::AnyPoolOptions;
-
-    async fn test_service() -> TuidoService {
-        sqlx::any::install_default_drivers();
-        let pool = AnyPoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .unwrap();
-        sqlx::migrate!().run(&pool).await.unwrap();
-        sqlx::query("PRAGMA foreign_keys = ON")
-            .execute(&pool)
-            .await
-            .unwrap();
-        TuidoService::from_parts(pool, SqlDialect::Sqlite)
-    }
-
-    #[test]
-    fn filtered_workspace_filters_tasks_and_returns_complete_entity_catalogs() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let service = test_service().await;
-            let person = service
-                .create_person(PersonInput {
-                    name: "Marlo".into(),
-                    email: "marlo@example.com".into(),
-                    active: true,
-                })
-                .await
-                .unwrap();
-            service
-                .create_person(PersonInput {
-                    name: "Unrelated".into(),
-                    email: String::new(),
-                    active: true,
-                })
-                .await
-                .unwrap();
-            let project = service
-                .create_project(ProjectInput {
-                    key: "LAUNCH".into(),
-                    name: "Launch".into(),
-                    description: String::new(),
-                    lead_person_id: Some(person.value.id.clone()),
-                })
-                .await
-                .unwrap();
-            service
-                .create_project(ProjectInput {
-                    key: "OTHER".into(),
-                    name: "Unrelated".into(),
-                    description: String::new(),
-                    lead_person_id: None,
-                })
-                .await
-                .unwrap();
-            let tag = service
-                .create_tag(TagInput { label: "UI".into() })
-                .await
-                .unwrap();
-            service
-                .create_tag(TagInput {
-                    label: "Unrelated".into(),
-                })
-                .await
-                .unwrap();
-            service
-                .create_task(TaskCreate {
-                    title: "Keep selection stable".into(),
-                    detail: "Select task after refresh".into(),
-                    size: "small".into(),
-                    state: "todo".into(),
-                    priority: "high".into(),
-                    start_date: None,
-                    due_date: Some("2026-07-30".into()),
-                    snoozed_until: None,
-                    people_ids: Vec::new(),
-                    project_ids: vec![project.value.id.clone()],
-                    tag_ids: vec![tag.value.id.clone()],
-                })
-                .await
-                .unwrap();
-            service
-                .create_task(TaskCreate {
-                    title: "Resolved task".into(),
-                    detail: String::new(),
-                    size: "medium".into(),
-                    state: "done".into(),
-                    priority: "medium".into(),
-                    start_date: None,
-                    due_date: None,
-                    snoozed_until: None,
-                    people_ids: Vec::new(),
-                    project_ids: Vec::new(),
-                    tag_ids: Vec::new(),
-                })
-                .await
-                .unwrap();
-
-            let workspace = service
-                .filtered_workspace(WorkspaceFilter {
-                    states: vec!["todo".into()],
-                    priorities: vec!["high".into()],
-                    sizes: vec!["small".into()],
-                    project_ids: vec![project.value.id.clone()],
-                    tag_ids: vec![tag.value.id.clone()],
-                    due_before: Some("2026-08-01".into()),
-                    due_after: Some("2026-07-01".into()),
-                    query: Some("selection".into()),
-                    ..WorkspaceFilter::default()
-                })
-                .await
-                .unwrap();
-
-            assert_eq!(workspace.tasks.len(), 1);
-            assert_eq!(workspace.people.len(), 2);
-            assert!(
-                workspace
-                    .people
-                    .iter()
-                    .any(|candidate| candidate.value.id == person.value.id)
-            );
-            assert_eq!(workspace.projects.len(), 2);
-            assert_eq!(workspace.tags.len(), 2);
-
-            let with_resolved = service
-                .filtered_workspace(WorkspaceFilter {
-                    include_resolved: true,
-                    ..WorkspaceFilter::default()
-                })
-                .await
-                .unwrap();
-            assert_eq!(with_resolved.tasks.len(), 2);
-        });
-    }
-
-    #[test]
-    fn filtered_workspace_rejects_resolved_states_and_unknown_relations_by_default() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let service = test_service().await;
-
-            let resolved = service
-                .filtered_workspace(WorkspaceFilter {
-                    states: vec!["done".into()],
-                    ..WorkspaceFilter::default()
-                })
-                .await;
-            assert!(matches!(resolved, Err(ServiceError::Invalid(_))));
-
-            let unknown = service
-                .filtered_workspace(WorkspaceFilter {
-                    tag_ids: vec!["missing".into()],
-                    ..WorkspaceFilter::default()
-                })
-                .await;
-            assert!(matches!(unknown, Err(ServiceError::Invalid(_))));
-        });
-    }
-
-    #[test]
-    fn public_task_inputs_reject_legacy_state_aliases() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let service = test_service().await;
-
-            for alias in ["clarify", "next", "waiting", "doing"] {
-                let create = service
-                    .create_task(TaskCreate {
-                        title: format!("Legacy {alias}"),
-                        detail: String::new(),
-                        size: "small".into(),
-                        state: alias.into(),
-                        priority: "medium".into(),
-                        start_date: None,
-                        due_date: None,
-                        snoozed_until: None,
-                        people_ids: Vec::new(),
-                        project_ids: Vec::new(),
-                        tag_ids: Vec::new(),
-                    })
-                    .await;
-                assert!(matches!(create, Err(ServiceError::Invalid(_))));
-
-                let filter = service
-                    .filtered_workspace(WorkspaceFilter {
-                        states: vec![alias.into()],
-                        ..WorkspaceFilter::default()
-                    })
-                    .await;
-                assert!(matches!(filter, Err(ServiceError::Invalid(_))));
-            }
-
-            let task = service
-                .create_task(TaskCreate {
-                    title: "Canonical".into(),
-                    detail: String::new(),
-                    size: "small".into(),
-                    state: "todo".into(),
-                    priority: "medium".into(),
-                    start_date: None,
-                    due_date: None,
-                    snoozed_until: None,
-                    people_ids: Vec::new(),
-                    project_ids: Vec::new(),
-                    tag_ids: Vec::new(),
-                })
-                .await
-                .unwrap();
-            let update = service
-                .update_task(TaskUpdate {
-                    id: task.value.id,
-                    expected_revision: task.revision,
-                    title: "Legacy update".into(),
-                    state: "doing".into(),
-                    size: "small".into(),
-                    priority: "medium".into(),
-                    start_date: None,
-                    due_date: None,
-                    snoozed_until: None,
-                    people_ids: Vec::new(),
-                    project_ids: Vec::new(),
-                    tag_ids: Vec::new(),
-                    detail: String::new(),
-                })
-                .await;
-            assert!(matches!(update, Err(ServiceError::Invalid(_))));
-        });
-    }
-
-    #[test]
-    fn stale_task_write_returns_typed_conflict_and_preserves_winner() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            sqlx::any::install_default_drivers();
-            let pool = AnyPoolOptions::new()
-                .max_connections(1)
-                .connect("sqlite::memory:")
-                .await
-                .unwrap();
-            sqlx::migrate!().run(&pool).await.unwrap();
-            let service = TuidoService::from_parts(pool, SqlDialect::Sqlite);
-            let task = Task::quick_capture(
-                "task".into(),
-                "Original".into(),
-                String::new(),
-                TaskSize::Small,
-            );
-            service.create_task_entity(task).await.unwrap();
-
-            service
-                .patch_task("task".into(), 1, TaskPatch::State(TaskState::Done))
-                .await
-                .unwrap();
-            let error = service
-                .patch_task("task".into(), 1, TaskPatch::State(TaskState::Rejected))
-                .await
-                .unwrap_err();
-
-            assert!(matches!(
-                error,
-                ServiceError::Conflict {
-                    expected: 1,
-                    actual: Some(2),
-                    ..
-                }
-            ));
-            assert_eq!(service.get_task("task").await.unwrap().value.state, "done");
-            assert_eq!(service.workspace_revision().await.unwrap(), 3);
-        });
-    }
-
-    #[test]
-    fn failed_relation_replacement_rolls_back_entity_and_workspace_revisions() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            sqlx::any::install_default_drivers();
-            let pool = AnyPoolOptions::new()
-                .max_connections(1)
-                .connect("sqlite::memory:")
-                .await
-                .unwrap();
-            sqlx::migrate!().run(&pool).await.unwrap();
-            sqlx::query("PRAGMA foreign_keys = ON")
-                .execute(&pool)
-                .await
-                .unwrap();
-            let service = TuidoService::from_parts(pool, SqlDialect::Sqlite);
-            service
-                .create_task_entity(Task::quick_capture(
-                    "task".into(),
-                    "Task".into(),
-                    String::new(),
-                    TaskSize::Small,
-                ))
-                .await
-                .unwrap();
-
-            assert!(
-                service
-                    .patch_task("task".into(), 1, TaskPatch::People(vec!["missing".into()]))
-                    .await
-                    .is_err()
-            );
-
-            assert_eq!(service.get_task("task").await.unwrap().revision, 1);
-            assert_eq!(service.workspace_revision().await.unwrap(), 2);
-        });
-    }
-
-    #[test]
-    fn malformed_task_snooze_update_is_rejected_without_poisoning_workspace() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let service = test_service().await;
-            service
-                .create_task_entity(Task::quick_capture(
-                    "task".into(),
-                    "Original".into(),
-                    String::new(),
-                    TaskSize::Small,
-                ))
-                .await
-                .unwrap();
-
-            let error = service
-                .update_task(TaskUpdate {
-                    id: "task".into(),
-                    expected_revision: 1,
-                    title: "Changed".into(),
-                    state: "todo".into(),
-                    size: "small".into(),
-                    priority: "medium".into(),
-                    start_date: None,
-                    due_date: None,
-                    snoozed_until: Some("not-a-date".into()),
-                    people_ids: Vec::new(),
-                    project_ids: Vec::new(),
-                    tag_ids: Vec::new(),
-                    detail: String::new(),
-                })
-                .await
-                .unwrap_err();
-
-            assert!(matches!(error, ServiceError::Invalid(_)));
-            let task = service.get_task("task").await.unwrap();
-            assert_eq!(task.revision, 1);
-            assert_eq!(task.value.title, "Original");
-            assert!(service.workspace().await.is_ok());
-        });
-    }
-
-    #[test]
-    fn task_temporal_fields_and_snooze_invariants_are_enforced() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let service = test_service().await;
-            let mut invalid_date = Task::quick_capture(
-                "invalid-date".into(),
-                "Invalid date".into(),
-                String::new(),
-                TaskSize::Small,
-            );
-            invalid_date.start_date = Some("2026-02-30".into());
-            assert!(matches!(
-                service.create_task_entity(invalid_date).await,
-                Err(ServiceError::Invalid(_))
-            ));
-
-            let mut missing_until = Task::quick_capture(
-                "missing-until".into(),
-                "Missing until".into(),
-                String::new(),
-                TaskSize::Small,
-            );
-            missing_until.state = TaskState::Snoozed;
-            assert!(matches!(
-                service.create_task_entity(missing_until).await,
-                Err(ServiceError::Invalid(_))
-            ));
-
-            let mut stale_until = Task::quick_capture(
-                "stale-until".into(),
-                "Stale until".into(),
-                String::new(),
-                TaskSize::Small,
-            );
-            stale_until.snoozed_until = Some(time::macros::datetime!(2026-07-25 08:00));
-            assert!(matches!(
-                service.create_task_entity(stale_until).await,
-                Err(ServiceError::Invalid(_))
-            ));
-        });
-    }
-
-    #[test]
-    fn state_patch_clears_snooze_timestamp_and_snoozed_state_requires_snooze_action() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let service = test_service().await;
-            let mut task =
-                Task::quick_capture("task".into(), "Task".into(), String::new(), TaskSize::Small);
-            task.state = TaskState::Snoozed;
-            task.snoozed_until = Some(time::macros::datetime!(2026-07-25 08:00));
-            service.create_task_entity(task).await.unwrap();
-
-            service
-                .patch_task("task".into(), 1, TaskPatch::State(TaskState::Done))
-                .await
-                .unwrap();
-            let completed = service.get_task("task").await.unwrap();
-            assert_eq!(completed.value.state, "done");
-            assert_eq!(completed.value.snoozed_until, None);
-
-            let error = service
-                .patch_task("task".into(), 2, TaskPatch::State(TaskState::Snoozed))
-                .await
-                .unwrap_err();
-            assert!(matches!(error, ServiceError::Invalid(_)));
-            assert_eq!(service.get_task("task").await.unwrap().revision, 2);
-        });
-    }
-
-    #[test]
-    fn cascade_deletes_increment_every_affected_revision() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let service = test_service().await;
-            let person = Person::new("person".into(), "Ada".into(), String::new());
-            service.create_person_entity(person).await.unwrap();
-            let mut project = Project::new(
-                "project".into(),
-                "CORE".into(),
-                "Core".into(),
-                String::new(),
-            );
-            project.lead_person_id = Some("person".into());
-            service.create_project_entity(project).await.unwrap();
-            service
-                .create_tag_entity(Tag::new("tag".into(), "api".into()))
-                .await
-                .unwrap();
-            let mut task =
-                Task::quick_capture("task".into(), "Task".into(), String::new(), TaskSize::Small);
-            task.people_ids = vec!["person".into()];
-            task.project_ids = vec!["project".into()];
-            task.tag_ids = vec!["tag".into()];
-            service.create_task_entity(task).await.unwrap();
-
-            service.delete_person("person", 1).await.unwrap();
-            assert_eq!(service.get_task("task").await.unwrap().revision, 2);
-            let project = service
-                .workspace()
-                .await
-                .unwrap()
-                .projects
-                .into_iter()
-                .next()
-                .unwrap();
-            assert_eq!(project.revision, 2);
-            assert_eq!(project.value.lead_person_id, None);
-            assert!(matches!(
-                service
-                    .patch_project("project".into(), 1, ProjectPatch::Name("Stale".into()))
-                    .await,
-                Err(ServiceError::Conflict {
-                    actual: Some(2),
-                    ..
-                })
-            ));
-
-            service.delete_project("project", 2).await.unwrap();
-            assert_eq!(service.get_task("task").await.unwrap().revision, 3);
-            service.delete_tag("tag", 1).await.unwrap();
-            assert_eq!(service.get_task("task").await.unwrap().revision, 4);
-            assert!(matches!(
-                service
-                    .patch_task("task".into(), 1, TaskPatch::Title("Stale".into()))
-                    .await,
-                Err(ServiceError::Conflict {
-                    actual: Some(4),
-                    ..
-                })
-            ));
-        });
-    }
-
-    #[test]
-    fn empty_management_updates_are_rejected() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let service = test_service().await;
-            service
-                .create_person_entity(Person::new("person".into(), "Ada".into(), String::new()))
-                .await
-                .unwrap();
-            service
-                .create_project_entity(Project::new(
-                    "project".into(),
-                    "CORE".into(),
-                    "Core".into(),
-                    String::new(),
-                ))
-                .await
-                .unwrap();
-            service
-                .create_tag_entity(Tag::new("tag".into(), "api".into()))
-                .await
-                .unwrap();
-
-            assert!(matches!(
-                service
-                    .patch_person("person".into(), 1, PersonPatch::Name("  ".into()))
-                    .await,
-                Err(ServiceError::Invalid(_))
-            ));
-            assert!(matches!(
-                service
-                    .patch_project("project".into(), 1, ProjectPatch::Key(String::new()))
-                    .await,
-                Err(ServiceError::Invalid(_))
-            ));
-            assert!(matches!(
-                service
-                    .patch_tag("tag".into(), 1, TagPatch::Label("\t".into()))
-                    .await,
-                Err(ServiceError::Invalid(_))
-            ));
-        });
-    }
-
-    #[test]
-    fn concurrent_workspace_reads_return_matching_values_and_revisions() {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            sqlx::any::install_default_drivers();
-            let path = std::env::temp_dir().join(format!("tuido-{}.sqlite", Uuid::new_v4()));
-            let url = format!("sqlite://{}?mode=rwc", path.display());
-            let pool = AnyPoolOptions::new()
-                .max_connections(4)
-                .connect(&url)
-                .await
-                .unwrap();
-            sqlx::migrate!().run(&pool).await.unwrap();
-            sqlx::query("PRAGMA busy_timeout = 5000")
-                .execute(&pool)
-                .await
-                .unwrap();
-            let service = TuidoService::from_parts(pool.clone(), SqlDialect::Sqlite);
-            service
-                .create_task_entity(Task::quick_capture(
-                    "task".into(),
-                    "v0".into(),
-                    String::new(),
-                    TaskSize::Small,
-                ))
-                .await
-                .unwrap();
-            let writer = {
-                let service = service.clone();
-                tokio::spawn(async move {
-                    for revision in 1..=20 {
-                        service
-                            .patch_task(
-                                "task".into(),
-                                revision,
-                                TaskPatch::Title(format!("v{revision}")),
-                            )
-                            .await
-                            .unwrap();
-                        tokio::task::yield_now().await;
-                    }
-                })
-            };
-
-            for _ in 0..40 {
-                let workspace = service.workspace().await.unwrap();
-                let task = &workspace.tasks[0];
-                assert_eq!(workspace.revision, task.revision + 1);
-                let value_revision = task
-                    .value
-                    .title
-                    .strip_prefix('v')
-                    .unwrap()
-                    .parse::<u64>()
-                    .unwrap();
-                assert_eq!(value_revision + 1, task.revision);
-                tokio::task::yield_now().await;
-            }
-            writer.await.unwrap();
-            pool.close().await;
-            let _ = std::fs::remove_file(path);
-        });
-    }
-}
+#[path = "service/tests.rs"]
+mod tests;

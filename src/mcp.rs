@@ -18,7 +18,7 @@ use crate::{
     },
 };
 
-const MCP_INSTRUCTIONS: &str = "Full read/write Tuido task, people, project, and tag service. Treat task state as user-facing Status, not Type or Workflow. Task people are people involved besides the workspace owner; never describe them as assignees or owners. Revisions are internal optimistic-concurrency tokens: use the latest entity revision as expected_revision for mutations, but omit revisions from user-facing task tables and summaries unless the user asks for them.";
+const MCP_INSTRUCTIONS: &str = "Read and mutate Tuido tasks, people, projects, and tags. Treat task state as user-facing Status, not Type or Workflow. Task people are people involved besides the workspace owner; never describe them as assignees or owners. Revisions are internal optimistic-concurrency tokens: use the latest entity revision as expected_revision for mutations, but omit revisions from user-facing task tables and summaries unless the user asks for them.";
 
 #[derive(Clone)]
 struct McpServer {
@@ -61,6 +61,22 @@ struct SnoozeInput {
     until: String,
 }
 #[derive(Debug, Deserialize, JsonSchema)]
+struct TaskLinksUpdate {
+    id: String,
+    #[schemars(schema_with = "crate::service::revision_schema")]
+    expected_revision: u64,
+    /// Complete set of task URLs. Replaces existing links; use an empty list to remove all links.
+    links: Vec<String>,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+struct TaskTagsUpdate {
+    id: String,
+    #[schemars(schema_with = "crate::service::revision_schema")]
+    expected_revision: u64,
+    /// Complete tag label set. Existing labels are reused and missing labels are created atomically.
+    labels: Vec<String>,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
 struct PersonUpdate {
     id: String,
     #[schemars(schema_with = "crate::service::revision_schema")]
@@ -89,8 +105,6 @@ struct DeletionResult {
     deleted: bool,
     entity: &'static str,
     id: String,
-    #[schemars(schema_with = "crate::service::revision_schema")]
-    revision: u64,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -121,6 +135,7 @@ impl McpServer {
         &self,
         Parameters(filter): Parameters<WorkspaceFilter>,
     ) -> Result<Json<WorkspaceView>, String> {
+        preflight_task_expirations(&self.service).await?;
         self.service
             .filtered_workspace(filter)
             .await
@@ -132,13 +147,16 @@ impl McpServer {
         &self,
         Parameters(v): Parameters<Id>,
     ) -> Result<Json<Versioned<TaskView>>, String> {
+        preflight_task_expirations(&self.service).await?;
         self.service
             .get_task(&v.id)
             .await
             .map(Json)
             .map_err(mcp_error)
     }
-    #[tool(description = "Create task")]
+    #[tool(
+        description = "Create a task, optionally with a links array. Links are deduplicated and returned sorted by URL. URLs require an explicit scheme such as https:// or file://, or must start with www."
+    )]
     async fn create_task(
         &self,
         Parameters(v): Parameters<TaskCreate>,
@@ -156,8 +174,23 @@ impl McpServer {
         &self,
         Parameters(v): Parameters<TaskUpdate>,
     ) -> Result<Json<Versioned<TaskView>>, String> {
+        preflight_task_expirations(&self.service).await?;
         self.service
             .update_task(v)
+            .await
+            .map(Json)
+            .map_err(mcp_error)
+    }
+    #[tool(
+        description = "Replace a task's complete link set. Get the task first, modify its links array to add, edit, or remove URLs, then call this tool with the latest expected_revision. Links are deduplicated and returned sorted by URL; pass [] to remove all links. URLs require an explicit scheme such as https:// or file://, or must start with www."
+    )]
+    async fn set_task_links(
+        &self,
+        Parameters(v): Parameters<TaskLinksUpdate>,
+    ) -> Result<Json<Versioned<TaskView>>, String> {
+        preflight_task_expirations(&self.service).await?;
+        self.service
+            .set_task_links(v.id, v.expected_revision, v.links)
             .await
             .map(Json)
             .map_err(mcp_error)
@@ -171,8 +204,8 @@ impl McpServer {
             deleted: true,
             entity: "task",
             id: v.id.clone(),
-            revision: v.expected_revision,
         };
+        preflight_task_expirations(&self.service).await?;
         self.service
             .delete_task(&v.id, v.expected_revision)
             .await
@@ -184,6 +217,7 @@ impl McpServer {
         &self,
         Parameters(v): Parameters<TaskStateInput>,
     ) -> Result<Json<Versioned<TaskView>>, String> {
+        preflight_task_expirations(&self.service).await?;
         let state = TaskState::parse(&v.state).ok_or_else(|| "invalid task state".to_string())?;
         mutate_task(
             &self.service,
@@ -198,6 +232,7 @@ impl McpServer {
         &self,
         Parameters(v): Parameters<Expected>,
     ) -> Result<Json<Versioned<TaskView>>, String> {
+        preflight_task_expirations(&self.service).await?;
         mutate_task(
             &self.service,
             v.id,
@@ -211,6 +246,7 @@ impl McpServer {
         &self,
         Parameters(v): Parameters<Expected>,
     ) -> Result<Json<Versioned<TaskView>>, String> {
+        preflight_task_expirations(&self.service).await?;
         mutate_task(
             &self.service,
             v.id,
@@ -224,6 +260,7 @@ impl McpServer {
         &self,
         Parameters(v): Parameters<SnoozeInput>,
     ) -> Result<Json<Versioned<TaskView>>, String> {
+        preflight_task_expirations(&self.service).await?;
         let until = crate::snooze::parse_datetime(&v.until).map_err(|e| e.to_string())?;
         mutate_task(
             &self.service,
@@ -241,6 +278,7 @@ impl McpServer {
         &self,
         Parameters(v): Parameters<Expected>,
     ) -> Result<Json<Versioned<TaskView>>, String> {
+        preflight_task_expirations(&self.service).await?;
         mutate_task(
             &self.service,
             v.id,
@@ -248,6 +286,21 @@ impl McpServer {
             TaskPatch::Unsnooze,
         )
         .await
+    }
+
+    #[tool(
+        description = "Replace a task's complete tag set by label. Existing labels are reused and missing labels are created atomically; duplicates are removed and [] clears all tags."
+    )]
+    async fn set_task_tags(
+        &self,
+        Parameters(v): Parameters<TaskTagsUpdate>,
+    ) -> Result<Json<Versioned<TaskView>>, String> {
+        preflight_task_expirations(&self.service).await?;
+        self.service
+            .set_task_tags_by_label(v.id, v.expected_revision, v.labels)
+            .await
+            .map(Json)
+            .map_err(mcp_error)
     }
 
     #[tool(description = "List people with revisions")]
@@ -424,8 +477,14 @@ fn deletion_result(entity: &'static str, expected: &Expected) -> DeletionResult 
         deleted: true,
         entity,
         id: expected.id.clone(),
-        revision: expected.expected_revision,
     }
+}
+
+async fn preflight_task_expirations(service: &TuidoService) -> Result<(), String> {
+    service
+        .process_snooze_expirations()
+        .await
+        .map_err(mcp_error)
 }
 
 async fn mutate_task(
@@ -568,6 +627,33 @@ mod tests {
         assert!(tools.contains("Task state is user-facing status"));
         assert!(tools.contains("never assignees"));
         assert!(tools.contains("should normally be omitted from user-facing summaries"));
+        assert!(tools.contains("set_task_links"));
+        assert!(tools.contains("complete link set"));
+    }
+
+    #[test]
+    fn task_tools_expose_allowed_property_values() {
+        let tools = serde_json::to_value(McpServer::tool_router().list_all()).unwrap();
+        let create_task = tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "create_task")
+            .unwrap();
+        let properties = &create_task["inputSchema"]["properties"];
+
+        assert_eq!(
+            properties["size"]["enum"],
+            serde_json::json!(["small", "medium", "big"])
+        );
+        assert_eq!(
+            properties["priority"]["enum"],
+            serde_json::json!(["low", "medium", "high"])
+        );
+        assert_eq!(
+            properties["state"]["enum"],
+            serde_json::json!(["todo", "in_progress", "snoozed", "done", "rejected"])
+        );
     }
 
     #[test]
@@ -656,6 +742,7 @@ mod tests {
                     people_ids: Vec::new(),
                     project_ids: Vec::new(),
                     tag_ids: Vec::new(),
+                    links: Vec::new(),
                     detail: String::new(),
                 }))
                 .await;
@@ -684,7 +771,244 @@ mod tests {
             assert!(deleted.deleted);
             assert_eq!(deleted.entity, "task");
             assert_eq!(deleted.id, "task");
-            assert_eq!(deleted.revision, 2);
+            assert!(
+                serde_json::to_value(deleted)
+                    .unwrap()
+                    .get("revision")
+                    .is_none()
+            );
+        });
+    }
+
+    #[test]
+    fn task_reads_process_expirations_without_spurious_workspace_changes() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let service = TuidoService::connect_url("sqlite::memory:").await.unwrap();
+            let server = McpServer::new(service.clone());
+            let create = |title: &str| TaskCreate {
+                title: title.into(),
+                detail: String::new(),
+                size: "small".into(),
+                state: "snoozed".into(),
+                priority: "medium".into(),
+                start_date: None,
+                due_date: None,
+                snoozed_until: Some("2000-01-01T00:00:00".into()),
+                people_ids: Vec::new(),
+                project_ids: Vec::new(),
+                tag_ids: Vec::new(),
+                links: Vec::new(),
+            };
+
+            let first = server
+                .create_task(Parameters(create("First")))
+                .await
+                .unwrap()
+                .0;
+            let workspace = server
+                .get_workspace(Parameters(WorkspaceFilter::default()))
+                .await
+                .unwrap()
+                .0;
+            assert_eq!(workspace.tasks[0].value.state, "todo");
+            assert_eq!(workspace.tasks[0].revision, first.revision + 1);
+
+            let second = server
+                .create_task(Parameters(create("Second")))
+                .await
+                .unwrap()
+                .0;
+            let task = server
+                .get_task(Parameters(Id {
+                    id: second.value.id,
+                }))
+                .await
+                .unwrap()
+                .0;
+            assert_eq!(task.value.state, "todo");
+            assert_eq!(task.revision, second.revision + 1);
+
+            let before = service.workspace_revision().await.unwrap();
+            server
+                .get_workspace(Parameters(WorkspaceFilter::default()))
+                .await
+                .unwrap();
+            assert_eq!(service.workspace_revision().await.unwrap(), before);
+        });
+    }
+
+    #[test]
+    fn task_tag_mutation_preflight_conflicts_but_person_creation_does_not_expire_tasks() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let service = TuidoService::connect_url("sqlite::memory:").await.unwrap();
+            let server = McpServer::new(service.clone());
+            let task = server
+                .create_task(Parameters(TaskCreate {
+                    title: "Expired".into(),
+                    detail: String::new(),
+                    size: "small".into(),
+                    state: "snoozed".into(),
+                    priority: "medium".into(),
+                    start_date: None,
+                    due_date: None,
+                    snoozed_until: Some("2000-01-01T00:00:00".into()),
+                    people_ids: Vec::new(),
+                    project_ids: Vec::new(),
+                    tag_ids: Vec::new(),
+                    links: Vec::new(),
+                }))
+                .await
+                .unwrap()
+                .0;
+
+            server
+                .create_person(Parameters(PersonInput {
+                    name: "Ada".into(),
+                    email: String::new(),
+                    active: true,
+                }))
+                .await
+                .unwrap();
+            assert_eq!(
+                service.get_task(&task.value.id).await.unwrap().value.state,
+                "snoozed"
+            );
+
+            let error = server
+                .set_task_tags(Parameters(TaskTagsUpdate {
+                    id: task.value.id.clone(),
+                    expected_revision: task.revision,
+                    labels: vec!["expired".into()],
+                }))
+                .await
+                .err()
+                .unwrap();
+            assert!(error.contains("revision conflict"));
+            assert_eq!(service.get_task(&task.value.id).await.unwrap().revision, 2);
+        });
+    }
+
+    #[test]
+    fn agents_can_replace_task_tags_atomically_by_label() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let service = TuidoService::connect_url("sqlite::memory:").await.unwrap();
+            let existing = service
+                .create_tag(TagInput {
+                    label: "api".into(),
+                })
+                .await
+                .unwrap();
+            let server = McpServer::new(service);
+            let task = server
+                .create_task(Parameters(TaskCreate {
+                    title: "Tagged".into(),
+                    detail: String::new(),
+                    size: "small".into(),
+                    state: "todo".into(),
+                    priority: "medium".into(),
+                    start_date: None,
+                    due_date: None,
+                    snoozed_until: None,
+                    people_ids: Vec::new(),
+                    project_ids: Vec::new(),
+                    tag_ids: Vec::new(),
+                    links: Vec::new(),
+                }))
+                .await
+                .unwrap()
+                .0;
+
+            let tagged = server
+                .set_task_tags(Parameters(TaskTagsUpdate {
+                    id: task.value.id,
+                    expected_revision: task.revision,
+                    labels: vec![" api ".into(), "new".into(), "new".into()],
+                }))
+                .await
+                .unwrap()
+                .0;
+            assert!(tagged.value.tag_ids.contains(&existing.value.id));
+            assert_eq!(tagged.value.tag_ids.len(), 2);
+        });
+    }
+
+    #[test]
+    fn agents_can_create_and_replace_sorted_task_links() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let service = TuidoService::connect_url("sqlite::memory:").await.unwrap();
+            let server = McpServer::new(service);
+            let created = server
+                .create_task(Parameters(TaskCreate {
+                    title: "Linked task".into(),
+                    detail: String::new(),
+                    size: "small".into(),
+                    state: "todo".into(),
+                    priority: "medium".into(),
+                    start_date: None,
+                    due_date: None,
+                    snoozed_until: None,
+                    people_ids: Vec::new(),
+                    project_ids: Vec::new(),
+                    tag_ids: Vec::new(),
+                    links: vec![
+                        "https://z.example/item".into(),
+                        "https://a.example/item".into(),
+                    ],
+                }))
+                .await
+                .unwrap()
+                .0;
+            assert_eq!(
+                created.value.links,
+                ["https://a.example/item", "https://z.example/item"]
+            );
+
+            let updated = server
+                .set_task_links(Parameters(TaskLinksUpdate {
+                    id: created.value.id,
+                    expected_revision: created.revision,
+                    links: vec![
+                        "https://m.example/edited".into(),
+                        "https://b.example/added".into(),
+                        "https://b.example/added".into(),
+                    ],
+                }))
+                .await
+                .unwrap()
+                .0;
+            assert_eq!(updated.revision, 2);
+            assert_eq!(
+                updated.value.links,
+                ["https://b.example/added", "https://m.example/edited"]
+            );
+
+            let cleared = server
+                .set_task_links(Parameters(TaskLinksUpdate {
+                    id: updated.value.id,
+                    expected_revision: updated.revision,
+                    links: Vec::new(),
+                }))
+                .await
+                .unwrap()
+                .0;
+            assert_eq!(cleared.revision, 3);
+            assert!(cleared.value.links.is_empty());
         });
     }
 
@@ -733,6 +1057,7 @@ mod tests {
                         people_ids: Vec::new(),
                         project_ids: Vec::new(),
                         tag_ids: Vec::new(),
+                        links: Vec::new(),
                         detail: String::new(),
                     }))
                     .await;

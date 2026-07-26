@@ -2,7 +2,12 @@ use std::time::Duration as StdDuration;
 
 use std::{cell::RefCell, rc::Rc};
 
-use ratatui::{Frame, layout::Rect};
+use ratatui::{
+    Frame,
+    layout::Rect,
+    style::Style,
+    widgets::{Block, Clear},
+};
 use time::{
     Date, Duration, OffsetDateTime, PrimitiveDateTime, Time, Weekday, macros::format_description,
 };
@@ -38,6 +43,7 @@ pub(crate) struct QuickSnoozes {
     pub tomorrow: PrimitiveDateTime,
     pub weekend: PrimitiveDateTime,
     pub next_week: PrimitiveDateTime,
+    weekend_is_next: bool,
 }
 
 pub(crate) fn quick_snoozes(now: PrimitiveDateTime) -> QuickSnoozes {
@@ -45,6 +51,7 @@ pub(crate) fn quick_snoozes(now: PrimitiveDateTime) -> QuickSnoozes {
         tomorrow: at_eight(now.date() + Duration::days(1)),
         weekend: next_weekday_at_eight(now.date(), Weekday::Saturday),
         next_week: next_weekday_at_eight(now.date(), Weekday::Monday),
+        weekend_is_next: matches!(now.weekday(), Weekday::Saturday | Weekday::Sunday),
     }
 }
 
@@ -141,20 +148,31 @@ fn snooze_options(
     last_custom: Option<PrimitiveDateTime>,
     is_snoozed: bool,
 ) -> Vec<SnoozeOption> {
-    let mut options = vec![
-        SnoozeOption {
-            choice: SnoozeChoice::Tomorrow,
-            label: format!("Tomorrow · {}", quick_label(quick.tomorrow)),
-        },
-        SnoozeOption {
-            choice: SnoozeChoice::Weekend,
-            label: format!("This weekend · {}", quick_label(quick.weekend)),
-        },
-        SnoozeOption {
-            choice: SnoozeChoice::NextWeek,
-            label: format!("Next week · {}", quick_label(quick.next_week)),
-        },
-    ];
+    let tomorrow = SnoozeOption {
+        choice: SnoozeChoice::Tomorrow,
+        label: format!("Tomorrow · {}", quick_label(quick.tomorrow)),
+    };
+    let weekend = SnoozeOption {
+        choice: SnoozeChoice::Weekend,
+        label: format!(
+            "{} weekend · {}",
+            if quick.weekend_is_next {
+                "Next"
+            } else {
+                "This"
+            },
+            quick_label(quick.weekend)
+        ),
+    };
+    let next_week = SnoozeOption {
+        choice: SnoozeChoice::NextWeek,
+        label: format!("Next week · {}", quick_label(quick.next_week)),
+    };
+    let mut options = if quick.weekend_is_next {
+        vec![tomorrow, next_week, weekend]
+    } else {
+        vec![tomorrow, weekend, next_week]
+    };
     if let Some(last_custom) = last_custom {
         options.push(SnoozeOption {
             choice: SnoozeChoice::Last,
@@ -163,7 +181,7 @@ fn snooze_options(
     }
     options.push(SnoozeOption {
         choice: SnoozeChoice::Pick,
-        label: "◷ Pick date & time".into(),
+        label: "󰃭 Pick date & time".into(),
     });
     if is_snoozed {
         options.push(SnoozeOption {
@@ -208,9 +226,6 @@ impl SnoozeDialog {
         is_snoozed: bool,
     ) -> Self {
         let quick = quick_snoozes(now);
-        let initial = last_custom
-            .filter(|value| *value > now)
-            .unwrap_or(quick.tomorrow);
         let picker_task_id = task_id.clone();
         let actions = Rc::new(RefCell::new(Vec::new()));
         let mut dropdown =
@@ -229,7 +244,7 @@ impl SnoozeDialog {
             menu_field_area: Rect::default(),
             picker: DateTimePicker::new()
                 .layout(DateTimePickerLayout::Stepped)
-                .value(Some(initial))
+                .value(Some(quick.tomorrow))
                 .on_select(move |until| AppMsg::SnoozeTask {
                     task_id: picker_task_id.clone(),
                     until,
@@ -326,6 +341,11 @@ impl TuiNode<AppMsg> for SnoozeDialog {
         match self.mode {
             SnoozeMode::Menu => self.dropdown.render(frame, self.menu_field_area, ctx),
             SnoozeMode::Picker => {
+                frame.render_widget(Clear, area);
+                frame.render_widget(
+                    Block::default().style(Style::default().bg(tuicore::theme().surface_bg())),
+                    area,
+                );
                 <DateTimePicker<AppMsg> as TuiNode<AppMsg>>::render(&self.picker, frame, area, ctx)
             }
         }
@@ -445,6 +465,7 @@ fn editor_date_is_valid(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::{Terminal, backend::TestBackend, style::Color, widgets::Paragraph};
     use time::{Month, macros::datetime};
     use tuicore::{FocusManager, Key, KeyEvent, KeyModifiers, TreeDispatcher};
 
@@ -458,6 +479,60 @@ mod tests {
         let monday = quick_snoozes(datetime!(2026-07-27 12:00));
         assert_eq!(monday.next_week, datetime!(2026-08-03 8:00));
         assert_eq!(monday.weekend, datetime!(2026-08-01 8:00));
+    }
+
+    #[test]
+    fn sunday_labels_upcoming_saturday_as_next_weekend() {
+        let quick = quick_snoozes(datetime!(2026-07-26 18:13));
+        let weekend = snooze_options(quick, None, false)
+            .into_iter()
+            .find(|option| option.choice == SnoozeChoice::Weekend)
+            .expect("weekend option should exist");
+
+        assert_eq!(weekend.label, "Next weekend · Sat · 8:00 AM");
+    }
+
+    #[test]
+    fn next_weekend_is_listed_after_next_week() {
+        let choices = snooze_options(quick_snoozes(datetime!(2026-07-26 18:13)), None, false)
+            .into_iter()
+            .map(|option| option.choice)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            &choices[..3],
+            &[
+                SnoozeChoice::Tomorrow,
+                SnoozeChoice::NextWeek,
+                SnoozeChoice::Weekend,
+            ]
+        );
+    }
+
+    #[test]
+    fn custom_date_option_uses_material_calendar_icon() {
+        let quick = quick_snoozes(datetime!(2026-07-26 18:13));
+        let pick = snooze_options(quick, None, false)
+            .into_iter()
+            .find(|option| option.choice == SnoozeChoice::Pick)
+            .expect("custom date option should exist");
+
+        assert_eq!(pick.label, "󰃭 Pick date & time");
+    }
+
+    #[test]
+    fn picker_opens_at_tomorrow_eight_instead_of_last_custom_value() {
+        let dialog = SnoozeDialog::new(
+            "task".into(),
+            datetime!(2026-07-26 18:13),
+            Some(datetime!(2026-08-05 14:30)),
+            false,
+        );
+
+        assert_eq!(
+            dialog.picker.current_value(),
+            Some(datetime!(2026-07-27 8:00))
+        );
     }
 
     #[test]
@@ -539,6 +614,36 @@ mod tests {
     }
 
     #[test]
+    fn picker_clears_underlying_content_and_fills_its_surface() {
+        let area = Rect::new(0, 0, 24, 10);
+        let mut dialog = SnoozeDialog::new("task".into(), datetime!(2026-07-23 12:00), None, false);
+        dialog.mode = SnoozeMode::Picker;
+        dialog.layout(area, &mut LayoutCtx::new());
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+
+        terminal
+            .draw(|frame| {
+                let underlying = (0..area.height)
+                    .map(|_| "X".repeat(area.width as usize))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                frame.render_widget(
+                    Paragraph::new(underlying).style(Style::default().fg(Color::Magenta)),
+                    area,
+                );
+                dialog.render(frame, area, &mut RenderCtx::new());
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        assert!(buffer.content().iter().all(|cell| cell.symbol() != "X"));
+        assert_eq!(
+            buffer.cell((area.width - 2, area.height - 2)).unwrap().bg,
+            tuicore::theme().surface_bg()
+        );
+    }
+
+    #[test]
     fn pick_choice_reopens_picker_after_escape_back_to_rebuilt_dropdown() {
         let mut dialog = SnoozeDialog::new("task".into(), datetime!(2026-07-23 12:00), None, false);
         let mut ctx = EventCtx::default();
@@ -601,12 +706,13 @@ mod tests {
 
     #[test]
     fn stepped_picker_completion_emits_custom_snooze() {
-        let now = datetime!(2026-07-23 12:00);
+        let now = datetime!(2026-08-23 12:00);
         let mut dialog = SnoozeDialog::new("task".into(), now, None, false);
         dialog.mode = SnoozeMode::Picker;
         let enter = TuiEvent::Key(KeyEvent::from(Key::Enter));
         let mut ctx = EventCtx::default();
 
+        dialog.event(&enter, &mut ctx);
         dialog.event(&enter, &mut ctx);
         dialog.event(&enter, &mut ctx);
 
@@ -617,7 +723,7 @@ mod tests {
                 until,
                 remember_custom: Some(custom)
             }] if task_id == "task"
-                && *until == datetime!(2026-07-24 8:00)
+                && *until == datetime!(2026-08-24 8:00)
                 && *custom == *until
         ));
     }

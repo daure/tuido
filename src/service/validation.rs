@@ -165,6 +165,7 @@ pub(super) fn validate_task_update(value: &TaskUpdate) -> ServiceResult<()> {
         ));
     }
     let state = crate::domain::TaskState::parse(&value.state).expect("validated task state");
+    validate_task_links(&value.links)?;
     validate_task_temporal_fields(
         state,
         value.start_date.as_deref(),
@@ -217,7 +218,19 @@ pub(super) fn validate_task_patch(patch: &TaskPatch) -> ServiceResult<()> {
         TaskPatch::State(crate::domain::TaskState::Snoozed) => Err(ServiceError::Invalid(
             "use snooze action to set snoozed state and snoozed_until together".into(),
         )),
+        TaskPatch::Links(links) => validate_task_links(links),
         _ => Ok(()),
+    }
+}
+
+pub(super) fn validate_task_links(links: &[String]) -> ServiceResult<()> {
+    if let Some(link) = links.iter().find(|link| !crate::task_link::is_valid(link)) {
+        Err(ServiceError::Invalid(format!(
+            "task link `{link}` must match link pattern {}",
+            crate::task_link::LINK_PATTERN
+        )))
+    } else {
+        Ok(())
     }
 }
 

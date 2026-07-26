@@ -29,15 +29,23 @@ impl<M> TitleInput<M> {
         self
     }
 
-    fn format_after_enter(&mut self, event: &TuiEvent, was_editing: bool, ctx: &mut EventCtx<M>) {
+    fn format_after_enter(
+        &mut self,
+        event: &TuiEvent,
+        was_editing: bool,
+        ctx: &mut EventCtx<M>,
+    ) -> bool {
         let TuiEvent::Key(key) = event else {
-            return;
+            return false;
         };
         let plain_enter = KeySpec::key(Key::Enter).matches(*key);
         let ctrl_enter =
             KeySpec::key_with_modifiers(Key::Enter, KeyModifiers::CONTROL).matches(*key);
-        if (!plain_enter && !ctrl_enter) || !was_editing || self.input.insert_mode() {
-            return;
+        if (!plain_enter && !ctrl_enter)
+            || self.input.insert_mode()
+            || (!was_editing && !ctrl_enter)
+        {
+            return false;
         }
 
         let formatted = format_title(self.input.current_value());
@@ -46,7 +54,9 @@ impl<M> TitleInput<M> {
         ctx.request_redraw();
         if ctrl_enter && let Some(callback) = &self.on_ctrl_enter {
             ctx.emit(callback(formatted));
+            return true;
         }
+        false
     }
 }
 
@@ -66,8 +76,11 @@ impl<M> TuiNode<M> for TitleInput<M> {
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<M>) -> EventOutcome {
         let was_editing = self.input.insert_mode();
         let outcome = self.input.event(event, ctx);
-        self.format_after_enter(event, was_editing, ctx);
-        outcome
+        if self.format_after_enter(event, was_editing, ctx) {
+            EventOutcome::Handled
+        } else {
+            outcome
+        }
     }
 
     fn dispatch_event(
@@ -78,8 +91,11 @@ impl<M> TuiNode<M> for TitleInput<M> {
     ) -> EventOutcome {
         let was_editing = self.input.insert_mode();
         let outcome = self.input.dispatch_event(route, event, ctx);
-        self.format_after_enter(event, was_editing, ctx);
-        outcome
+        if self.format_after_enter(event, was_editing, ctx) {
+            EventOutcome::Handled
+        } else {
+            outcome
+        }
     }
 
     fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {

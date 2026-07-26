@@ -1,6 +1,6 @@
 # Tuido MCP
 
-Tuido exposes full create/read/update/delete tools for tasks, people, projects, and tags/labels. Task tools also set state, complete, reject, snooze, and unsnooze. Mutation responses and list/get responses include entity revisions. Pass latest `expected_revision` to every update, action, or delete; stale writes return revision conflicts.
+Tuido exposes full create/read/update/delete tools for tasks, people, projects, and tags/labels. Task tools also set state, complete, reject, snooze, and unsnooze. Create, update, and action mutation responses and list/get responses include latest entity revisions. Deletion confirmations include only the deleted entity and ID; callers should refresh the workspace after cascading deletes. Pass latest `expected_revision` to every update, action, or delete; stale writes return revision conflicts.
 
 Task `state` is the user-facing **Status** (`todo`, `in_progress`, `snoozed`, `done`, or `rejected`). `people_ids` links people involved in the task besides the workspace owner; it does not represent assignment or ownership. Entity and workspace revisions are internal synchronization and optimistic-concurrency tokens. Clients should use them for mutations and refresh detection, but should not show them as ordinary task metadata unless the user requests them.
 

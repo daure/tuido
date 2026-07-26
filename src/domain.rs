@@ -22,6 +22,11 @@ pub struct AppState {
     pub selected_project_id: Option<String>,
     pub selected_tag_id: Option<String>,
     pub save_errors: HashMap<SaveTarget, String>,
+    pub app_setting_errors: HashMap<String, String>,
+    pub app_setting_values: HashMap<String, String>,
+    pub app_setting_confirmed_values: HashMap<String, String>,
+    pub app_setting_desired_values: HashMap<String, String>,
+    pub app_setting_generations: HashMap<String, u64>,
     pub refresh_error: Option<String>,
     pub last_custom_snooze: Option<PrimitiveDateTime>,
     pub version: u64,
@@ -50,6 +55,11 @@ impl AppState {
             tags: snapshot.tags,
             last_custom_snooze,
             save_errors: HashMap::new(),
+            app_setting_errors: HashMap::new(),
+            app_setting_values: HashMap::new(),
+            app_setting_confirmed_values: HashMap::new(),
+            app_setting_desired_values: HashMap::new(),
+            app_setting_generations: HashMap::new(),
             refresh_error: None,
             version: 0,
             external_refresh_version: 0,
@@ -184,6 +194,17 @@ pub enum AppEvent {
         target: SaveTarget,
         error: Option<String>,
     },
+    AppSettingChangeRequested {
+        key: String,
+        value: String,
+        generation: u64,
+    },
+    AppSettingSaveCompleted {
+        key: String,
+        value: String,
+        generation: u64,
+        error: Option<String>,
+    },
     EntityRevisionCommitted {
         key: String,
         revision: Option<u64>,
@@ -259,11 +280,7 @@ pub fn reduce_app_state(state: &mut AppState, event: AppEvent) -> DispatchOutcom
                 .save_errors
                 .retain(|target, _| target.entity_id != task_id);
             if state.selected_task_id.as_deref() == Some(&task_id) {
-                state.selected_task_id = state
-                    .tasks
-                    .get(index)
-                    .or_else(|| state.tasks.last())
-                    .map(|task| task.id.clone());
+                state.selected_task_id = None;
             }
             state.version += 1;
             DispatchOutcome::layout()
@@ -514,6 +531,86 @@ pub fn reduce_app_state(state: &mut AppState, event: AppEvent) -> DispatchOutcom
                 DispatchOutcome::unchanged()
             }
         }
+        AppEvent::AppSettingChangeRequested {
+            key,
+            value,
+            generation,
+        } => {
+            if state
+                .app_setting_generations
+                .get(&key)
+                .is_some_and(|current| *current >= generation)
+            {
+                return DispatchOutcome::unchanged();
+            }
+            if !state.app_setting_confirmed_values.contains_key(&key)
+                && let Some(confirmed) = state.app_setting_values.get(&key).cloned()
+            {
+                state
+                    .app_setting_confirmed_values
+                    .insert(key.clone(), confirmed);
+            }
+            state
+                .app_setting_generations
+                .insert(key.clone(), generation);
+            state
+                .app_setting_desired_values
+                .insert(key.clone(), value.clone());
+            let value_changed = state.app_setting_values.get(&key) != Some(&value);
+            state.app_setting_values.insert(key.clone(), value);
+            let error_changed = state.app_setting_errors.remove(&key).is_some();
+            if value_changed || error_changed {
+                state.version += 1;
+                DispatchOutcome::layout()
+            } else {
+                DispatchOutcome::unchanged()
+            }
+        }
+        AppEvent::AppSettingSaveCompleted {
+            key,
+            value,
+            generation,
+            error,
+        } => {
+            let is_latest = state.app_setting_generations.get(&key) == Some(&generation);
+            if error.is_none() {
+                state
+                    .app_setting_confirmed_values
+                    .insert(key.clone(), value.clone());
+            }
+            if !is_latest {
+                return DispatchOutcome::unchanged();
+            }
+            let changed = if let Some(error) = error {
+                let message = format!("Setting save failed for {key}: {error}");
+                let confirmed = state
+                    .app_setting_confirmed_values
+                    .get(&key)
+                    .cloned()
+                    .unwrap_or_default();
+                let value_changed = state.app_setting_values.get(&key) != Some(&confirmed);
+                state
+                    .app_setting_desired_values
+                    .insert(key.clone(), confirmed.clone());
+                state.app_setting_values.insert(key.clone(), confirmed);
+                let error_changed = state.app_setting_errors.get(&key) != Some(&message);
+                state.app_setting_errors.insert(key, message);
+                value_changed || error_changed
+            } else {
+                state
+                    .app_setting_desired_values
+                    .insert(key.clone(), value.clone());
+                let value_changed = state.app_setting_values.get(&key) != Some(&value);
+                state.app_setting_values.insert(key.clone(), value);
+                value_changed || state.app_setting_errors.remove(&key).is_some()
+            };
+            if changed {
+                state.version += 1;
+                DispatchOutcome::layout()
+            } else {
+                DispatchOutcome::unchanged()
+            }
+        }
         AppEvent::EntityRevisionCommitted { key, revision } => {
             if let Some(revision) = revision {
                 state.entity_revisions.insert(key, revision);
@@ -597,6 +694,7 @@ pub struct Task {
     pub people_ids: Vec<String>,
     pub project_ids: Vec<String>,
     pub tag_ids: Vec<String>,
+    pub links: Vec<String>,
     pub detail: String,
 }
 
@@ -614,6 +712,7 @@ impl Task {
             people_ids: Vec::new(),
             project_ids: Vec::new(),
             tag_ids: Vec::new(),
+            links: Vec::new(),
             detail,
         }
     }
@@ -705,6 +804,7 @@ pub enum TaskField {
     People,
     Projects,
     Tags,
+    Links,
     Snooze,
 }
 
@@ -740,6 +840,7 @@ pub enum TaskPatch {
     People(Vec<String>),
     Projects(Vec<String>),
     Tags(Vec<Tag>),
+    Links(Vec<String>),
     Snooze {
         until: PrimitiveDateTime,
         remember_custom: Option<PrimitiveDateTime>,
@@ -760,6 +861,7 @@ impl TaskPatch {
             Self::People(_) => TaskField::People,
             Self::Projects(_) => TaskField::Projects,
             Self::Tags(_) => TaskField::Tags,
+            Self::Links(_) => TaskField::Links,
             Self::Snooze { .. } | Self::Unsnooze => TaskField::Snooze,
         }
     }
@@ -882,7 +984,7 @@ impl TaskSize {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Small => "SMALL",
+            Self::Small => "SMA",
             Self::Medium => "MED",
             Self::Big => "BIG",
         }
@@ -1013,6 +1115,17 @@ fn apply_task_patch(task: &mut Task, available_tags: &mut Vec<Tag>, patch: &Task
                 true
             }
         }
+        TaskPatch::Links(links) => {
+            let mut links = links.clone();
+            links.sort();
+            links.dedup();
+            if task.links == links {
+                false
+            } else {
+                task.links = links;
+                true
+            }
+        }
         TaskPatch::Snooze { until, .. }
             if task.state != TaskState::Snoozed || task.snoozed_until != Some(*until) =>
         {
@@ -1084,6 +1197,79 @@ fn apply_tag_patch(tag: &mut Tag, patch: &TagPatch) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn setting_state(value: &str) -> AppState {
+        let mut state = AppState::from_snapshot(WorkspaceSnapshot {
+            tasks: Vec::new(),
+            people: Vec::new(),
+            projects: Vec::new(),
+            tags: Vec::new(),
+        });
+        state
+            .app_setting_values
+            .insert("setting".into(), value.into());
+        state
+            .app_setting_confirmed_values
+            .insert("setting".into(), value.into());
+        state
+            .app_setting_desired_values
+            .insert("setting".into(), value.into());
+        state
+    }
+
+    fn request_setting(state: &mut AppState, value: &str, generation: u64) {
+        reduce_app_state(
+            state,
+            AppEvent::AppSettingChangeRequested {
+                key: "setting".into(),
+                value: value.into(),
+                generation,
+            },
+        );
+    }
+
+    fn complete_setting(state: &mut AppState, value: &str, generation: u64, error: Option<&str>) {
+        reduce_app_state(
+            state,
+            AppEvent::AppSettingSaveCompleted {
+                key: "setting".into(),
+                value: value.into(),
+                generation,
+                error: error.map(str::to_string),
+            },
+        );
+    }
+
+    #[test]
+    fn stale_setting_failure_cannot_replace_newer_successful_toggle() {
+        let mut state = setting_state("true");
+        request_setting(&mut state, "false", 1);
+        request_setting(&mut state, "true", 2);
+
+        complete_setting(&mut state, "false", 1, Some("first failed"));
+        assert_eq!(state.app_setting_values["setting"], "true");
+        assert!(!state.app_setting_errors.contains_key("setting"));
+
+        complete_setting(&mut state, "true", 2, None);
+        assert_eq!(state.app_setting_values["setting"], "true");
+        assert_eq!(state.app_setting_confirmed_values["setting"], "true");
+    }
+
+    #[test]
+    fn latest_setting_failure_rolls_back_to_last_confirmed_toggle() {
+        let mut state = setting_state("true");
+        request_setting(&mut state, "false", 1);
+        request_setting(&mut state, "true", 2);
+
+        complete_setting(&mut state, "false", 1, None);
+        assert_eq!(state.app_setting_values["setting"], "true");
+        assert_eq!(state.app_setting_confirmed_values["setting"], "false");
+
+        complete_setting(&mut state, "true", 2, Some("second failed"));
+        assert_eq!(state.app_setting_values["setting"], "false");
+        assert_eq!(state.app_setting_desired_values["setting"], "false");
+        assert!(state.app_setting_errors.contains_key("setting"));
+    }
 
     #[test]
     fn save_success_only_clears_matching_failed_field() {
@@ -1178,7 +1364,7 @@ mod tests {
     }
 
     #[test]
-    fn deleting_selected_task_selects_next_available_task() {
+    fn deleting_selected_task_clears_selection_for_the_active_view_to_replace() {
         let first = Task::quick_capture(
             "first".to_string(),
             "First".to_string(),
@@ -1202,7 +1388,7 @@ mod tests {
 
         assert!(outcome.changed);
         assert_eq!(state.tasks.len(), 1);
-        assert_eq!(state.selected_task_id.as_deref(), Some("second"));
+        assert_eq!(state.selected_task_id, None);
     }
 
     #[test]
