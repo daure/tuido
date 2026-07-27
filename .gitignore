@@ -1,3 +1,4 @@
 /target
+/tools/release-command/Cargo.lock
 .env
 .rig-chatgpt
