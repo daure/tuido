@@ -723,6 +723,7 @@ pub struct Person {
     pub id: String,
     pub name: String,
     pub email: String,
+    pub about: String,
     pub active: bool,
 }
 
@@ -732,8 +733,15 @@ impl Person {
             id,
             name: name.trim().to_string(),
             email: email.trim().to_string(),
+            about: String::new(),
             active: true,
         }
+    }
+
+    pub fn with_about(id: String, name: String, email: String, about: String) -> Self {
+        let mut person = Self::new(id, name, email);
+        person.about = about;
+        person
     }
 }
 
@@ -757,11 +765,15 @@ impl Project {
     pub fn new(id: String, key: String, name: String, description: String) -> Self {
         Self {
             id,
-            key: key.trim().to_string(),
+            key: Self::normalize_key(&key),
             name: name.trim().to_string(),
             description,
             lead_person_id: None,
         }
+    }
+
+    pub(crate) fn normalize_key(key: &str) -> String {
+        key.trim().to_uppercase()
     }
 }
 
@@ -812,6 +824,7 @@ pub enum TaskField {
 pub enum PersonField {
     Name,
     Email,
+    About,
     Active,
 }
 
@@ -871,6 +884,7 @@ impl TaskPatch {
 pub enum PersonPatch {
     Name(String),
     Email(String),
+    About(String),
     Active(bool),
 }
 
@@ -879,6 +893,7 @@ impl PersonPatch {
         match self {
             Self::Name(_) => PersonField::Name,
             Self::Email(_) => PersonField::Email,
+            Self::About(_) => PersonField::About,
             Self::Active(_) => PersonField::Active,
         }
     }
@@ -918,6 +933,7 @@ impl ProjectPatch {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskState {
+    Backlog,
     Todo,
     InProgress,
     Done,
@@ -928,6 +944,7 @@ pub enum TaskState {
 impl TaskState {
     pub fn id(self) -> &'static str {
         match self {
+            Self::Backlog => "backlog",
             Self::Todo => "todo",
             Self::InProgress => "in_progress",
             Self::Done => "done",
@@ -938,6 +955,7 @@ impl TaskState {
 
     pub fn label(self) -> &'static str {
         match self {
+            Self::Backlog => "BACKLOG",
             Self::Todo => "TODO",
             Self::InProgress => "IN-PROGRESS",
             Self::Done => "DONE",
@@ -948,6 +966,7 @@ impl TaskState {
 
     pub fn parse(value: &str) -> Option<Self> {
         match value {
+            "backlog" => Some(Self::Backlog),
             "todo" => Some(Self::Todo),
             "in_progress" => Some(Self::InProgress),
             "done" => Some(Self::Done),
@@ -959,7 +978,8 @@ impl TaskState {
 
     pub(crate) fn parse_persisted(value: &str) -> Option<Self> {
         match value {
-            "clarify" | "next" | "waiting" => Some(Self::Todo),
+            "clarify" | "next" => Some(Self::Todo),
+            "waiting" => Some(Self::Backlog),
             "doing" => Some(Self::InProgress),
             value => Self::parse(value),
         }
@@ -1152,6 +1172,10 @@ fn apply_person_patch(person: &mut Person, patch: &PersonPatch) -> bool {
             person.email = email.trim().to_string();
             true
         }
+        PersonPatch::About(about) if person.about != *about => {
+            person.about = about.clone();
+            true
+        }
         PersonPatch::Active(active) if person.active != *active => {
             person.active = *active;
             true
@@ -1162,8 +1186,10 @@ fn apply_person_patch(person: &mut Person, patch: &PersonPatch) -> bool {
 
 fn apply_project_patch(project: &mut Project, patch: &ProjectPatch) -> bool {
     match patch {
-        ProjectPatch::Key(key) if project.key != key.trim() && !key.trim().is_empty() => {
-            project.key = key.trim().to_string();
+        ProjectPatch::Key(key)
+            if project.key != Project::normalize_key(key) && !key.trim().is_empty() =>
+        {
+            project.key = Project::normalize_key(key);
             true
         }
         ProjectPatch::Name(name) if project.name != name.trim() && !name.trim().is_empty() => {
@@ -1549,6 +1575,33 @@ mod tests {
         assert_eq!(state.selected_person_id.as_deref(), Some("person-1"));
         assert_eq!(state.selected_project_id.as_deref(), Some("project-1"));
         assert_eq!(state.selected_tag_id.as_deref(), Some("tag-1"));
+    }
+
+    #[test]
+    fn project_keys_are_uppercase_after_creation_and_editing() {
+        let project = Project::new(
+            "project-1".into(),
+            " core ".into(),
+            "Core".into(),
+            String::new(),
+        );
+        assert_eq!(project.key, "CORE");
+
+        let mut state = AppState::from_snapshot(WorkspaceSnapshot {
+            tasks: Vec::new(),
+            people: Vec::new(),
+            projects: vec![project],
+            tags: Vec::new(),
+        });
+        reduce_app_state(
+            &mut state,
+            AppEvent::PatchProject {
+                project_id: "project-1".into(),
+                patch: ProjectPatch::Key(" api ".into()),
+            },
+        );
+
+        assert_eq!(state.projects[0].key, "API");
     }
 
     #[test]

@@ -106,6 +106,15 @@ impl AppKeymapError {
         }
     }
 
+    fn conflict(context: &str, first: AppBinding, second: AppBinding) -> Self {
+        Self {
+            message: format!(
+                "ambiguous app keys `{}` and `{}` in {context} context",
+                first.name, second.name
+            ),
+        }
+    }
+
     fn already_initialized() -> Self {
         Self {
             message: "app keymap already initialized".into(),
@@ -145,6 +154,8 @@ impl AppKeymap {
             return Err(AppKeymapError::unknown(name));
         }
 
+        validate_contexts(&bindings)?;
+
         Ok(Self { bindings })
     }
 
@@ -161,6 +172,41 @@ impl AppKeymap {
 struct ResolvedBinding {
     raw: String,
     spec: Option<KeySpec>,
+}
+
+fn validate_contexts(
+    bindings: &HashMap<&'static str, ResolvedBinding>,
+) -> Result<(), AppKeymapError> {
+    for context in keys::CONTEXTS {
+        for (index, first) in context.bindings.iter().enumerate() {
+            for second in &context.bindings[index + 1..] {
+                let first_pattern = binding_pattern(*first, &bindings[first.name]);
+                let second_pattern = binding_pattern(*second, &bindings[second.name]);
+                if is_prefix(&first_pattern, &second_pattern)
+                    || is_prefix(&second_pattern, &first_pattern)
+                {
+                    return Err(AppKeymapError::conflict(context.name, *first, *second));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn binding_pattern(binding: AppBinding, resolved: &ResolvedBinding) -> Vec<String> {
+    let normalized = resolved.raw.trim().to_ascii_lowercase();
+    if binding.sequence {
+        normalized
+            .chars()
+            .map(|character| character.to_string())
+            .collect()
+    } else {
+        vec![normalized]
+    }
+}
+
+fn is_prefix(first: &[String], second: &[String]) -> bool {
+    first.len() <= second.len() && first.iter().zip(second).all(|(left, right)| left == right)
 }
 
 pub fn try_init() -> Result<(), AppKeymapError> {
@@ -235,6 +281,7 @@ fn parse_key(value: &str) -> Option<KeySpec> {
 
 fn modified_key(value: &str, modifiers: KeyModifiers) -> Option<KeySpec> {
     let code = match value {
+        "enter" => Key::Enter,
         "backspace" => Key::Backspace,
         "delete" => Key::Delete,
         "space" => Key::Char(' '),
@@ -252,6 +299,11 @@ fn single_char(value: &str) -> Option<char> {
 pub mod keys {
     use super::AppBinding;
 
+    pub(super) struct BindingContext {
+        pub(super) name: &'static str,
+        pub(super) bindings: &'static [AppBinding],
+    }
+
     pub const APP_TASKS_TAB: AppBinding = AppBinding::new("APP_TASKS_TAB", "t");
     pub const APP_CALENDAR_TAB: AppBinding = AppBinding::new("APP_CALENDAR_TAB", "c");
     pub const APP_PROJECTS_TAB: AppBinding = AppBinding::new_sequence("APP_PROJECTS_TAB", "pr");
@@ -259,14 +311,29 @@ pub mod keys {
     pub const TASK_QUICK_CREATE: AppBinding = AppBinding::new("TASK_QUICK_CREATE", "n");
     pub const TASK_VIEW_MENU: AppBinding = AppBinding::new("TASK_VIEW_MENU", "f");
     pub const TASK_DELETE: AppBinding = AppBinding::new("TASK_DELETE", "delete");
-    pub const TASK_DELETE_X: AppBinding = AppBinding::new("TASK_DELETE_X", "x");
+    pub const TASK_DELETE_BACKSPACE: AppBinding = AppBinding::new("TASK_DELETE_X", "backspace");
     pub const TASK_DELETE_CTRL_X: AppBinding = AppBinding::new("TASK_DELETE_CTRL_X", "ctrl+x");
     pub const TASK_SNOOZE: AppBinding = AppBinding::new("TASK_SNOOZE", "b");
     pub const MANAGEMENT_CREATE: AppBinding = AppBinding::new("MANAGEMENT_CREATE", "n");
     pub const MANAGEMENT_DELETE: AppBinding = AppBinding::new("MANAGEMENT_DELETE", "delete");
-    pub const MANAGEMENT_DELETE_ALT: AppBinding =
-        AppBinding::new("MANAGEMENT_DELETE_ALT", "ctrl+backspace");
+    pub const MANAGEMENT_DELETE_BACKSPACE: AppBinding =
+        AppBinding::new("MANAGEMENT_DELETE_ALT", "backspace");
     pub const MANAGEMENT_DELETE_X: AppBinding = AppBinding::new("MANAGEMENT_DELETE_X", "ctrl+x");
+    pub const PERSON_NAME_FIELD: AppBinding = AppBinding::new_sequence("PERSON_NAME_FIELD", "am");
+    pub const PERSON_EMAIL_FIELD: AppBinding = AppBinding::new_sequence("PERSON_EMAIL_FIELD", "em");
+    pub const PERSON_ABOUT_FIELD: AppBinding = AppBinding::new_sequence("PERSON_ABOUT_FIELD", "ab");
+    pub const PERSON_ABOUT_EDITOR: AppBinding =
+        AppBinding::new_sequence("PERSON_ABOUT_EDITOR", "ao");
+    pub const PERSON_ACTIVE_FIELD: AppBinding =
+        AppBinding::new_sequence("PERSON_ACTIVE_FIELD", "ac");
+    pub const PROJECT_KEY_FIELD: AppBinding = AppBinding::new_sequence("PROJECT_KEY_FIELD", "ke");
+    pub const PROJECT_NAME_FIELD: AppBinding = AppBinding::new_sequence("PROJECT_NAME_FIELD", "am");
+    pub const PROJECT_DESCRIPTION_FIELD: AppBinding =
+        AppBinding::new_sequence("PROJECT_DESCRIPTION_FIELD", "dd");
+    pub const PROJECT_DESCRIPTION_EDITOR: AppBinding =
+        AppBinding::new_sequence("PROJECT_DESCRIPTION_EDITOR", "do");
+    pub const PROJECT_LEAD_FIELD: AppBinding = AppBinding::new_sequence("PROJECT_LEAD_FIELD", "ea");
+    pub const TAG_LABEL_FIELD: AppBinding = AppBinding::new_sequence("TAG_LABEL_FIELD", "la");
     pub const TASK_TITLE_FIELD: AppBinding = AppBinding::new_sequence("TASK_TITLE_FIELD", "ti");
     pub const TASK_DESCRIPTION_FIELD: AppBinding =
         AppBinding::new_sequence("TASK_DESCRIPTION_FIELD", "dd");
@@ -359,6 +426,10 @@ pub mod keys {
     pub const FOCUS_CONFIRM_TEXT: AppBinding = AppBinding::new("FOCUS_CONFIRM_TEXT", "c");
 
     pub const DIALOG_CLOSE: AppBinding = AppBinding::new("DIALOG_CLOSE", "esc");
+    pub const DIALOG_OK: AppBinding = AppBinding::new("DIALOG_OK", "o");
+    pub const DIALOG_CANCEL: AppBinding = AppBinding::new("DIALOG_CANCEL", "c");
+    pub const DIALOG_SUBMIT: AppBinding = AppBinding::new("DIALOG_SUBMIT", "ctrl+enter");
+    pub const DELETE_CONFIRM: AppBinding = AppBinding::new("DELETE_CONFIRM", "d");
 
     pub const ALL: &[AppBinding] = &[
         APP_TASKS_TAB,
@@ -368,13 +439,24 @@ pub mod keys {
         TASK_QUICK_CREATE,
         TASK_VIEW_MENU,
         TASK_DELETE,
-        TASK_DELETE_X,
+        TASK_DELETE_BACKSPACE,
         TASK_DELETE_CTRL_X,
         TASK_SNOOZE,
         MANAGEMENT_CREATE,
         MANAGEMENT_DELETE,
-        MANAGEMENT_DELETE_ALT,
+        MANAGEMENT_DELETE_BACKSPACE,
         MANAGEMENT_DELETE_X,
+        PERSON_NAME_FIELD,
+        PERSON_EMAIL_FIELD,
+        PERSON_ABOUT_FIELD,
+        PERSON_ABOUT_EDITOR,
+        PERSON_ACTIVE_FIELD,
+        PROJECT_KEY_FIELD,
+        PROJECT_NAME_FIELD,
+        PROJECT_DESCRIPTION_FIELD,
+        PROJECT_DESCRIPTION_EDITOR,
+        PROJECT_LEAD_FIELD,
+        TAG_LABEL_FIELD,
         TASK_TITLE_FIELD,
         TASK_DESCRIPTION_FIELD,
         TASK_DESCRIPTION_EDITOR,
@@ -456,6 +538,100 @@ pub mod keys {
         FROG_SEARCH_FIELD,
         FOCUS_CONFIRM_TEXT,
         DIALOG_CLOSE,
+        DIALOG_OK,
+        DIALOG_CANCEL,
+        DIALOG_SUBMIT,
+        DELETE_CONFIRM,
+    ];
+
+    pub(super) const CONTEXTS: &[BindingContext] = &[
+        BindingContext {
+            name: "app tabs",
+            bindings: &[APP_TASKS_TAB, APP_CALENDAR_TAB],
+        },
+        BindingContext {
+            name: "task workspace",
+            bindings: &[
+                TASK_QUICK_CREATE,
+                TASK_VIEW_MENU,
+                TASK_DELETE,
+                TASK_DELETE_BACKSPACE,
+                TASK_DELETE_CTRL_X,
+                TASK_SNOOZE,
+            ],
+        },
+        BindingContext {
+            name: "task detail",
+            bindings: &[
+                TASK_TITLE_FIELD,
+                TASK_DESCRIPTION_FIELD,
+                TASK_DESCRIPTION_EDITOR,
+                TASK_STATE_FIELD,
+                TASK_SIZE_FIELD,
+                TASK_PRIORITY_FIELD,
+                TASK_PEOPLE_FIELD,
+                TASK_PROJECTS_FIELD,
+                TASK_TAGS_FIELD,
+                TASK_LINKS_FIELD,
+                TASK_START_DATE_FIELD,
+                TASK_END_DATE_FIELD,
+                TASK_SNOOZED_UNTIL_FIELD,
+                DETAIL_CLOSE,
+                DETAIL_CLOSE_ALT,
+            ],
+        },
+        BindingContext {
+            name: "people management",
+            bindings: &[
+                MANAGEMENT_CREATE,
+                MANAGEMENT_DELETE,
+                MANAGEMENT_DELETE_BACKSPACE,
+                MANAGEMENT_DELETE_X,
+                PERSON_NAME_FIELD,
+                PERSON_EMAIL_FIELD,
+                PERSON_ABOUT_FIELD,
+                PERSON_ABOUT_EDITOR,
+                PERSON_ACTIVE_FIELD,
+                DETAIL_CLOSE,
+                DETAIL_CLOSE_ALT,
+            ],
+        },
+        BindingContext {
+            name: "project management",
+            bindings: &[
+                MANAGEMENT_CREATE,
+                MANAGEMENT_DELETE,
+                MANAGEMENT_DELETE_BACKSPACE,
+                MANAGEMENT_DELETE_X,
+                PROJECT_KEY_FIELD,
+                PROJECT_NAME_FIELD,
+                PROJECT_DESCRIPTION_FIELD,
+                PROJECT_DESCRIPTION_EDITOR,
+                PROJECT_LEAD_FIELD,
+                DETAIL_CLOSE,
+                DETAIL_CLOSE_ALT,
+            ],
+        },
+        BindingContext {
+            name: "tag management",
+            bindings: &[
+                MANAGEMENT_CREATE,
+                MANAGEMENT_DELETE,
+                MANAGEMENT_DELETE_BACKSPACE,
+                MANAGEMENT_DELETE_X,
+                TAG_LABEL_FIELD,
+                DETAIL_CLOSE,
+                DETAIL_CLOSE_ALT,
+            ],
+        },
+        BindingContext {
+            name: "create dialog",
+            bindings: &[DIALOG_OK, DIALOG_CANCEL, DIALOG_SUBMIT],
+        },
+        BindingContext {
+            name: "delete confirmation",
+            bindings: &[DELETE_CONFIRM, DIALOG_CLOSE],
+        },
     ];
 }
 
@@ -523,6 +699,33 @@ mod tests {
     }
 
     #[test]
+    fn management_detail_hotkeys_use_requested_sequence_defaults() {
+        let keymap = AppKeymap::from_overrides(std::iter::empty::<(String, String)>()).unwrap();
+        let expected = [
+            ("PERSON_NAME_FIELD", "am"),
+            ("PERSON_EMAIL_FIELD", "em"),
+            ("PERSON_ABOUT_FIELD", "ab"),
+            ("PERSON_ABOUT_EDITOR", "ao"),
+            ("PERSON_ACTIVE_FIELD", "ac"),
+            ("PROJECT_KEY_FIELD", "ke"),
+            ("PROJECT_NAME_FIELD", "am"),
+            ("PROJECT_DESCRIPTION_FIELD", "dd"),
+            ("PROJECT_DESCRIPTION_EDITOR", "do"),
+            ("PROJECT_LEAD_FIELD", "ea"),
+            ("TAG_LABEL_FIELD", "la"),
+        ];
+
+        for (name, default) in expected {
+            let binding = keymap.binding(name).unwrap();
+            assert_eq!(binding.raw, default);
+            assert!(
+                binding.spec.is_none(),
+                "{name} should be a sequence binding"
+            );
+        }
+    }
+
+    #[test]
     fn snoozed_until_sequence_override_is_registered() {
         let keymap =
             AppKeymap::from_overrides([("TASK_SNOOZED_UNTIL_FIELD".into(), "zz".into())]).unwrap();
@@ -533,15 +736,18 @@ mod tests {
     }
 
     #[test]
-    fn management_delete_uses_ctrl_x_not_plain_x() {
+    fn task_and_management_delete_shortcuts_share_requested_defaults() {
         let keymap = AppKeymap::from_overrides(std::iter::empty::<(String, String)>()).unwrap();
-        let binding = keymap.binding("MANAGEMENT_DELETE_X").unwrap();
-
-        assert_eq!(binding.raw, "ctrl+x");
-        assert!(binding.spec.unwrap().matches(KeyEvent {
-            code: Key::Char('x'),
-            modifiers: KeyModifiers::CONTROL,
-        }));
+        for (name, expected) in [
+            ("TASK_DELETE_CTRL_X", "ctrl+x"),
+            ("TASK_DELETE", "delete"),
+            ("TASK_DELETE_X", "backspace"),
+            ("MANAGEMENT_DELETE_X", "ctrl+x"),
+            ("MANAGEMENT_DELETE", "delete"),
+            ("MANAGEMENT_DELETE_ALT", "backspace"),
+        ] {
+            assert_eq!(keymap.binding(name).unwrap().raw, expected);
+        }
     }
 
     #[test]
@@ -561,7 +767,58 @@ mod tests {
     fn override_config_rejects_unknown_and_invalid_keys() {
         assert!(AppKeymap::from_overrides([("NOPE".into(), "a".into())]).is_err());
         assert!(
-            AppKeymap::from_overrides([("APP_TASKS_TAB".into(), "ctrl+enter".into())]).is_err()
+            AppKeymap::from_overrides([("APP_TASKS_TAB".into(), "ctrl+escape".into())]).is_err()
         );
+    }
+
+    #[test]
+    fn active_context_rejects_duplicate_bindings() {
+        let error = AppKeymap::from_overrides([("TASK_VIEW_MENU".into(), "n".into())]).unwrap_err();
+
+        assert!(error.to_string().contains("task workspace context"));
+    }
+
+    #[test]
+    fn active_context_rejects_prefix_ambiguous_bindings() {
+        let error =
+            AppKeymap::from_overrides([("TASK_STATE_FIELD".into(), "t".into())]).unwrap_err();
+
+        assert!(error.to_string().contains("task detail context"));
+    }
+
+    #[test]
+    fn bindings_in_separate_contexts_may_share_prefixes() {
+        AppKeymap::from_overrides([
+            ("APP_TASKS_TAB".into(), "t".into()),
+            ("TASK_TITLE_FIELD".into(), "ti".into()),
+        ])
+        .unwrap();
+    }
+
+    #[test]
+    fn dialog_overrides_supply_labels_and_matching_specs() {
+        let keymap = AppKeymap::from_overrides([
+            ("DIALOG_OK".into(), "y".into()),
+            ("DIALOG_CANCEL".into(), "n".into()),
+            ("DIALOG_SUBMIT".into(), "ctrl+s".into()),
+            ("DELETE_CONFIRM".into(), "x".into()),
+        ])
+        .unwrap();
+
+        for (name, label, key) in [
+            ("DIALOG_OK", "y", Key::Char('y')),
+            ("DIALOG_CANCEL", "n", Key::Char('n')),
+            ("DELETE_CONFIRM", "x", Key::Char('x')),
+        ] {
+            let binding = keymap.binding(name).unwrap().spec.unwrap();
+            assert_eq!(binding.label(), label);
+            assert!(binding.matches(KeyEvent::from(key)));
+        }
+        let submit = keymap.binding("DIALOG_SUBMIT").unwrap().spec.unwrap();
+        assert_eq!(submit.label(), "⌃s");
+        assert!(submit.matches(KeyEvent {
+            code: Key::Char('s'),
+            modifiers: KeyModifiers::CONTROL,
+        }));
     }
 }

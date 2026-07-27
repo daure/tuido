@@ -324,7 +324,9 @@ impl McpServer {
             .map(Json)
             .ok_or_else(|| "person not found".into())
     }
-    #[tool(description = "Create person")]
+    #[tool(
+        description = "Create person. The about field is practical task context, not personality description."
+    )]
     async fn create_person(
         &self,
         Parameters(v): Parameters<PersonInput>,
@@ -887,6 +889,7 @@ mod tests {
                 .create_person(Parameters(PersonInput {
                     name: "Ada".into(),
                     email: String::new(),
+                    about: "Owns compiler decisions".into(),
                     active: true,
                 }))
                 .await

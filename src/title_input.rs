@@ -13,6 +13,7 @@ pub(crate) struct TitleInput<M> {
     input: TextInput<M>,
     title: Rc<RefCell<String>>,
     on_ctrl_enter: Option<Box<dyn Fn(String) -> M>>,
+    submit_hotkey: KeySpec,
 }
 
 impl<M> TitleInput<M> {
@@ -21,7 +22,13 @@ impl<M> TitleInput<M> {
             input,
             title,
             on_ctrl_enter: None,
+            submit_hotkey: KeySpec::key_with_modifiers(Key::Enter, KeyModifiers::CONTROL),
         }
+    }
+
+    pub(crate) fn submit_hotkey(mut self, hotkey: KeySpec) -> Self {
+        self.submit_hotkey = hotkey;
+        self
     }
 
     pub(crate) fn on_ctrl_enter(mut self, callback: impl Fn(String) -> M + 'static) -> Self {
@@ -39,8 +46,7 @@ impl<M> TitleInput<M> {
             return false;
         };
         let plain_enter = KeySpec::key(Key::Enter).matches(*key);
-        let ctrl_enter =
-            KeySpec::key_with_modifiers(Key::Enter, KeyModifiers::CONTROL).matches(*key);
+        let ctrl_enter = self.submit_hotkey.matches(*key);
         if (!plain_enter && !ctrl_enter)
             || self.input.insert_mode()
             || (!was_editing && !ctrl_enter)

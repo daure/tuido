@@ -3,17 +3,22 @@ use std::{cell::RefCell, rc::Rc, time::Duration};
 use ratatui::{Frame, layout::Rect};
 use tuicore::{
     AnimationSettings, DialogAction, EventCtx, EventOutcome, EventRoute, Flex, FlexItem, FocusCtx,
-    FocusTarget, Key, KeyEvent, KeySpec, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint,
+    FocusTarget, Key, KeyEvent, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint,
     LifecycleCtx, RenderCtx, TextInput, TextareaInput, TickResult, TuiEvent, TuiNode,
 };
 
-use crate::{app::AppMsg, ui::management::ManagementDialogKind};
+use crate::{
+    app::AppMsg,
+    app_keymap::keys,
+    ui::management::{ManagementDialogKind, projects::ProjectKeyInput},
+};
 
 #[derive(Debug, Clone)]
 pub(crate) enum ManagementEntityDraft {
     Person {
         name: String,
         email: String,
+        about: String,
     },
     Project {
         key: String,
@@ -40,7 +45,6 @@ impl CreateManagementDialog {
         let description = Rc::new(RefCell::new(String::new()));
         let mut first = TextInput::new()
             .panel(primary_label(kind))
-            .placeholder(primary_placeholder(kind))
             .focused(true)
             .on_change({
                 let primary = Rc::clone(&primary);
@@ -53,31 +57,45 @@ impl CreateManagementDialog {
             &TuiEvent::Key(KeyEvent::from(Key::Enter)),
             &mut EventCtx::default(),
         );
-        let mut root = Flex::column().child("primary", first, FlexItem::fixed(3));
+        let mut root = if kind == ManagementDialogKind::Projects {
+            Flex::column().child(
+                "primary",
+                ProjectKeyInput::new(first).on_commit({
+                    let primary = Rc::clone(&primary);
+                    move |value| *primary.borrow_mut() = value.to_string()
+                }),
+                FlexItem::fixed(3),
+            )
+        } else {
+            Flex::column().child("primary", first, FlexItem::fixed(3))
+        };
         if kind != ManagementDialogKind::Tags {
             root = root.child(
                 "secondary",
-                TextInput::new()
-                    .panel(secondary_label(kind))
-                    .placeholder(secondary_placeholder(kind))
-                    .on_change({
-                        let secondary = Rc::clone(&secondary);
-                        move |value| {
-                            *secondary.borrow_mut() = value;
-                            AppMsg::Noop
-                        }
-                    }),
+                TextInput::new().panel(secondary_label(kind)).on_change({
+                    let secondary = Rc::clone(&secondary);
+                    move |value| {
+                        *secondary.borrow_mut() = value;
+                        AppMsg::Noop
+                    }
+                }),
                 FlexItem::fixed(3),
             );
         }
-        if kind == ManagementDialogKind::Projects {
+        if matches!(
+            kind,
+            ManagementDialogKind::People | ManagementDialogKind::Projects
+        ) {
             root = root.child(
                 "description",
                 TextareaInput::new()
-                    .panel("Description")
-                    .placeholder("Project description")
-                    .min_rows(4)
-                    .max_rows(8)
+                    .panel(if kind == ManagementDialogKind::People {
+                        "About"
+                    } else {
+                        "Description"
+                    })
+                    .min_rows(2)
+                    .max_rows(6)
                     .on_change({
                         let description = Rc::clone(&description);
                         move |value| {
@@ -104,29 +122,56 @@ impl CreateManagementDialog {
         let description = Rc::clone(&self.description);
         [
             DialogAction::new("OK")
-                .hotkey(KeySpec::plain('o'))
-                .on_trigger(move || {
-                    let primary = primary.borrow().clone();
-                    let secondary = secondary.borrow().clone();
-                    let draft = match kind {
-                        ManagementDialogKind::People => ManagementEntityDraft::Person {
-                            name: primary,
-                            email: secondary,
-                        },
-                        ManagementDialogKind::Projects => ManagementEntityDraft::Project {
-                            key: primary,
-                            name: secondary,
-                            description: description.borrow().clone(),
-                        },
-                        ManagementDialogKind::Tags => ManagementEntityDraft::Tag { label: primary },
-                    };
-                    AppMsg::CreateManagementSubmitted(draft)
-                }),
+                .hotkey(keys::DIALOG_OK.key_spec())
+                .on_trigger(move || submitted_message(kind, &primary, &secondary, &description)),
             DialogAction::new("Cancel")
-                .hotkey(KeySpec::plain('c'))
+                .hotkey(keys::DIALOG_CANCEL.key_spec())
                 .on_trigger(|| AppMsg::CloseManagementOverlay),
         ]
     }
+
+    fn submit_on_ctrl_enter(
+        &self,
+        event: &TuiEvent,
+        ctx: &mut EventCtx<AppMsg>,
+    ) -> Option<EventOutcome> {
+        if !keys::DIALOG_SUBMIT.matches(event) {
+            return None;
+        }
+
+        ctx.emit(submitted_message(
+            self.kind,
+            &self.primary,
+            &self.secondary,
+            &self.description,
+        ));
+        ctx.stop_propagation();
+        Some(EventOutcome::Handled)
+    }
+}
+
+fn submitted_message(
+    kind: ManagementDialogKind,
+    primary: &Rc<RefCell<String>>,
+    secondary: &Rc<RefCell<String>>,
+    description: &Rc<RefCell<String>>,
+) -> AppMsg {
+    let primary = primary.borrow().clone();
+    let secondary = secondary.borrow().clone();
+    let draft = match kind {
+        ManagementDialogKind::People => ManagementEntityDraft::Person {
+            name: primary,
+            email: secondary,
+            about: description.borrow().clone(),
+        },
+        ManagementDialogKind::Projects => ManagementEntityDraft::Project {
+            key: primary.to_uppercase(),
+            name: secondary,
+            description: description.borrow().clone(),
+        },
+        ManagementDialogKind::Tags => ManagementEntityDraft::Tag { label: primary },
+    };
+    AppMsg::CreateManagementSubmitted(draft)
 }
 
 fn primary_label(kind: ManagementDialogKind) -> &'static str {
@@ -137,26 +182,10 @@ fn primary_label(kind: ManagementDialogKind) -> &'static str {
     }
 }
 
-fn primary_placeholder(kind: ManagementDialogKind) -> &'static str {
-    match kind {
-        ManagementDialogKind::People => "Person name",
-        ManagementDialogKind::Projects => "Project key",
-        ManagementDialogKind::Tags => "Tag label",
-    }
-}
-
 fn secondary_label(kind: ManagementDialogKind) -> &'static str {
     match kind {
         ManagementDialogKind::People => "Email",
         ManagementDialogKind::Projects => "Name",
-        ManagementDialogKind::Tags => "",
-    }
-}
-
-fn secondary_placeholder(kind: ManagementDialogKind) -> &'static str {
-    match kind {
-        ManagementDialogKind::People => "Email address",
-        ManagementDialogKind::Projects => "Project name",
         ManagementDialogKind::Tags => "",
     }
 }
@@ -175,6 +204,9 @@ impl TuiNode<AppMsg> for CreateManagementDialog {
     }
 
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<AppMsg>) -> EventOutcome {
+        if let Some(outcome) = self.submit_on_ctrl_enter(event, ctx) {
+            return outcome;
+        }
         self.root.event(event, ctx)
     }
 
@@ -184,6 +216,9 @@ impl TuiNode<AppMsg> for CreateManagementDialog {
         event: &TuiEvent,
         ctx: &mut EventCtx<AppMsg>,
     ) -> EventOutcome {
+        if let Some(outcome) = self.submit_on_ctrl_enter(event, ctx) {
+            return outcome;
+        }
         self.root.dispatch_event(route, event, ctx)
     }
 
@@ -215,6 +250,7 @@ impl TuiNode<AppMsg> for CreateManagementDialog {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tuicore::KeyModifiers;
 
     #[test]
     fn each_entity_uses_its_editable_creation_fields() {
@@ -228,7 +264,7 @@ mod tests {
                 .measure(LayoutProposal::unbounded())
                 .preferred
                 .height,
-            6
+            10
         );
         assert_eq!(
             project
@@ -236,7 +272,7 @@ mod tests {
                 .measure(LayoutProposal::unbounded())
                 .preferred
                 .height,
-            12
+            10
         );
         assert_eq!(
             tag.root
@@ -245,5 +281,67 @@ mod tests {
                 .height,
             3
         );
+    }
+
+    #[test]
+    fn ctrl_enter_submits_each_management_entity_from_a_focused_control() {
+        let cases = [
+            (
+                ManagementDialogKind::People,
+                "Ada",
+                "ada@example.com",
+                "Compiler expert",
+            ),
+            (ManagementDialogKind::Projects, "core", "Core", "Platform"),
+            (ManagementDialogKind::Tags, "backend", "", ""),
+        ];
+
+        for (kind, primary, secondary, description) in cases {
+            let mut dialog = CreateManagementDialog::new(kind);
+            *dialog.primary.borrow_mut() = primary.into();
+            *dialog.secondary.borrow_mut() = secondary.into();
+            *dialog.description.borrow_mut() = description.into();
+            let mut layout = LayoutCtx::new();
+            dialog.layout(Rect::new(0, 0, 80, 20), &mut layout);
+            let target = layout
+                .focus_targets()
+                .last()
+                .expect("creation dialog should contain a focusable control");
+            let mut ctx = EventCtx::default();
+
+            let outcome = dialog.dispatch_event(
+                &EventRoute::new(target.path.clone()),
+                &TuiEvent::Key(KeyEvent {
+                    code: Key::Enter,
+                    modifiers: KeyModifiers::CONTROL,
+                }),
+                &mut ctx,
+            );
+
+            assert!(outcome.handled());
+            match kind {
+                ManagementDialogKind::People => assert!(matches!(
+                    ctx.messages(),
+                    [AppMsg::CreateManagementSubmitted(ManagementEntityDraft::Person {
+                        name,
+                        email,
+                        about,
+                    })] if name == "Ada" && email == "ada@example.com" && about == "Compiler expert"
+                )),
+                ManagementDialogKind::Projects => assert!(matches!(
+                    ctx.messages(),
+                    [AppMsg::CreateManagementSubmitted(ManagementEntityDraft::Project {
+                        key,
+                        name,
+                        description,
+                    })] if key == "CORE" && name == "Core" && description == "Platform"
+                )),
+                ManagementDialogKind::Tags => assert!(matches!(
+                    ctx.messages(),
+                    [AppMsg::CreateManagementSubmitted(ManagementEntityDraft::Tag { label })]
+                        if label == "backend"
+                )),
+            }
+        }
     }
 }

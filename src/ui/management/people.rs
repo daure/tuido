@@ -6,13 +6,13 @@ use ratatui::{
 };
 use tuicore::{
     ActivationMode, AnimationSettings, ChildKey, Column, DataView, DataViewTypedEvent, Dialog,
-    DialogAction, DialogHost, EventCtx, EventOutcome, EventRoute, Flex, FlexItem, FocusCtx,
-    FocusTarget, LayoutCtx, LayoutResult, LifecycleCtx, Paragraph, RenderCtx, SelectionMode,
-    SelectionTrigger, Separator, Split, TextInput, TickResult, TuiEvent, TuiNode,
+    DialogHost, EventCtx, EventOutcome, EventRoute, Flex, FlexItem, FocusCtx, FocusTarget,
+    LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, Paragraph, RenderCtx,
+    SelectionMode, SelectionTrigger, TextInput, TextareaInput, TickResult, TuiEvent, TuiNode,
 };
 
 use super::ManagementDialogKind;
-use super::common::{active_choices, dropdown_single};
+use super::common::{ManagementPane, active_choices, dropdown_single};
 use crate::{
     app::{AppContext, AppMsg},
     app_keymap::{self, keys},
@@ -28,7 +28,6 @@ pub(crate) type PeopleDialog = DialogHost<PeopleWorkspace, AppMsg>;
 pub(crate) fn dialog(context: AppContext) -> PeopleDialog {
     Dialog::new()
         .top_left("People")
-        .actions([management_create_action(ManagementDialogKind::People)])
         .close_on_unfocus_from_descendants(true)
         .on_close(|_| AppMsg::CloseDialog)
         .host(PeopleWorkspace::new(context))
@@ -36,7 +35,7 @@ pub(crate) fn dialog(context: AppContext) -> PeopleDialog {
 
 pub(crate) struct PeopleWorkspace {
     context: AppContext,
-    split: Split<PersonTable, PersonDetailForm>,
+    split: ManagementPane<PersonTable, PersonDetailForm>,
     observed_version: u64,
     observed_external_refresh_version: u64,
     table_focused: bool,
@@ -205,9 +204,9 @@ impl PeopleWorkspace {
             && app_keymap::matches_any(
                 event,
                 &[
-                    keys::MANAGEMENT_DELETE,
-                    keys::MANAGEMENT_DELETE_ALT,
                     keys::MANAGEMENT_DELETE_X,
+                    keys::MANAGEMENT_DELETE,
+                    keys::MANAGEMENT_DELETE_BACKSPACE,
                 ],
             )
         {
@@ -244,6 +243,9 @@ impl TuiNode<AppMsg> for PeopleWorkspace {
         event: &TuiEvent,
         ctx: &mut EventCtx<AppMsg>,
     ) -> EventOutcome {
+        if self.split.return_to_table_on_unfocus(route, event, ctx) {
+            return EventOutcome::Handled;
+        }
         let outcome = self.split.dispatch_event(route, event, ctx);
         if self.sync_detail_changes() {
             ctx.request_redraw();
@@ -282,12 +284,6 @@ impl TuiNode<AppMsg> for PeopleWorkspace {
     fn destroy(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
         self.split.destroy(ctx);
     }
-}
-
-fn management_create_action(kind: ManagementDialogKind) -> DialogAction<AppMsg> {
-    DialogAction::new("New")
-        .hotkey(keys::MANAGEMENT_CREATE.key_spec())
-        .on_trigger(move || AppMsg::OpenCreateManagement(kind))
 }
 
 struct PersonDetailForm {
@@ -347,6 +343,10 @@ impl PersonDetailForm {
 }
 
 impl TuiNode<AppMsg> for PersonDetailForm {
+    fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
+        self.root.measure(proposal)
+    }
+
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
         self.root.layout(area, ctx)
     }
@@ -384,7 +384,7 @@ impl TuiNode<AppMsg> for PersonDetailForm {
     }
 }
 
-fn person_split(context: &AppContext) -> Split<PersonTable, PersonDetailForm> {
+fn person_split(context: &AppContext) -> ManagementPane<PersonTable, PersonDetailForm> {
     let store = context.store.borrow();
     let state = store.state();
     let selected = state.selected_person_id.as_deref();
@@ -393,9 +393,11 @@ fn person_split(context: &AppContext) -> Split<PersonTable, PersonDetailForm> {
         person,
         person.and_then(|person| state.person_save_error(&person.id)),
     );
-    Split::horizontal(person_table(state.people.clone(), selected), detail)
-        .ratio(65, 35)
-        .separator(Separator::new())
+    ManagementPane::new(
+        person_table(state.people.clone(), selected),
+        detail,
+        ManagementDialogKind::People,
+    )
 }
 
 fn person_table(rows: Vec<Person>, selected_id: Option<&str>) -> PersonTable {
@@ -448,12 +450,13 @@ fn person_detail_form(
     };
     Flex::column()
         .gap(0)
-        .child("save-status", status, FlexItem::fixed(1))
+        .child("save-status", status, FlexItem::content())
         .child(
             "name",
             TextInput::new()
                 .value(person.name.clone())
                 .panel("Name")
+                .hotkey(keys::PERSON_NAME_FIELD.hotkey())
                 .on_edit_end({
                     let patches = Rc::clone(&patches);
                     move |value| {
@@ -468,6 +471,7 @@ fn person_detail_form(
             TextInput::new()
                 .value(person.email.clone())
                 .panel("Email")
+                .hotkey(keys::PERSON_EMAIL_FIELD.hotkey())
                 .on_edit_end({
                     let patches = Rc::clone(&patches);
                     move |value| {
@@ -478,13 +482,32 @@ fn person_detail_form(
             FlexItem::fixed(3),
         )
         .child(
+            "about",
+            TextareaInput::new()
+                .value(person.about.clone())
+                .panel("About")
+                .hotkey(keys::PERSON_ABOUT_FIELD.hotkey())
+                .editor_hotkey(keys::PERSON_ABOUT_EDITOR.hotkey())
+                .on_edit_end({
+                    let patches = Rc::clone(&patches);
+                    move |value| {
+                        patches.borrow_mut().push(PersonPatch::About(value));
+                        AppMsg::Noop
+                    }
+                })
+                .min_rows(2)
+                .max_rows(6),
+            FlexItem::content(),
+        )
+        .child(
             "active",
             dropdown_single(
                 "Active",
                 active_choices(),
                 if person.active { "true" } else { "false" },
                 move |id| patches.borrow_mut().push(PersonPatch::Active(id == "true")),
-            ),
+            )
+            .hotkey(keys::PERSON_ACTIVE_FIELD.hotkey()),
             FlexItem::fixed(3),
         )
 }
@@ -496,7 +519,30 @@ mod tests {
         app::tests::{rendered_text, test_context},
         domain::{PersonField, SaveTarget, WorkspaceSnapshot},
     };
-    use tuicore::{Key, Tab, Tabs};
+    use tuicore::{FocusRequest, Key, KeyEvent, KeyModifiers, Tab, Tabs};
+
+    #[test]
+    fn narrow_people_workspace_stacks_visible_detail_below_table() {
+        let person = Person::new("person-1".into(), "Ada".into(), "ada@example.com".into());
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks: vec![],
+            people: vec![person],
+            projects: vec![],
+            tags: vec![],
+        });
+        let mut workspace = PeopleWorkspace::new(context);
+
+        workspace.layout(Rect::new(0, 0, 80, 30), &mut LayoutCtx::new());
+
+        let (table, detail) = workspace.split.child_areas();
+        let create = workspace.split.create_area();
+        assert_eq!(table.width, 80);
+        assert_eq!(detail.width, 80);
+        assert_eq!(detail.height, 13);
+        assert_eq!(table.height + detail.height, 30);
+        assert_eq!(create.y, 0);
+        assert_eq!(create.right(), 80);
+    }
 
     #[test]
     fn focused_detail_input_receives_tab_navigation_characters_before_ancestor_tabs() {
@@ -504,6 +550,7 @@ mod tests {
             id: "person-1".into(),
             name: "Ada".into(),
             email: "ada@example.com".into(),
+            about: String::new(),
             active: true,
         };
         let detail = PersonDetailForm::new(Some(&person), None);
@@ -542,6 +589,7 @@ mod tests {
             id: "person-1".into(),
             name: "Ada".into(),
             email: "ada@example.com".into(),
+            about: String::new(),
             active: true,
         };
         let (_runtime, context, store) = test_context(WorkspaceSnapshot {
@@ -658,15 +706,108 @@ mod tests {
             tags: vec![],
         });
         let mut dialog = dialog(context);
+        let mut layout = LayoutCtx::new();
+        dialog.layout(Rect::new(0, 0, 80, 24), &mut layout);
+        let create = layout
+            .focus_targets()
+            .iter()
+            .find(|target| target.path.keys().iter().any(|key| key.as_str() == "new"))
+            .expect("top-right New button should be focusable")
+            .clone();
         let mut ctx = EventCtx::default();
 
-        let outcome = dialog.event(&TuiEvent::Key(Key::Char('n').into()), &mut ctx);
+        let outcome = dialog.dispatch_event(
+            &EventRoute::new(create.path),
+            &TuiEvent::Key(Key::Char('n').into()),
+            &mut ctx,
+        );
 
         assert!(outcome.handled());
         assert!(matches!(
             ctx.messages(),
             [AppMsg::OpenCreateManagement(ManagementDialogKind::People)]
         ));
+    }
+
+    #[test]
+    fn escape_from_person_detail_focuses_table_before_closing_dialog() {
+        let person = Person::new("person-1".into(), "Ada".into(), "ada@example.com".into());
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks: vec![],
+            people: vec![person],
+            projects: vec![],
+            tags: vec![],
+        });
+        let mut dialog = dialog(context);
+        let mut layout = LayoutCtx::new();
+        dialog.layout(Rect::new(0, 0, 100, 30), &mut layout);
+        let name = layout
+            .focus_targets()
+            .iter()
+            .find(|target| target.path.keys().iter().any(|key| key.as_str() == "name"))
+            .expect("person name should be focusable")
+            .clone();
+        let table = layout
+            .focus_targets()
+            .iter()
+            .find(|target| target.id.as_str() == "data-view")
+            .expect("people table should be focusable")
+            .clone();
+
+        for key in [
+            KeyEvent::from(Key::Esc),
+            KeyEvent {
+                code: Key::Char('['),
+                modifiers: KeyModifiers::CONTROL,
+            },
+        ] {
+            let mut ctx = EventCtx::default();
+            let outcome = dialog.dispatch_event(
+                &EventRoute::new(name.path.clone()),
+                &TuiEvent::Key(key),
+                &mut ctx,
+            );
+
+            assert!(outcome.handled());
+            assert!(ctx.messages().is_empty());
+            assert!(matches!(ctx.focus_request(), Some(FocusRequest::Path(_))));
+
+            let mut close_ctx = EventCtx::default();
+            let close = dialog.dispatch_event(
+                &EventRoute::new(table.path.clone()),
+                &TuiEvent::Key(key),
+                &mut close_ctx,
+            );
+            assert!(close.handled());
+            assert!(matches!(close_ctx.messages(), [AppMsg::CloseDialog]));
+        }
+    }
+
+    #[test]
+    fn person_detail_controls_register_requested_hotkeys() {
+        let person = Person::new("person-1".into(), "Ada".into(), "ada@example.com".into());
+        let detail = PersonDetailForm::new(Some(&person), None);
+        let mut layout = LayoutCtx::new();
+        let mut detail = detail;
+        detail.layout(Rect::new(0, 0, 80, 20), &mut layout);
+
+        for hotkey in [
+            keys::PERSON_NAME_FIELD.hotkey(),
+            keys::PERSON_EMAIL_FIELD.hotkey(),
+            keys::PERSON_ABOUT_FIELD.hotkey(),
+            keys::PERSON_ABOUT_EDITOR.hotkey(),
+            keys::PERSON_ACTIVE_FIELD.hotkey(),
+        ] {
+            assert_eq!(
+                layout
+                    .focus_targets()
+                    .iter()
+                    .filter(|target| target.hotkey_sequences.contains(&hotkey))
+                    .count(),
+                1,
+                "{hotkey} should be registered once"
+            );
+        }
     }
 
     #[test]

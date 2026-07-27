@@ -1,5 +1,6 @@
 Load architecture.md before starting any work.
 Always load ~/dev/tuicore/SKILL.md on startup.
+No PRODUCT.md or DESIGN.md required.
 
 Persistence: tasks are stored in SQL through SQLx. Default DB is SQLite unless TUIDO_DATABASE_URL points elsewhere; Postgres is supported by config. Run migrations from migrations/ before app use. Task description edits, size, state, and entities save immediately.
 

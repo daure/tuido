@@ -37,6 +37,7 @@ async fn postgres_migrations_crud_concurrency_and_transactions_hold() {
         .create_person(PersonInput {
             name: format!("Ada {suffix}"),
             email: format!("ada-{suffix}@example.com"),
+            about: "Postgres compatibility contact".into(),
             active: true,
         })
         .await

@@ -173,7 +173,7 @@ async fn load_workspace(
     let tags = load_tags(pool).await?;
     let mut tasks = Vec::new();
     let rows = sqlx::query(
-        "SELECT id, title, workflow_state, CAST(CASE WHEN rejected THEN 1 ELSE 0 END AS BIGINT) AS rejected, size, priority, start_date, due_date, snoozed_until, description FROM tasks ORDER BY created_at, id",
+        "SELECT id, title, state, workflow_state, CAST(CASE WHEN rejected THEN 1 ELSE 0 END AS BIGINT) AS rejected, size, priority, start_date, due_date, snoozed_until, description FROM tasks ORDER BY created_at, id",
     )
     .fetch_all(pool)
     .await?;
@@ -191,7 +191,10 @@ async fn load_workspace(
             state: if row.try_get::<i64, _>("rejected")? != 0 {
                 TaskState::Rejected
             } else {
-                parse_state(row.try_get::<String, _>("workflow_state")?)?
+                parse_stored_state(
+                    row.try_get::<String, _>("state")?,
+                    row.try_get::<String, _>("workflow_state")?,
+                )?
             },
             size: parse_size(row.try_get::<String, _>("size")?)?,
             priority: parse_priority(row.try_get::<String, _>("priority")?)?,
@@ -227,7 +230,7 @@ pub(crate) async fn load_workspace_for_service(
 
 async fn load_people(pool: &AnyPool) -> Result<Vec<Person>, Box<dyn std::error::Error>> {
     let rows = sqlx::query(
-        "SELECT id, name, email, CAST(CASE WHEN active THEN 1 ELSE 0 END AS BIGINT) AS active FROM people ORDER BY sort_order, name",
+        "SELECT id, name, email, about, CAST(CASE WHEN active THEN 1 ELSE 0 END AS BIGINT) AS active FROM people ORDER BY sort_order, name",
     )
     .fetch_all(pool)
     .await?;
@@ -237,6 +240,7 @@ async fn load_people(pool: &AnyPool) -> Result<Vec<Person>, Box<dyn std::error::
                 id: row.try_get("id")?,
                 name: row.try_get("name")?,
                 email: row.try_get("email")?,
+                about: row.try_get("about")?,
                 active: row.try_get::<i64, _>("active")? != 0,
             })
         })
@@ -391,6 +395,17 @@ fn migration_source(
 
 fn parse_state(value: String) -> Result<TaskState, Box<dyn std::error::Error>> {
     TaskState::parse_persisted(&value).ok_or_else(|| format!("unknown task state: {value}").into())
+}
+
+fn parse_stored_state(
+    legacy_state: String,
+    workflow_state: String,
+) -> Result<TaskState, Box<dyn std::error::Error>> {
+    if legacy_state == "waiting" && workflow_state == "todo" {
+        Ok(TaskState::Backlog)
+    } else {
+        parse_state(workflow_state)
+    }
 }
 
 async fn configure_sqlite_journal(pool: &AnyPool) -> Result<(), Box<dyn std::error::Error>> {

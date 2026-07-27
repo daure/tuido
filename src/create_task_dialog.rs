@@ -3,11 +3,13 @@ use std::{cell::RefCell, rc::Rc, time::Duration};
 use ratatui::{Frame, layout::Rect};
 use tuicore::{
     AnimationSettings, DialogAction, EventCtx, EventOutcome, EventRoute, Flex, FlexItem, FocusCtx,
-    FocusTarget, Key, KeyEvent, KeySpec, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint,
+    FocusTarget, Key, KeyEvent, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint,
     LifecycleCtx, RenderCtx, TextInput, TickResult, TuiEvent, TuiNode,
 };
 
-use crate::{app::AppMsg, title_feedback::TitleFeedback, title_input::TitleInput};
+use crate::{
+    app::AppMsg, app_keymap::keys, title_feedback::TitleFeedback, title_input::TitleInput,
+};
 
 #[derive(Debug, Clone)]
 pub(crate) struct CreateTaskDraft {
@@ -37,6 +39,7 @@ impl CreateTaskDialog {
             &mut EventCtx::default(),
         );
         let input = TitleInput::new(input, Rc::clone(&title))
+            .submit_hotkey(keys::DIALOG_SUBMIT.key_spec())
             .on_ctrl_enter(|title| AppMsg::CreateTaskSubmitted(CreateTaskDraft { title }));
         let feedback = TitleFeedback::new(Rc::clone(&title));
         let root = Flex::column()
@@ -51,14 +54,14 @@ impl CreateTaskDialog {
         let title = Rc::clone(&self.title);
         [
             DialogAction::new("OK")
-                .hotkey(KeySpec::plain('o'))
+                .hotkey(keys::DIALOG_OK.key_spec())
                 .on_trigger(move || {
                     AppMsg::CreateTaskSubmitted(CreateTaskDraft {
                         title: title.borrow().clone(),
                     })
                 }),
             DialogAction::new("Cancel")
-                .hotkey(KeySpec::plain('c'))
+                .hotkey(keys::DIALOG_CANCEL.key_spec())
                 .on_trigger(|| AppMsg::CloseDialog),
         ]
     }

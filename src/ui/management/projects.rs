@@ -6,13 +6,14 @@ use ratatui::{
 };
 use tuicore::{
     ActivationMode, AnimationSettings, ChildKey, Column, DataView, DataViewTypedEvent, Dialog,
-    DialogAction, DialogHost, EventCtx, EventOutcome, EventRoute, Flex, FlexItem, FocusCtx,
-    FocusTarget, LayoutCtx, LayoutResult, LifecycleCtx, Paragraph, RenderCtx, SelectionMode,
-    SelectionTrigger, Separator, Split, TextInput, TextareaInput, TickResult, TuiEvent, TuiNode,
+    DialogHost, EventCtx, EventOutcome, EventRoute, Flex, FlexItem, FocusCtx, FocusTarget, Key,
+    KeyEvent, KeyModifiers, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx,
+    Paragraph, RenderCtx, SelectionMode, SelectionTrigger, TextInput, TextareaInput, TickResult,
+    TuiEvent, TuiNode,
 };
 
 use super::ManagementDialogKind;
-use super::common::{dropdown_single_optional, person_choices};
+use super::common::{ManagementPane, dropdown_single_optional, person_choices};
 use crate::{
     app::{AppContext, AppMsg},
     app_keymap::{self, keys},
@@ -28,7 +29,6 @@ pub(crate) type ProjectsDialog = DialogHost<ProjectsWorkspace, AppMsg>;
 pub(crate) fn dialog(context: AppContext) -> ProjectsDialog {
     Dialog::new()
         .top_left("Projects")
-        .actions([management_create_action(ManagementDialogKind::Projects)])
         .close_on_unfocus_from_descendants(true)
         .on_close(|_| AppMsg::CloseDialog)
         .host(ProjectsWorkspace::new(context))
@@ -36,19 +36,24 @@ pub(crate) fn dialog(context: AppContext) -> ProjectsDialog {
 
 pub(crate) struct ProjectsWorkspace {
     context: AppContext,
-    split: Split<ProjectTable, ProjectDetailForm>,
+    split: ManagementPane<ProjectTable, ProjectDetailForm>,
     observed_version: u64,
     observed_external_refresh_version: u64,
     table_focused: bool,
     detail_draft_protected: bool,
+    table_people: Vec<(String, String)>,
+    detail_people: Vec<(String, String)>,
 }
 
 impl ProjectsWorkspace {
     fn new(context: AppContext) -> Self {
         let split = project_split(&context);
-        let observed_version = context.store.borrow().state().version;
-        let observed_external_refresh_version =
-            context.store.borrow().state().external_refresh_version;
+        let store = context.store.borrow();
+        let state = store.state();
+        let observed_version = state.version;
+        let observed_external_refresh_version = state.external_refresh_version;
+        let people = people_signature(&state.people);
+        drop(store);
         Self {
             context,
             split,
@@ -56,15 +61,20 @@ impl ProjectsWorkspace {
             observed_external_refresh_version,
             table_focused: false,
             detail_draft_protected: false,
+            table_people: people.clone(),
+            detail_people: people,
         }
     }
     fn sync_store_version(&mut self) {
         let store = self.context.store.borrow();
         let state = store.state();
         let version = state.version;
+        let people_signature = people_signature(&state.people);
+        let table_people_changed = self.table_people != people_signature;
+        let detail_people_changed = self.detail_people != people_signature;
         let external_refresh =
             self.observed_external_refresh_version != state.external_refresh_version;
-        if self.observed_version == version && !external_refresh {
+        if self.observed_version == version && !external_refresh && !detail_people_changed {
             return;
         }
         let protect_detail = external_refresh
@@ -82,7 +92,12 @@ impl ProjectsWorkspace {
             .and_then(|id| state.project_save_error(id))
             .map(str::to_string);
         drop(store);
-        self.split.first_mut().set_rows(rows);
+        if table_people_changed {
+            *self.split.first_mut() = project_table(rows, &people, selected_id.as_deref());
+            self.table_people = people_signature.clone();
+        } else {
+            self.split.first_mut().set_rows(rows);
+        }
         if let Some(id) = selected_id.as_ref() {
             self.split.first_mut().highlight_id(id);
             self.split.first_mut().select_id(id.clone());
@@ -90,6 +105,7 @@ impl ProjectsWorkspace {
         self.split.first_mut().take_events();
         if self.split.second().project_id.as_deref() != selected_id.as_deref()
             || (external_refresh && !protect_detail)
+            || (detail_people_changed && !self.detail_draft_protected && !protect_detail)
         {
             self.split.second_mut().set_project(
                 project.as_ref(),
@@ -97,6 +113,7 @@ impl ProjectsWorkspace {
                 error.as_deref(),
                 &mut EventCtx::default(),
             );
+            self.detail_people = people_signature;
         } else {
             self.split.second_mut().set_save_error(error.as_deref());
         }
@@ -202,9 +219,9 @@ impl ProjectsWorkspace {
             && app_keymap::matches_any(
                 event,
                 &[
-                    keys::MANAGEMENT_DELETE,
-                    keys::MANAGEMENT_DELETE_ALT,
                     keys::MANAGEMENT_DELETE_X,
+                    keys::MANAGEMENT_DELETE,
+                    keys::MANAGEMENT_DELETE_BACKSPACE,
                 ],
             )
         {
@@ -217,6 +234,13 @@ impl ProjectsWorkspace {
         }
         outcome
     }
+}
+
+fn people_signature(people: &[Person]) -> Vec<(String, String)> {
+    people
+        .iter()
+        .map(|person| (person.id.clone(), person.name.clone()))
+        .collect()
 }
 
 impl TuiNode<AppMsg> for ProjectsWorkspace {
@@ -241,6 +265,9 @@ impl TuiNode<AppMsg> for ProjectsWorkspace {
         event: &TuiEvent,
         ctx: &mut EventCtx<AppMsg>,
     ) -> EventOutcome {
+        if self.split.return_to_table_on_unfocus(route, event, ctx) {
+            return EventOutcome::Handled;
+        }
         let outcome = self.split.dispatch_event(route, event, ctx);
         if self.sync_detail_changes() {
             ctx.request_redraw();
@@ -279,12 +306,6 @@ impl TuiNode<AppMsg> for ProjectsWorkspace {
     fn destroy(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
         self.split.destroy(ctx);
     }
-}
-
-fn management_create_action(kind: ManagementDialogKind) -> DialogAction<AppMsg> {
-    DialogAction::new("New")
-        .hotkey(keys::MANAGEMENT_CREATE.key_spec())
-        .on_trigger(move || AppMsg::OpenCreateManagement(kind))
 }
 
 struct ProjectDetailForm {
@@ -348,6 +369,10 @@ impl ProjectDetailForm {
     }
 }
 impl TuiNode<AppMsg> for ProjectDetailForm {
+    fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
+        self.root.measure(proposal)
+    }
+
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
         self.root.layout(area, ctx)
     }
@@ -385,7 +410,7 @@ impl TuiNode<AppMsg> for ProjectDetailForm {
     }
 }
 
-fn project_split(context: &AppContext) -> Split<ProjectTable, ProjectDetailForm> {
+fn project_split(context: &AppContext) -> ManagementPane<ProjectTable, ProjectDetailForm> {
     let store = context.store.borrow();
     let state = store.state();
     let selected = state.selected_project_id.as_deref();
@@ -395,12 +420,11 @@ fn project_split(context: &AppContext) -> Split<ProjectTable, ProjectDetailForm>
         &state.people,
         project.and_then(|project| state.project_save_error(&project.id)),
     );
-    Split::horizontal(
+    ManagementPane::new(
         project_table(state.projects.clone(), &state.people, selected),
         detail,
+        ManagementDialogKind::Projects,
     )
-    .ratio(65, 35)
-    .separator(Separator::new())
 }
 
 fn project_table(rows: Vec<Project>, people: &[Person], selected: Option<&str>) -> ProjectTable {
@@ -453,6 +477,87 @@ fn project_table(rows: Vec<Project>, people: &[Person], selected: Option<&str>) 
     table
 }
 
+pub(crate) struct ProjectKeyInput {
+    input: TextInput<AppMsg>,
+    on_commit: Option<Box<dyn Fn(&str)>>,
+}
+
+impl ProjectKeyInput {
+    pub(crate) fn new(input: TextInput<AppMsg>) -> Self {
+        Self {
+            input,
+            on_commit: None,
+        }
+    }
+
+    pub(crate) fn on_commit(mut self, handler: impl Fn(&str) + 'static) -> Self {
+        self.on_commit = Some(Box::new(handler));
+        self
+    }
+
+    fn normalize(&mut self) {
+        self.input
+            .set_value(self.input.current_value().to_uppercase());
+    }
+}
+
+impl TuiNode<AppMsg> for ProjectKeyInput {
+    fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
+        self.input.measure(proposal)
+    }
+
+    fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
+        self.input.layout(area, ctx)
+    }
+
+    fn render<'a>(&'a self, frame: &mut Frame, area: Rect, ctx: &mut RenderCtx<'a>) {
+        <TextInput<AppMsg> as TuiNode<AppMsg>>::render(&self.input, frame, area, ctx);
+    }
+
+    fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<AppMsg>) -> EventOutcome {
+        let commit = self.input.insert_mode()
+            && matches!(
+                event,
+                TuiEvent::Key(KeyEvent {
+                    code: Key::Enter,
+                    modifiers: KeyModifiers::NONE,
+                })
+            );
+        let outcome = self.input.event(event, ctx);
+        if commit {
+            self.normalize();
+            if let Some(on_commit) = &self.on_commit {
+                on_commit(self.input.current_value());
+            }
+        }
+        outcome
+    }
+
+    fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<AppMsg>) {
+        self.input.dispatch_focus(target, focused, ctx);
+    }
+
+    fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
+        self.input.tick(dt, settings)
+    }
+
+    fn init(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
+        self.input.init(ctx);
+    }
+
+    fn mount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
+        self.input.mount(ctx);
+    }
+
+    fn unmount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
+        self.input.unmount(ctx);
+    }
+
+    fn destroy(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
+        self.input.destroy(ctx);
+    }
+}
+
 fn project_detail_form(
     project: Option<&Project>,
     people: &[Person],
@@ -468,19 +573,23 @@ fn project_detail_form(
     };
     Flex::column()
         .gap(0)
-        .child("save-status", status, FlexItem::fixed(1))
+        .child("save-status", status, FlexItem::content())
         .child(
             "key",
-            TextInput::new()
-                .value(project.key.clone())
-                .panel("Key")
-                .on_edit_end({
-                    let patches = Rc::clone(&patches);
-                    move |value| {
-                        patches.borrow_mut().push(ProjectPatch::Key(value));
-                        AppMsg::Noop
-                    }
-                }),
+            ProjectKeyInput::new(
+                TextInput::new()
+                    .value(project.key.clone())
+                    .panel("Key")
+                    .hotkey(keys::PROJECT_KEY_FIELD.hotkey()),
+            )
+            .on_commit({
+                let patches = Rc::clone(&patches);
+                move |value| {
+                    patches
+                        .borrow_mut()
+                        .push(ProjectPatch::Key(value.to_string()));
+                }
+            }),
             FlexItem::fixed(3),
         )
         .child(
@@ -488,6 +597,7 @@ fn project_detail_form(
             TextInput::new()
                 .value(project.name.clone())
                 .panel("Name")
+                .hotkey(keys::PROJECT_NAME_FIELD.hotkey())
                 .on_edit_end({
                     let patches = Rc::clone(&patches);
                     move |value| {
@@ -502,6 +612,8 @@ fn project_detail_form(
             TextareaInput::new()
                 .value(project.description.clone())
                 .panel("Description")
+                .hotkey(keys::PROJECT_DESCRIPTION_FIELD.hotkey())
+                .editor_hotkey(keys::PROJECT_DESCRIPTION_EDITOR.hotkey())
                 .on_edit_end({
                     let patches = Rc::clone(&patches);
                     move |value| {
@@ -509,9 +621,9 @@ fn project_detail_form(
                         AppMsg::Noop
                     }
                 })
-                .min_rows(4)
-                .max_rows(8),
-            FlexItem::fixed(6),
+                .min_rows(2)
+                .max_rows(6),
+            FlexItem::content(),
         )
         .child(
             "lead",
@@ -520,7 +632,8 @@ fn project_detail_form(
                 person_choices(people),
                 project.lead_person_id.as_deref(),
                 move |id| patches.borrow_mut().push(ProjectPatch::LeadPerson(id)),
-            ),
+            )
+            .hotkey(keys::PROJECT_LEAD_FIELD.hotkey()),
             FlexItem::fixed(3),
         )
 }
@@ -530,14 +643,95 @@ mod tests {
     use super::*;
     use crate::{
         app::tests::{rendered_text, test_context},
-        domain::WorkspaceSnapshot,
+        domain::{PersonPatch, WorkspaceSnapshot},
     };
+    use tuicore::{FocusRequest, HotkeyEvent, Key, KeyEvent, KeyModifiers};
+
+    #[test]
+    fn project_key_input_becomes_uppercase_after_pressing_enter() {
+        let commits = Rc::new(RefCell::new(Vec::new()));
+        let mut input = ProjectKeyInput::new(TextInput::new().focused(true)).on_commit({
+            let commits = Rc::clone(&commits);
+            move |value| commits.borrow_mut().push(value.to_string())
+        });
+
+        input.event(
+            &TuiEvent::Key(KeyEvent::from(Key::Enter)),
+            &mut EventCtx::default(),
+        );
+        assert!(input.input.insert_mode());
+        input.event(
+            &TuiEvent::Key(KeyEvent::from(Key::Char('c'))),
+            &mut EventCtx::default(),
+        );
+        assert_eq!(input.input.current_value(), "c");
+
+        input.event(
+            &TuiEvent::Key(KeyEvent::from(Key::Enter)),
+            &mut EventCtx::default(),
+        );
+
+        assert_eq!(input.input.current_value(), "C");
+        assert_eq!(*commits.borrow(), vec!["C"]);
+    }
+
+    #[test]
+    fn project_key_input_does_not_commit_on_escape() {
+        let commits = Rc::new(RefCell::new(Vec::new()));
+        let mut input = ProjectKeyInput::new(TextInput::new().focused(true)).on_commit({
+            let commits = Rc::clone(&commits);
+            move |value| commits.borrow_mut().push(value.to_string())
+        });
+        input.event(
+            &TuiEvent::Key(KeyEvent::from(Key::Enter)),
+            &mut EventCtx::default(),
+        );
+        input.event(
+            &TuiEvent::Key(KeyEvent::from(Key::Char('c'))),
+            &mut EventCtx::default(),
+        );
+
+        input.event(
+            &TuiEvent::Key(KeyEvent::from(Key::Esc)),
+            &mut EventCtx::default(),
+        );
+
+        assert_eq!(input.input.current_value(), "c");
+        assert!(commits.borrow().is_empty());
+    }
+
+    #[test]
+    fn narrow_projects_workspace_stacks_visible_detail_below_table() {
+        let project = Project::new(
+            "project-1".into(),
+            "CORE".into(),
+            "Core".into(),
+            "Platform".into(),
+        );
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks: vec![],
+            people: vec![],
+            projects: vec![project],
+            tags: vec![],
+        });
+        let mut workspace = ProjectsWorkspace::new(context);
+
+        workspace.layout(Rect::new(0, 0, 80, 30), &mut LayoutCtx::new());
+
+        let (table, detail) = workspace.split.child_areas();
+        assert_eq!(table.width, 80);
+        assert_eq!(detail.width, 80);
+        assert_eq!(detail.height, 13);
+        assert_eq!(table.height + detail.height, 30);
+    }
+
     #[test]
     fn management_workspace_renders_and_edits_project() {
         let person = Person {
             id: "person-1".into(),
             name: "Ada".into(),
             email: "ada@example.com".into(),
+            about: "Owns architecture decisions".into(),
             active: true,
         };
         let project = Project {
@@ -568,6 +762,68 @@ mod tests {
             .push(ProjectPatch::Name("Foundation".into()));
         assert!(workspace.sync_detail_changes());
         assert_eq!(store.borrow().state().projects[0].name, "Foundation");
+    }
+
+    #[test]
+    fn local_person_rename_updates_project_table_and_lead_choice() {
+        let person = Person::new("person-1".into(), "Ada".into(), String::new());
+        let mut project = Project::new(
+            "project-1".into(),
+            "CORE".into(),
+            "Core".into(),
+            String::new(),
+        );
+        project.lead_person_id = Some(person.id.clone());
+        let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+            tasks: vec![],
+            people: vec![person],
+            projects: vec![project],
+            tags: vec![],
+        });
+        let mut workspace = ProjectsWorkspace::new(context);
+        store.borrow_mut().dispatch(AppEvent::PatchPerson {
+            person_id: "person-1".into(),
+            patch: PersonPatch::Name("Grace".into()),
+        });
+        let area = Rect::new(0, 0, 100, 30);
+
+        workspace.layout(area, &mut LayoutCtx::new());
+        let text = rendered_text(&workspace, area);
+
+        assert!(
+            text.matches("Grace").count() >= 2,
+            "table and detail should update: {text}"
+        );
+        assert!(!text.contains("Ada"));
+    }
+
+    #[test]
+    fn local_person_deletion_removes_stale_project_lead_name() {
+        let person = Person::new("person-1".into(), "Ada".into(), String::new());
+        let mut project = Project::new(
+            "project-1".into(),
+            "CORE".into(),
+            "Core".into(),
+            String::new(),
+        );
+        project.lead_person_id = Some(person.id.clone());
+        let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+            tasks: vec![],
+            people: vec![person],
+            projects: vec![project],
+            tags: vec![],
+        });
+        let mut workspace = ProjectsWorkspace::new(context);
+        store
+            .borrow_mut()
+            .dispatch(AppEvent::PersonDeleted("person-1".into()));
+        let area = Rect::new(0, 0, 100, 30);
+
+        workspace.layout(area, &mut LayoutCtx::new());
+        let text = rendered_text(&workspace, area);
+
+        assert!(!text.contains("Ada"));
+        assert_eq!(store.borrow().state().projects[0].lead_person_id, None);
     }
 
     #[test]
@@ -654,6 +910,111 @@ mod tests {
         assert_eq!(
             workspace.split.second().project_id.as_deref(),
             Some("project-2")
+        );
+    }
+
+    #[test]
+    fn escape_from_project_detail_focuses_table_before_closing_dialog() {
+        let project = Project::new(
+            "project-1".into(),
+            "CORE".into(),
+            "Core".into(),
+            "Platform".into(),
+        );
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks: vec![],
+            people: vec![],
+            projects: vec![project],
+            tags: vec![],
+        });
+        let mut dialog = dialog(context);
+        let mut layout = LayoutCtx::new();
+        dialog.layout(Rect::new(0, 0, 100, 30), &mut layout);
+        let description = layout
+            .focus_targets()
+            .iter()
+            .find(|target| {
+                target
+                    .path
+                    .keys()
+                    .iter()
+                    .any(|key| key.as_str() == "description")
+            })
+            .expect("project description should be focusable")
+            .clone();
+
+        for key in [
+            KeyEvent::from(Key::Esc),
+            KeyEvent {
+                code: Key::Char('['),
+                modifiers: KeyModifiers::CONTROL,
+            },
+        ] {
+            let mut ctx = EventCtx::default();
+            let outcome = dialog.dispatch_event(
+                &EventRoute::new(description.path.clone()),
+                &TuiEvent::Key(key),
+                &mut ctx,
+            );
+
+            assert!(outcome.handled());
+            assert!(ctx.messages().is_empty());
+            assert!(matches!(ctx.focus_request(), Some(FocusRequest::Path(_))));
+        }
+    }
+
+    #[test]
+    fn project_detail_controls_register_requested_hotkeys() {
+        let project = Project::new(
+            "project-1".into(),
+            "CORE".into(),
+            "Core".into(),
+            "Platform".into(),
+        );
+        let mut detail = ProjectDetailForm::new(Some(&project), &[], None);
+        let mut layout = LayoutCtx::new();
+        detail.layout(Rect::new(0, 0, 80, 24), &mut layout);
+
+        for hotkey in [
+            keys::PROJECT_KEY_FIELD.hotkey(),
+            keys::PROJECT_NAME_FIELD.hotkey(),
+            keys::PROJECT_DESCRIPTION_FIELD.hotkey(),
+            keys::PROJECT_DESCRIPTION_EDITOR.hotkey(),
+            keys::PROJECT_LEAD_FIELD.hotkey(),
+        ] {
+            assert_eq!(
+                layout
+                    .focus_targets()
+                    .iter()
+                    .filter(|target| target.hotkey_sequences.contains(&hotkey))
+                    .count(),
+                1,
+                "{hotkey} should be registered once"
+            );
+        }
+
+        let description = layout
+            .focus_targets()
+            .iter()
+            .find(|target| {
+                target
+                    .hotkey_sequences
+                    .contains(&keys::PROJECT_DESCRIPTION_EDITOR.hotkey())
+            })
+            .expect("description editor hotkey should have a target");
+        let mut ctx = EventCtx::default();
+        let outcome = detail.dispatch_event(
+            &EventRoute::new(description.path.clone()),
+            &TuiEvent::Hotkey(HotkeyEvent::Commit(
+                keys::PROJECT_DESCRIPTION_EDITOR.hotkey(),
+            )),
+            &mut ctx,
+        );
+        assert!(outcome.handled());
+        assert_eq!(
+            ctx.external_editor_request()
+                .map(|request| request.value.as_str()),
+            Some("Platform")
         );
     }
 }

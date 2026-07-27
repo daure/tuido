@@ -6,12 +6,13 @@ use ratatui::{
 };
 use tuicore::{
     ActivationMode, AnimationSettings, ChildKey, Column, DataView, DataViewTypedEvent, Dialog,
-    DialogAction, DialogHost, EventCtx, EventOutcome, EventRoute, Flex, FlexItem, FocusCtx,
-    FocusTarget, LayoutCtx, LayoutResult, LifecycleCtx, Paragraph, RenderCtx, SelectionMode,
-    SelectionTrigger, Separator, Split, TextInput, TickResult, TuiEvent, TuiNode,
+    DialogHost, EventCtx, EventOutcome, EventRoute, Flex, FlexItem, FocusCtx, FocusTarget,
+    LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, Paragraph, RenderCtx,
+    SelectionMode, SelectionTrigger, TextInput, TickResult, TuiEvent, TuiNode,
 };
 
 use super::ManagementDialogKind;
+use super::common::ManagementPane;
 use crate::{
     app::{AppContext, AppMsg},
     app_keymap::{self, keys},
@@ -27,7 +28,6 @@ pub(crate) type TagsDialog = DialogHost<TagsWorkspace, AppMsg>;
 pub(crate) fn dialog(context: AppContext) -> TagsDialog {
     Dialog::new()
         .top_left("Tags")
-        .actions([management_create_action(ManagementDialogKind::Tags)])
         .close_on_unfocus_from_descendants(true)
         .on_close(|_| AppMsg::CloseDialog)
         .host(TagsWorkspace::new(context))
@@ -35,7 +35,7 @@ pub(crate) fn dialog(context: AppContext) -> TagsDialog {
 
 pub(crate) struct TagsWorkspace {
     context: AppContext,
-    split: Split<TagTable, TagDetailForm>,
+    split: ManagementPane<TagTable, TagDetailForm>,
     observed_version: u64,
     observed_external_refresh_version: u64,
     table_focused: bool,
@@ -190,9 +190,9 @@ impl TagsWorkspace {
             && app_keymap::matches_any(
                 event,
                 &[
-                    keys::MANAGEMENT_DELETE,
-                    keys::MANAGEMENT_DELETE_ALT,
                     keys::MANAGEMENT_DELETE_X,
+                    keys::MANAGEMENT_DELETE,
+                    keys::MANAGEMENT_DELETE_BACKSPACE,
                 ],
             )
         {
@@ -228,6 +228,9 @@ impl TuiNode<AppMsg> for TagsWorkspace {
         event: &TuiEvent,
         ctx: &mut EventCtx<AppMsg>,
     ) -> EventOutcome {
+        if self.split.return_to_table_on_unfocus(route, event, ctx) {
+            return EventOutcome::Handled;
+        }
         let outcome = self.split.dispatch_event(route, event, ctx);
         if self.sync_detail_changes() {
             ctx.request_redraw();
@@ -266,12 +269,6 @@ impl TuiNode<AppMsg> for TagsWorkspace {
     fn destroy(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
         self.split.destroy(ctx);
     }
-}
-
-fn management_create_action(kind: ManagementDialogKind) -> DialogAction<AppMsg> {
-    DialogAction::new("New")
-        .hotkey(keys::MANAGEMENT_CREATE.key_spec())
-        .on_trigger(move || AppMsg::OpenCreateManagement(kind))
 }
 
 struct TagDetailForm {
@@ -324,6 +321,10 @@ impl TagDetailForm {
     }
 }
 impl TuiNode<AppMsg> for TagDetailForm {
+    fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
+        self.root.measure(proposal)
+    }
+
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
         self.root.layout(area, ctx)
     }
@@ -361,15 +362,17 @@ impl TuiNode<AppMsg> for TagDetailForm {
     }
 }
 
-fn tag_split(context: &AppContext) -> Split<TagTable, TagDetailForm> {
+fn tag_split(context: &AppContext) -> ManagementPane<TagTable, TagDetailForm> {
     let store = context.store.borrow();
     let state = store.state();
     let selected = state.selected_tag_id.as_deref();
     let tag = selected.and_then(|id| state.tags.iter().find(|tag| tag.id == id));
     let detail = TagDetailForm::new(tag, tag.and_then(|tag| state.tag_save_error(&tag.id)));
-    Split::horizontal(tag_table(state.tags.clone(), selected), detail)
-        .ratio(65, 35)
-        .separator(Separator::new())
+    ManagementPane::new(
+        tag_table(state.tags.clone(), selected),
+        detail,
+        ManagementDialogKind::Tags,
+    )
 }
 fn tag_table(rows: Vec<Tag>, selected: Option<&str>) -> TagTable {
     let mut table = DataView::new(rows, |row: &Tag| row.id.clone())
@@ -405,12 +408,13 @@ fn tag_detail_form(
     };
     Flex::column()
         .gap(0)
-        .child("save-status", status, FlexItem::fixed(1))
+        .child("save-status", status, FlexItem::content())
         .child(
             "label",
             TextInput::new()
                 .value(tag.label.clone())
                 .panel("Label")
+                .hotkey(keys::TAG_LABEL_FIELD.hotkey())
                 .on_edit_end(move |value| {
                     patches.borrow_mut().push(TagPatch::Label(value));
                     AppMsg::Noop
@@ -426,6 +430,28 @@ mod tests {
         app::tests::{rendered_text, test_context},
         domain::WorkspaceSnapshot,
     };
+    use tuicore::{FocusRequest, Key, KeyEvent, KeyModifiers};
+
+    #[test]
+    fn narrow_tags_workspace_stacks_visible_detail_below_table() {
+        let tag = Tag::new("tag-1".into(), "api".into());
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks: vec![],
+            people: vec![],
+            projects: vec![],
+            tags: vec![tag],
+        });
+        let mut workspace = TagsWorkspace::new(context);
+
+        workspace.layout(Rect::new(0, 0, 80, 30), &mut LayoutCtx::new());
+
+        let (table, detail) = workspace.split.child_areas();
+        assert_eq!(table.width, 80);
+        assert_eq!(detail.width, 80);
+        assert_eq!(detail.height, 3);
+        assert_eq!(table.height + detail.height, 30);
+    }
+
     #[test]
     fn management_workspace_has_table_and_editable_detail() {
         let tags = vec![
@@ -530,5 +556,62 @@ mod tests {
             Some("tag-2")
         );
         assert_eq!(workspace.split.second().tag_id.as_deref(), Some("tag-2"));
+    }
+
+    #[test]
+    fn escape_from_tag_detail_focuses_table_before_closing_dialog() {
+        let tag = Tag::new("tag-1".into(), "api".into());
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks: vec![],
+            people: vec![],
+            projects: vec![],
+            tags: vec![tag],
+        });
+        let mut dialog = dialog(context);
+        let mut layout = LayoutCtx::new();
+        dialog.layout(Rect::new(0, 0, 100, 30), &mut layout);
+        let label = layout
+            .focus_targets()
+            .iter()
+            .find(|target| target.path.keys().iter().any(|key| key.as_str() == "label"))
+            .expect("tag label should be focusable")
+            .clone();
+
+        for key in [
+            KeyEvent::from(Key::Esc),
+            KeyEvent {
+                code: Key::Char('['),
+                modifiers: KeyModifiers::CONTROL,
+            },
+        ] {
+            let mut ctx = EventCtx::default();
+            let outcome = dialog.dispatch_event(
+                &EventRoute::new(label.path.clone()),
+                &TuiEvent::Key(key),
+                &mut ctx,
+            );
+
+            assert!(outcome.handled());
+            assert!(ctx.messages().is_empty());
+            assert!(matches!(ctx.focus_request(), Some(FocusRequest::Path(_))));
+        }
+    }
+
+    #[test]
+    fn tag_label_registers_requested_hotkey() {
+        let tag = Tag::new("tag-1".into(), "api".into());
+        let mut detail = TagDetailForm::new(Some(&tag), None);
+        let mut layout = LayoutCtx::new();
+        detail.layout(Rect::new(0, 0, 80, 12), &mut layout);
+
+        let hotkey = keys::TAG_LABEL_FIELD.hotkey();
+        assert_eq!(
+            layout
+                .focus_targets()
+                .iter()
+                .filter(|target| target.hotkey_sequences.contains(&hotkey))
+                .count(),
+            1
+        );
     }
 }

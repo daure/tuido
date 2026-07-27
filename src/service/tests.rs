@@ -125,6 +125,38 @@ fn explicit_expiry_processing_unsnoozes_due_tasks() {
 }
 
 #[test]
+fn backlog_tasks_round_trip_through_persistence() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let service = test_service().await;
+        let created = service
+            .create_task(TaskCreate {
+                title: "Later".into(),
+                description: String::new(),
+                size: "small".into(),
+                state: "backlog".into(),
+                priority: "medium".into(),
+                start_date: None,
+                due_date: None,
+                snoozed_until: None,
+                people_ids: Vec::new(),
+                project_ids: Vec::new(),
+                tag_ids: Vec::new(),
+                links: Vec::new(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(created.value.state, "backlog");
+        let workspace = service.workspace().await.unwrap();
+        assert_eq!(workspace.tasks[0].value.state, "backlog");
+    });
+}
+
+#[test]
 fn task_tags_by_label_reuse_create_replace_clear_and_rollback_atomically() {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -230,14 +262,17 @@ fn filtered_workspace_filters_tasks_and_returns_complete_entity_catalogs() {
             .create_person(PersonInput {
                 name: "Marlo".into(),
                 email: "marlo@example.com".into(),
+                about: "Workspace owner".into(),
                 active: true,
             })
             .await
             .unwrap();
+        assert_eq!(person.value.about, "Workspace owner");
         service
             .create_person(PersonInput {
                 name: "Unrelated".into(),
                 email: String::new(),
+                about: String::new(),
                 active: true,
             })
             .await

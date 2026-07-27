@@ -148,6 +148,7 @@ pub struct PersonView {
     pub id: String,
     pub name: String,
     pub email: String,
+    pub about: String,
     pub active: bool,
 }
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -238,6 +239,9 @@ pub struct PersonInput {
     pub name: String,
     #[serde(default)]
     pub email: String,
+    #[serde(default)]
+    /// Practical context that helps define, understand, or reason about tasks involving this person.
+    pub about: String,
     #[serde(default = "default_true")]
     pub active: bool,
 }
@@ -323,7 +327,7 @@ impl TuidoService {
             .await
             .map_err(storage_error)?;
         let update = format!(
-            "UPDATE tasks SET workflow_state = 'todo', rejected = false, snoozed_until = NULL, revision = revision + 1, updated_at = {} WHERE id = {} AND revision = {} AND workflow_state = 'snoozed' AND rejected = false AND snoozed_until IS NOT NULL AND snoozed_until <= {}",
+            "UPDATE tasks SET state = 'next', workflow_state = 'todo', rejected = false, snoozed_until = NULL, revision = revision + 1, updated_at = {} WHERE id = {} AND revision = {} AND workflow_state = 'snoozed' AND rejected = false AND snoozed_until IS NOT NULL AND snoozed_until <= {}",
             self.dialect.placeholder(1),
             self.dialect.placeholder(2),
             self.dialect.placeholder(3),
@@ -369,6 +373,7 @@ impl TuidoService {
                             id: v.id,
                             name: v.name,
                             email: v.email,
+                            about: v.about,
                             active: v.active,
                         },
                         &revisions,
@@ -498,7 +503,7 @@ impl TuidoService {
         normalize_task_links(&mut task.links);
         validation::validate_task_links(&task.links)?;
         let sql = format!(
-            "INSERT INTO tasks (id, title, state, workflow_state, rejected, size, priority, start_date, due_date, snoozed_until, description, created_at, updated_at) VALUES ({}, {}, 'next', {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
+            "INSERT INTO tasks (id, title, state, workflow_state, rejected, size, priority, start_date, due_date, snoozed_until, description, created_at, updated_at) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
             self.dialect.placeholder(1),
             self.dialect.placeholder(2),
             self.dialect.placeholder(3),
@@ -510,14 +515,16 @@ impl TuidoService {
             self.dialect.placeholder(9),
             self.dialect.placeholder(10),
             self.dialect.placeholder(11),
-            self.dialect.placeholder(12)
+            self.dialect.placeholder(12),
+            self.dialect.placeholder(13)
         );
         let now = now_text();
         let mut tx = self.pool.begin().await.map_err(storage_error)?;
         sqlx::query(AssertSqlSafe(sql.as_str()))
             .bind(&task.id)
             .bind(&task.title)
-            .bind(storage_state(task.state.id()))
+            .bind(storage_legacy_state(task.state.id()))
+            .bind(storage_workflow_state(task.state.id()))
             .bind(task.state == crate::domain::TaskState::Rejected)
             .bind(task.size.id())
             .bind(task.priority.id())
@@ -603,7 +610,7 @@ impl TuidoService {
         self.claim(&mut tx, "tasks", "task", &input.id, input.expected_revision)
             .await?;
         let sql = format!(
-            "UPDATE tasks SET title = {}, workflow_state = {}, rejected = {}, size = {}, priority = {}, start_date = {}, due_date = {}, snoozed_until = {}, description = {}, updated_at = {} WHERE id = {}",
+            "UPDATE tasks SET title = {}, state = {}, workflow_state = {}, rejected = {}, size = {}, priority = {}, start_date = {}, due_date = {}, snoozed_until = {}, description = {}, updated_at = {} WHERE id = {}",
             self.dialect.placeholder(1),
             self.dialect.placeholder(2),
             self.dialect.placeholder(3),
@@ -614,11 +621,13 @@ impl TuidoService {
             self.dialect.placeholder(8),
             self.dialect.placeholder(9),
             self.dialect.placeholder(10),
-            self.dialect.placeholder(11)
+            self.dialect.placeholder(11),
+            self.dialect.placeholder(12)
         );
         sqlx::query(AssertSqlSafe(sql.as_str()))
             .bind(input.title.trim())
-            .bind(storage_state(&input.state))
+            .bind(storage_legacy_state(&input.state))
+            .bind(storage_workflow_state(&input.state))
             .bind(input.state == "rejected")
             .bind(&input.size)
             .bind(&input.priority)
@@ -785,6 +794,7 @@ impl TuidoService {
             id: Uuid::new_v4().to_string(),
             name: input.name.trim().into(),
             email: input.email.trim().into(),
+            about: input.about,
             active: input.active,
         };
         self.create_person_entity(person).await
@@ -797,17 +807,19 @@ impl TuidoService {
             return Err(ServiceError::Invalid("person name is required".into()));
         }
         let sql = format!(
-            "INSERT INTO people (id, name, email, active) VALUES ({}, {}, {}, {})",
+            "INSERT INTO people (id, name, email, about, active) VALUES ({}, {}, {}, {}, {})",
             self.dialect.placeholder(1),
             self.dialect.placeholder(2),
             self.dialect.placeholder(3),
-            self.dialect.placeholder(4)
+            self.dialect.placeholder(4),
+            self.dialect.placeholder(5)
         );
         let mut tx = self.pool.begin().await.map_err(storage_error)?;
         sqlx::query(AssertSqlSafe(sql.as_str()))
             .bind(&person.id)
             .bind(&person.name)
             .bind(&person.email)
+            .bind(&person.about)
             .bind(person.active)
             .execute(&mut *tx)
             .await
@@ -820,6 +832,7 @@ impl TuidoService {
                 id: person.id,
                 name: person.name,
                 email: person.email,
+                about: person.about,
                 active: person.active,
             },
         })
@@ -839,6 +852,7 @@ impl TuidoService {
             &[
                 ("name", Value::Text(input.name.trim().into())),
                 ("email", Value::Text(input.email.trim().into())),
+                ("about", Value::Text(input.about)),
                 ("active", Value::Bool(input.active)),
             ],
         )
@@ -865,6 +879,7 @@ impl TuidoService {
         let input = match patch {
             PersonPatch::Name(v) => ("name", Value::Text(v.trim().into())),
             PersonPatch::Email(v) => ("email", Value::Text(v.trim().into())),
+            PersonPatch::About(v) => ("about", Value::Text(v)),
             PersonPatch::Active(v) => ("active", Value::Bool(v)),
         };
         self.update_simple("people", "person", &id, expected, &[input])
@@ -942,7 +957,7 @@ impl TuidoService {
             id,
             expected,
             &[
-                ("key", Value::Text(input.key.trim().into())),
+                ("key", Value::Text(Project::normalize_key(&input.key))),
                 ("name", Value::Text(input.name.trim().into())),
                 ("description", Value::Text(input.description)),
                 ("lead_person_id", Value::Optional(input.lead_person_id)),
@@ -971,7 +986,7 @@ impl TuidoService {
             ProjectPatch::Description(_) | ProjectPatch::LeadPerson(_) => {}
         }
         let input = match patch {
-            ProjectPatch::Key(v) => ("key", Value::Text(v.trim().into())),
+            ProjectPatch::Key(v) => ("key", Value::Text(Project::normalize_key(&v))),
             ProjectPatch::Name(v) => ("name", Value::Text(v.trim().into())),
             ProjectPatch::Description(v) => ("description", Value::Text(v)),
             ProjectPatch::LeadPerson(v) => ("lead_person_id", Value::Optional(v)),
@@ -1342,8 +1357,22 @@ fn normalize_task_links(links: &mut Vec<String>) {
     links.dedup();
 }
 
-fn storage_state(v: &str) -> &str {
-    if v == "rejected" { "snoozed" } else { v }
+fn storage_workflow_state(v: &str) -> &str {
+    match v {
+        "backlog" => "todo",
+        "rejected" => "snoozed",
+        value => value,
+    }
+}
+
+fn storage_legacy_state(v: &str) -> &str {
+    match v {
+        "backlog" => "waiting",
+        "in_progress" => "doing",
+        "done" => "done",
+        "snoozed" | "rejected" => "snoozed",
+        _ => "next",
+    }
 }
 fn now_text() -> String {
     std::time::SystemTime::now()
@@ -1379,13 +1408,10 @@ async fn apply_task_patch(
         TaskPatch::Title(v) => (vec!["title"], vec![Value::Text(v.trim().into())]),
         TaskPatch::Description(v) => (vec!["description"], vec![Value::Text(v)]),
         TaskPatch::State(v) => (
-            vec!["workflow_state", "rejected", "snoozed_until"],
+            vec!["state", "workflow_state", "rejected", "snoozed_until"],
             vec![
-                Value::Text(if v == crate::domain::TaskState::Rejected {
-                    "snoozed".into()
-                } else {
-                    v.id().into()
-                }),
+                Value::Text(storage_legacy_state(v.id()).into()),
+                Value::Text(storage_workflow_state(v.id()).into()),
                 Value::Bool(v == crate::domain::TaskState::Rejected),
                 Value::Optional(None),
             ],
@@ -1395,16 +1421,18 @@ async fn apply_task_patch(
         TaskPatch::StartDate(v) => (vec!["start_date"], vec![Value::Optional(v)]),
         TaskPatch::EndDate(v) => (vec!["due_date"], vec![Value::Optional(v)]),
         TaskPatch::Snooze { until, .. } => (
-            vec!["workflow_state", "rejected", "snoozed_until"],
+            vec!["state", "workflow_state", "rejected", "snoozed_until"],
             vec![
+                Value::Text("snoozed".into()),
                 Value::Text("snoozed".into()),
                 Value::Bool(false),
                 Value::Text(crate::snooze::format_datetime(until)),
             ],
         ),
         TaskPatch::Unsnooze => (
-            vec!["workflow_state", "rejected", "snoozed_until"],
+            vec!["state", "workflow_state", "rejected", "snoozed_until"],
             vec![
+                Value::Text("next".into()),
                 Value::Text("todo".into()),
                 Value::Bool(false),
                 Value::Optional(None),
