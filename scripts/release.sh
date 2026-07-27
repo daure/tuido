@@ -200,9 +200,19 @@ if package is None or dependencies is None:
     raise SystemExit("error: Cargo.toml must have [package] and [dependencies] sections")
 
 package_version = re.search(r'(?m)^\s*version\s*=\s*["\']([^"\']+)["\']', package.group("body"))
-tuicore = re.search(r'(?m)^\s*tuicore\s*=\s*["\']([^"\']+)["\']\s*$', dependencies.group("body"))
-if package_version is None or tuicore is None:
-    raise SystemExit("error: package version and Tuicore registry dependency must use string versions")
+tuicore_entry = re.search(r'(?m)^\s*tuicore\s*=\s*(?P<value>.+?)\s*$', dependencies.group("body"))
+if package_version is None or tuicore_entry is None:
+    raise SystemExit("error: package version and Tuicore dependency must declare string versions")
+tuicore_value = tuicore_entry.group("value")
+tuicore = re.fullmatch(r'["\']([^"\']+)["\']', tuicore_value)
+if tuicore is None:
+    inline_table = re.fullmatch(r'\{(?P<body>.*)\}', tuicore_value)
+    tuicore = None if inline_table is None else re.search(
+        r'(?:^|,)\s*version\s*=\s*["\']([^"\']+)["\']',
+        inline_table.group("body"),
+    )
+if tuicore is None:
+    raise SystemExit("error: package version and Tuicore dependency must declare string versions")
 
 def strict_version(label, value):
     if re.fullmatch(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)", value) is None:
@@ -269,7 +279,9 @@ old, new = sys.argv[1:]
 path = pathlib.Path("Cargo.toml")
 text = path.read_text()
 updated, count = re.subn(
-    r'(?m)^(\s*tuicore\s*=\s*["\'])' + re.escape(old) + r'(["\']\s*)$',
+    r'(?m)^(\s*tuicore\s*=\s*(?:["\']|\{[^\n}]*\bversion\s*=\s*["\']))'
+    + re.escape(old)
+    + r'(["\'][^\n]*$)',
     rf'\g<1>{new}\g<2>',
     text,
     count=1,
