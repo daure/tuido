@@ -671,6 +671,37 @@ fn yanking_task_with_missing_relation_copies_descriptive_json_error() {
 }
 
 #[test]
+fn agent_yank_copies_plain_tuido_task_title_command() {
+    let task_id = "d3265cf8-2ca6-4633-855f-1b5102e1231a";
+    let task_title = "Add yank agent hotkey";
+    let task = task_with(task_id, task_title, TaskState::Todo);
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![task],
+        people: Vec::new(),
+        projects: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut workspace = TaskWorkspace::new(context);
+
+    let mut ctx = EventCtx::default();
+    let outcome = workspace.event(
+        &TuiEvent::Hotkey(HotkeyEvent::Commit(keys::TASK_AGENT_YANK.hotkey())),
+        &mut ctx,
+    );
+    let effects = tuicore::DispatchEffects::from_event_ctx(outcome, ctx);
+    let expected = format!("Tuido execute \"{task_title}\"");
+
+    assert_eq!(effects.clipboard.as_deref(), Some(expected.as_str()));
+    assert_eq!(
+        effects.notifications,
+        vec![tuicore::Notification::info(
+            "Copied to clipboard",
+            format!("\"{expected}\"")
+        )]
+    );
+}
+
+#[test]
 fn app_startup_selects_and_focuses_first_ranked_task() {
     let mut older_low = task_with("older-low", "Older low", TaskState::InProgress);
     older_low.priority = TaskPriority::Low;
@@ -746,10 +777,16 @@ fn task_detail_hotkeys_are_registered_while_task_table_is_focused() {
         .expect("task table should be focusable");
     assert!(!task_table.suppress_global_hotkeys);
     assert!(!task_table.focused_events_before_global_hotkeys);
+    assert!(
+        task_table
+            .hotkey_sequences
+            .contains(&keys::TASK_AGENT_YANK.hotkey())
+    );
 
     for hotkey in [
         keys::TASK_TITLE_FIELD.hotkey(),
         keys::TASK_TAGS_FIELD.hotkey(),
+        keys::TASK_LINKS_FIELD.hotkey(),
     ] {
         assert_eq!(
             layout

@@ -901,6 +901,64 @@ fn created_task_state_hotkey_focuses_open_dropdown() {
 }
 
 #[test]
+fn open_size_dropdown_consumes_b_without_snoozing_task() {
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![test_task()],
+        people: Vec::new(),
+        projects: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut workspace = TaskWorkspace::new(context);
+    let area = Rect::new(0, 0, 120, 40);
+    let mut layout = LayoutCtx::new();
+    workspace.layout(area, &mut layout);
+    let task_size = layout
+        .focus_targets()
+        .iter()
+        .find(|target| {
+            target.id.as_str() == "field"
+                && target.path.keys().iter().any(|key| key.as_str() == "size")
+        })
+        .expect("task size should be focusable")
+        .clone();
+    let mut dispatcher = TreeDispatcher::new();
+    let open = dispatcher.dispatch_event(
+        &mut workspace,
+        &EventRoute::new(task_size.path),
+        &TuiEvent::Hotkey(HotkeyEvent::Commit(keys::TASK_SIZE_FIELD.hotkey())),
+        AnimationSettings::default(),
+    );
+    let focus_request = open
+        .focus_request
+        .as_ref()
+        .expect("size hotkey should request dropdown search focus");
+    let mut open_layout = LayoutCtx::new();
+    workspace.layout(area, &mut open_layout);
+    let mut focus = FocusManager::new();
+    let transition = focus
+        .apply_request(focus_request, open_layout.focus_targets())
+        .expect("open dropdown search should accept focus");
+    dispatcher.dispatch_focus(
+        &mut workspace,
+        transition.clone(),
+        AnimationSettings::default(),
+    );
+    let focused = transition
+        .current
+        .expect("dropdown search should become focused");
+
+    let effects = dispatcher.dispatch_event(
+        &mut workspace,
+        &EventRoute::new(focused.path),
+        &TuiEvent::Key(KeyEvent::from(Key::Char('b'))),
+        AnimationSettings::default(),
+    );
+
+    assert!(effects.outcome.handled());
+    assert!(effects.messages.is_empty());
+}
+
+#[test]
 fn task_state_switcher_excludes_snoozed() {
     let choice_ids = state_choices()
         .into_iter()

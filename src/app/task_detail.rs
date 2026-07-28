@@ -206,6 +206,7 @@ pub(super) fn task_table_with_copy_context(
         |_, _| unreachable!("task creation uses the task dialog"),
     )
     .copy_with(move |row| copy_context.export(row))
+    .hotkey(keys::TASK_AGENT_YANK.hotkey())
     .action_bar(true)
     .panel_visible(false)
     .filter_controls(false)

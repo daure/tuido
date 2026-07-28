@@ -316,6 +316,7 @@ pub mod keys {
     pub const TASK_QUICK_MENU: AppBinding = AppBinding::new("TASK_QUICK_MENU", ".");
     pub const TASK_MOVE_MODE: AppBinding = AppBinding::new("TASK_MOVE_MODE", "ctrl+m");
     pub const TASK_SNOOZE: AppBinding = AppBinding::new("TASK_SNOOZE", "b");
+    pub const TASK_AGENT_YANK: AppBinding = AppBinding::new_sequence("TASK_AGENT_YANK", "ya");
     pub const MANAGEMENT_CREATE: AppBinding = AppBinding::new("MANAGEMENT_CREATE", "n");
     pub const MANAGEMENT_DELETE: AppBinding = AppBinding::new("MANAGEMENT_DELETE", "delete");
     pub const MANAGEMENT_DELETE_BACKSPACE: AppBinding =
@@ -447,6 +448,7 @@ pub mod keys {
         TASK_QUICK_MENU,
         TASK_MOVE_MODE,
         TASK_SNOOZE,
+        TASK_AGENT_YANK,
         MANAGEMENT_CREATE,
         MANAGEMENT_DELETE,
         MANAGEMENT_DELETE_BACKSPACE,
@@ -566,6 +568,7 @@ pub mod keys {
                 TASK_QUICK_MENU,
                 TASK_MOVE_MODE,
                 TASK_SNOOZE,
+                TASK_AGENT_YANK,
             ],
         },
         BindingContext {

@@ -34,10 +34,10 @@ use tuicore::{
     DataViewTypedEvent, DatePickerDropdown, DateTimePickerDropdown, Dialog, DialogBackdrop,
     DialogHost, DialogLayer, Dropdown, DropdownCommitMode, DropdownSearchMode, EventCtx,
     EventOutcome, EventRoute, Flex, FlexItem, FocusCtx, FocusId, FocusRequest, FocusTarget,
-    HotkeyLabelMode, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx,
-    ListControl, ListControlEvent, ListControlField, ListControlKeyBindings, Menu, MenuItem,
-    MenuSearchMode, Paragraph, RenderCtx, SelectedTag, SelectionMode, SelectionTrigger, Split,
-    StatusBar, StatusBarMenuItem, Store, Tab, Tabs, TabsVariant, TagInput, TagInputEvent,
+    HotkeyEvent, HotkeyLabelMode, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint,
+    LifecycleCtx, ListControl, ListControlEvent, ListControlField, ListControlKeyBindings, Menu,
+    MenuItem, MenuSearchMode, Paragraph, RenderCtx, SelectedTag, SelectionMode, SelectionTrigger,
+    Split, StatusBar, StatusBarMenuItem, Store, Tab, Tabs, TabsVariant, TagInput, TagInputEvent,
     TextInput, TextareaInput, TickResult, TreeApp, TreePath, TuiEvent, TuiNode,
     WeatherProviderConfig,
 };
@@ -1528,6 +1528,38 @@ impl TaskWorkspace {
         }
         None
     }
+
+    fn handle_task_agent_yank(
+        &self,
+        event: &TuiEvent,
+        ctx: &mut EventCtx<AppMsg>,
+    ) -> Option<EventOutcome> {
+        let TuiEvent::Hotkey(HotkeyEvent::Commit(sequence)) = event else {
+            return None;
+        };
+        if sequence != &keys::TASK_AGENT_YANK.hotkey() {
+            return None;
+        }
+        let task_title = self
+            .visible_selection
+            .borrow()
+            .as_ref()
+            .and_then(|task_id| {
+                self.context
+                    .store
+                    .borrow()
+                    .state()
+                    .tasks
+                    .iter()
+                    .find(|task| task.id == *task_id)
+                    .map(|task| task.title.clone())
+            });
+        if let Some(task_title) = task_title {
+            ctx.copy_to_clipboard(format!("Tuido execute \"{task_title}\""));
+        }
+        ctx.stop_propagation();
+        Some(EventOutcome::Handled)
+    }
 }
 
 impl TuiNode<AppMsg> for TaskWorkspace {
@@ -1542,7 +1574,7 @@ impl TuiNode<AppMsg> for TaskWorkspace {
 
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<AppMsg>) -> EventOutcome {
         self.sync_store_version();
-        if let Some(outcome) = self.handle_task_shortcut_outside_table(event, ctx) {
+        if let Some(outcome) = self.handle_task_agent_yank(event, ctx) {
             return outcome;
         }
         let outcome = self.layout.event(event, ctx);
@@ -1556,6 +1588,11 @@ impl TuiNode<AppMsg> for TaskWorkspace {
             ctx.focus(initial_task_table_focus_request());
         }
         self.sync_table_events(ctx);
+        if !outcome.handled()
+            && let Some(outcome) = self.handle_task_shortcut_outside_table(event, ctx)
+        {
+            return outcome;
+        }
         self.handle_workspace_event(outcome, event, ctx)
     }
 
@@ -1566,7 +1603,7 @@ impl TuiNode<AppMsg> for TaskWorkspace {
         ctx: &mut EventCtx<AppMsg>,
     ) -> EventOutcome {
         self.sync_store_version();
-        if let Some(outcome) = self.handle_task_shortcut_outside_table(event, ctx) {
+        if let Some(outcome) = self.handle_task_agent_yank(event, ctx) {
             return outcome;
         }
         let outcome = self.layout.dispatch_event(route, event, ctx);
@@ -1580,6 +1617,11 @@ impl TuiNode<AppMsg> for TaskWorkspace {
             ctx.focus(initial_task_table_focus_request());
         }
         self.sync_table_events(ctx);
+        if !outcome.handled()
+            && let Some(outcome) = self.handle_task_shortcut_outside_table(event, ctx)
+        {
+            return outcome;
+        }
         self.handle_workspace_event(outcome, event, ctx)
     }
 
