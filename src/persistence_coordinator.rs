@@ -13,9 +13,9 @@ use tuicore::Store;
 use crate::{
     domain::{
         AppEvent, AppState, Person, PersonDeletion, PersonPatch, Project, ProjectDeletion,
-        ProjectPatch, SaveTarget, Tag, TagDeletion, TagPatch, Task, TaskField, TaskPatch,
+        ProjectPatch, SaveTarget, Tag, TagDeletion, TagPatch, Task, TaskField, TaskPatch, TaskRank,
     },
-    service::TuidoService,
+    service::{TaskRankUpdate, TuidoService},
     storage::SqlDialect,
 };
 
@@ -36,6 +36,11 @@ pub(crate) enum PersistenceCommand {
     CreateTask(Task),
     DeleteTask(Task),
     PatchTask(String, TaskPatch),
+    ReorderTasks {
+        before: Vec<TaskRank>,
+        after: Vec<TaskRank>,
+        expected_revisions: HashMap<String, u64>,
+    },
     CreatePerson(Person),
     DeletePerson(PersonDeletion),
     PatchPerson(String, PersonPatch),
@@ -55,7 +60,10 @@ pub(crate) enum PersistenceCommand {
 impl PersistenceCommand {
     fn key(&self) -> CommandKey {
         match self {
-            Self::CreateTask(_) | Self::DeleteTask(_) | Self::PatchTask(_, _) => CommandKey::Task,
+            Self::CreateTask(_)
+            | Self::DeleteTask(_)
+            | Self::PatchTask(_, _)
+            | Self::ReorderTasks { .. } => CommandKey::Task,
             Self::CreatePerson(person) => CommandKey::Person(person.id.clone()),
             Self::DeletePerson(deletion) => CommandKey::Person(deletion.person.id.clone()),
             Self::PatchPerson(id, _) => CommandKey::Person(id.clone()),
@@ -328,7 +336,24 @@ impl PersistenceCoordinator {
         true
     }
 
-    fn start(&mut self, command: PersistenceCommand) {
+    fn start(&mut self, mut command: PersistenceCommand) {
+        if let PersistenceCommand::ReorderTasks {
+            after,
+            expected_revisions,
+            ..
+        } = &mut command
+        {
+            let state = self.store.borrow();
+            expected_revisions.clear();
+            expected_revisions.extend(after.iter().filter_map(|rank| {
+                state
+                    .state()
+                    .entity_revisions
+                    .get(&format!("task:{}", rank.id))
+                    .copied()
+                    .map(|revision| (rank.id.clone(), revision))
+            }));
+        }
         let key = command.key();
         let sequence = self.next_sequence;
         self.next_sequence += 1;
@@ -527,6 +552,26 @@ impl PersistenceCoordinator {
                         .changed;
                 }
             }
+            PersistenceCommand::ReorderTasks { before, .. } => {
+                if let Some(error) = completion.error {
+                    changed |= self
+                        .store
+                        .borrow_mut()
+                        .dispatch(AppEvent::TaskRanksChanged(before))
+                        .changed;
+                    changed |= self
+                        .store
+                        .borrow_mut()
+                        .dispatch(AppEvent::RefreshFailed(format!(
+                            "Task reorder failed: {error}"
+                        )))
+                        .changed;
+                } else {
+                    self.store
+                        .borrow_mut()
+                        .dispatch(AppEvent::WorkspaceRevisionCommitted);
+                }
+            }
             PersistenceCommand::PatchPerson(id, patch) => {
                 changed |= self
                     .store
@@ -673,6 +718,29 @@ async fn execute(
             .await
             .map(|result| result.related_revisions)
             .map_err(boxed_service_error),
+        PersistenceCommand::ReorderTasks {
+            after,
+            expected_revisions,
+            ..
+        } => {
+            let updates = after
+                .into_iter()
+                .map(|rank| {
+                    let expected_revision =
+                        expected_revisions.get(&rank.id).copied().ok_or_else(|| {
+                            format!("missing task revision for {}; refresh required", rank.id)
+                        })?;
+                    Ok(TaskRankUpdate {
+                        rank,
+                        expected_revision,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            service
+                .reorder_tasks(updates)
+                .await
+                .map_err(boxed_service_error)
+        }
         PersistenceCommand::PatchPerson(id, patch) => service
             .patch_person(id, expected()?, patch)
             .await
@@ -711,6 +779,7 @@ fn command_entity(command: &PersistenceCommand) -> Option<(&'static str, &str)> 
         | PersistenceCommand::CreateTag(_) => None,
         PersistenceCommand::DeleteTask(v) => Some(("task", &v.id)),
         PersistenceCommand::PatchTask(id, _) => Some(("task", id)),
+        PersistenceCommand::ReorderTasks { .. } => None,
         PersistenceCommand::DeletePerson(v) => Some(("person", &v.person.id)),
         PersistenceCommand::PatchPerson(id, _) => Some(("person", id)),
         PersistenceCommand::DeleteProject(v) => Some(("project", &v.project.id)),

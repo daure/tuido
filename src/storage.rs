@@ -173,7 +173,7 @@ async fn load_workspace(
     let tags = load_tags(pool).await?;
     let mut tasks = Vec::new();
     let rows = sqlx::query(
-        "SELECT id, title, state, workflow_state, CAST(CASE WHEN rejected THEN 1 ELSE 0 END AS BIGINT) AS rejected, size, priority, start_date, due_date, snoozed_until, description FROM tasks ORDER BY created_at, id",
+        "SELECT id, rank, title, state, workflow_state, CAST(CASE WHEN rejected THEN 1 ELSE 0 END AS BIGINT) AS rejected, size, priority, start_date, due_date, snoozed_until, description FROM tasks ORDER BY rank, id",
     )
     .fetch_all(pool)
     .await?;
@@ -187,6 +187,7 @@ async fn load_workspace(
 
         let task = Task {
             id,
+            rank: row.try_get("rank")?,
             title: row.try_get("title")?,
             state: if row.try_get::<i64, _>("rejected")? != 0 {
                 TaskState::Rejected
@@ -514,12 +515,13 @@ mod tests {
                     .await
                     .unwrap();
                 MIGRATOR.run(&pool).await.unwrap();
-                for (id, title, created_at) in [
-                    ("z-first", "First", "2026-07-25T10:00:00"),
-                    ("a-second", "Second", "2026-07-25T10:01:00"),
+                for (id, title, created_at, rank) in [
+                    ("z-first", "First", "2026-07-25T10:00:00", 1_i64),
+                    ("a-second", "Second", "2026-07-25T10:01:00", 2_i64),
                 ] {
-                    sqlx::query("INSERT INTO tasks (id, title, state, workflow_state, size, priority, created_at, updated_at) VALUES (?, ?, 'next', 'todo', 'small', 'medium', ?, ?)")
+                    sqlx::query("INSERT INTO tasks (id, rank, title, state, workflow_state, size, priority, created_at, updated_at) VALUES (?, ?, ?, 'next', 'todo', 'small', 'medium', ?, ?)")
                         .bind(id)
+                        .bind(rank)
                         .bind(title)
                         .bind(created_at)
                         .bind(created_at)

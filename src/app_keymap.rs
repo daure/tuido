@@ -313,6 +313,8 @@ pub mod keys {
     pub const TASK_DELETE: AppBinding = AppBinding::new("TASK_DELETE", "delete");
     pub const TASK_DELETE_BACKSPACE: AppBinding = AppBinding::new("TASK_DELETE_X", "backspace");
     pub const TASK_DELETE_CTRL_X: AppBinding = AppBinding::new("TASK_DELETE_CTRL_X", "ctrl+x");
+    pub const TASK_QUICK_MENU: AppBinding = AppBinding::new("TASK_QUICK_MENU", ".");
+    pub const TASK_MOVE_MODE: AppBinding = AppBinding::new("TASK_MOVE_MODE", "ctrl+m");
     pub const TASK_SNOOZE: AppBinding = AppBinding::new("TASK_SNOOZE", "b");
     pub const MANAGEMENT_CREATE: AppBinding = AppBinding::new("MANAGEMENT_CREATE", "n");
     pub const MANAGEMENT_DELETE: AppBinding = AppBinding::new("MANAGEMENT_DELETE", "delete");
@@ -348,6 +350,7 @@ pub mod keys {
         AppBinding::new_sequence("TASK_PROJECTS_FIELD", "pro");
     pub const TASK_TAGS_FIELD: AppBinding = AppBinding::new_sequence("TASK_TAGS_FIELD", "ta");
     pub const TASK_LINKS_FIELD: AppBinding = AppBinding::new_sequence("TASK_LINKS_FIELD", "li");
+    pub const TASK_LINK_DELETE: AppBinding = AppBinding::new("TASK_LINK_DELETE", "ctrl+x");
     pub const TASK_START_DATE_FIELD: AppBinding =
         AppBinding::new_sequence("TASK_START_DATE_FIELD", "sd");
     pub const TASK_END_DATE_FIELD: AppBinding =
@@ -441,6 +444,8 @@ pub mod keys {
         TASK_DELETE,
         TASK_DELETE_BACKSPACE,
         TASK_DELETE_CTRL_X,
+        TASK_QUICK_MENU,
+        TASK_MOVE_MODE,
         TASK_SNOOZE,
         MANAGEMENT_CREATE,
         MANAGEMENT_DELETE,
@@ -467,6 +472,7 @@ pub mod keys {
         TASK_PROJECTS_FIELD,
         TASK_TAGS_FIELD,
         TASK_LINKS_FIELD,
+        TASK_LINK_DELETE,
         TASK_START_DATE_FIELD,
         TASK_END_DATE_FIELD,
         TASK_SNOOZED_UNTIL_FIELD,
@@ -557,6 +563,8 @@ pub mod keys {
                 TASK_DELETE,
                 TASK_DELETE_BACKSPACE,
                 TASK_DELETE_CTRL_X,
+                TASK_QUICK_MENU,
+                TASK_MOVE_MODE,
                 TASK_SNOOZE,
             ],
         },
@@ -573,6 +581,7 @@ pub mod keys {
                 TASK_PROJECTS_FIELD,
                 TASK_TAGS_FIELD,
                 TASK_LINKS_FIELD,
+                TASK_LINK_DELETE,
                 TASK_START_DATE_FIELD,
                 TASK_END_DATE_FIELD,
                 TASK_SNOOZED_UNTIL_FIELD,

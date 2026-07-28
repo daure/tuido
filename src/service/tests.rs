@@ -17,6 +17,86 @@ async fn test_service() -> TuidoService {
     TuidoService::from_parts(pool, SqlDialect::Sqlite)
 }
 
+fn task_create(title: &str) -> TaskCreate {
+    TaskCreate {
+        title: title.into(),
+        description: String::new(),
+        size: "small".into(),
+        state: "todo".into(),
+        priority: "medium".into(),
+        start_date: None,
+        due_date: None,
+        snoozed_until: None,
+        people_ids: Vec::new(),
+        project_ids: Vec::new(),
+        tag_ids: Vec::new(),
+        links: Vec::new(),
+    }
+}
+
+#[test]
+fn new_tasks_append_and_reordering_updates_ranks_atomically() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let service = test_service().await;
+        let first = service.create_task(task_create("First")).await.unwrap();
+        let second = service.create_task(task_create("Second")).await.unwrap();
+
+        let snapshot = service.consistent_workspace().await.unwrap().snapshot;
+        assert_eq!(
+            snapshot
+                .tasks
+                .iter()
+                .map(|task| (task.title.as_str(), task.rank))
+                .collect::<Vec<_>>(),
+            [("First", 1), ("Second", 2)]
+        );
+        let before_revision = service.workspace_revision().await.unwrap();
+
+        let revisions = service
+            .reorder_tasks(vec![
+                TaskRankUpdate {
+                    rank: TaskRank {
+                        id: second.value.id.clone(),
+                        rank: 1,
+                    },
+                    expected_revision: second.revision,
+                },
+                TaskRankUpdate {
+                    rank: TaskRank {
+                        id: first.value.id.clone(),
+                        rank: 2,
+                    },
+                    expected_revision: first.revision,
+                },
+            ])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            service.workspace_revision().await.unwrap(),
+            before_revision + 1
+        );
+        assert_eq!(revisions[&format!("task:{}", first.value.id)], 2);
+        assert_eq!(revisions[&format!("task:{}", second.value.id)], 2);
+        assert_eq!(
+            service
+                .consistent_workspace()
+                .await
+                .unwrap()
+                .snapshot
+                .tasks
+                .iter()
+                .map(|task| task.title.as_str())
+                .collect::<Vec<_>>(),
+            ["Second", "First"]
+        );
+    });
+}
+
 #[test]
 fn app_settings_are_persisted_and_replace_previous_values() {
     let runtime = tokio::runtime::Builder::new_current_thread()

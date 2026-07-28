@@ -182,23 +182,15 @@ pub(super) fn task_split(store: &AppStore, task_view: TaskView) -> TaskPane {
 pub(super) fn task_rows_for_view(tasks: &[Task], task_view: TaskView) -> Vec<TaskRow> {
     let mut rows = tasks
         .iter()
-        .rev()
         .filter(|task| task_view.contains(task))
         .cloned()
         .collect::<Vec<_>>();
-    rows.sort_by_key(|task| match task.priority {
-        TaskPriority::High => 0,
-        TaskPriority::Medium => 1,
-        TaskPriority::Low => 2,
-    });
+    rows.sort_by_key(|task| task.rank);
     rows
 }
 
 #[cfg(test)]
-pub(super) fn task_table(
-    rows: Vec<TaskRow>,
-    selected_id: Option<&str>,
-) -> DataView<TaskRow, String> {
+pub(super) fn task_table(rows: Vec<TaskRow>, selected_id: Option<&str>) -> TaskTable {
     task_table_with_copy_context(rows, selected_id, TaskCopyContext::default())
 }
 
@@ -206,55 +198,73 @@ pub(super) fn task_table_with_copy_context(
     rows: Vec<TaskRow>,
     selected_id: Option<&str>,
     copy_context: TaskCopyContext,
-) -> DataView<TaskRow, String> {
-    let mut table = DataView::new(rows, |row: &TaskRow| row.id.clone())
-        .copy_with(move |row| copy_context.export(row))
-        .action_bar(true)
-        .filter_controls(false)
-        .focused_events_before_global_hotkeys(false)
-        .activation_mode(ActivationMode::OnActivateKey)
-        .selection_mode(SelectionMode::Single)
-        .selection_trigger(SelectionTrigger::OnNavigate)
-        .columns(vec![
-            Column::rich(
-                "state",
-                "",
-                Constraint::Length(1),
-                |row: &TaskRow, _: &CellContext<String>| Line::from(task_state_icon(row.state)),
-            )
-            .constrained()
-            .filter_key(|row| row.state.label().to_string()),
-            Column::rich(
-                "priority",
-                "",
-                Constraint::Length(1),
-                |row: &TaskRow, _: &CellContext<String>| priority_icon_line(row.priority),
-            )
-            .constrained()
-            .sortable(|row| match row.priority {
-                TaskPriority::Low => "2".to_string(),
-                TaskPriority::Medium => "1".to_string(),
-                TaskPriority::High => "0".to_string(),
-            })
-            .filter_key(|row| row.priority.label().to_string()),
-            Column::rich(
-                "size",
-                "Size",
-                Constraint::Length(3),
-                |row: &TaskRow, _: &CellContext<String>| {
-                    chip_line(row.size.label(), row.size.role())
-                },
-            )
-            .constrained()
-            .filter_key(|row| row.size.label().to_string()),
-            Column::text("title", "Task", Constraint::Fill(1), |row: &TaskRow| {
-                row.title.clone()
-            })
-            .sortable(|row| row.title.clone())
-            .filter_key(|row| row.title.clone()),
-        ]);
+) -> TaskTable {
+    let mut table = ListControl::new_fields(
+        rows,
+        |row: &TaskRow| row.id.clone(),
+        [ListControlField::text("Task")],
+        |_, _| unreachable!("task creation uses the task dialog"),
+    )
+    .copy_with(move |row| copy_context.export(row))
+    .action_bar(true)
+    .panel_visible(false)
+    .filter_controls(false)
+    .focused_events_before_global_hotkeys(false)
+    .activation_mode(ActivationMode::OnActivateKey)
+    .selection_mode(SelectionMode::Single)
+    .selection_trigger(SelectionTrigger::OnNavigate)
+    .keybindings(
+        ListControlKeyBindings::default()
+            .add([])
+            .remove([])
+            .edit([])
+            .reorder([keys::TASK_MOVE_MODE.key_spec()]),
+    )
+    .max_rows(usize::MAX)
+    .columns(vec![
+        Column::text("rank", "", Constraint::Length(0), |row: &TaskRow| {
+            row.rank.to_string()
+        })
+        .reorderable(|row| row.rank, |row, rank| row.rank = rank)
+        .hidden(),
+        Column::rich(
+            "state",
+            "",
+            Constraint::Length(1),
+            |row: &TaskRow, _: &CellContext<String>| Line::from(task_state_icon(row.state)),
+        )
+        .constrained()
+        .filter_key(|row| row.state.label().to_string()),
+        Column::rich(
+            "priority",
+            "",
+            Constraint::Length(1),
+            |row: &TaskRow, _: &CellContext<String>| priority_icon_line(row.priority),
+        )
+        .constrained()
+        .sortable(|row| match row.priority {
+            TaskPriority::Low => "2".to_string(),
+            TaskPriority::Medium => "1".to_string(),
+            TaskPriority::High => "0".to_string(),
+        })
+        .filter_key(|row| row.priority.label().to_string()),
+        Column::rich(
+            "size",
+            "Size",
+            Constraint::Length(3),
+            |row: &TaskRow, _: &CellContext<String>| chip_line(row.size.label(), row.size.role()),
+        )
+        .constrained()
+        .filter_key(|row| row.size.label().to_string()),
+        Column::text("title", "Task", Constraint::Fill(1), |row: &TaskRow| {
+            row.title.clone()
+        })
+        .sortable(|row| row.title.clone())
+        .filter_key(|row| row.title.clone()),
+    ])
+    .reorderable_by("rank");
     if let Some(id) = selected_id {
-        table = table.selected([id.to_string()]);
+        table.data_view_mut().select_id(id.to_string());
     }
     table
 }
@@ -273,6 +283,7 @@ impl TaskTagsInput {
             |tag| tag.label.clone(),
         )
         .selected_existing(task.tag_ids.iter().cloned())
+        .placeholder("")
         .panel("Tags")
         .hotkey(keys::TASK_TAGS_FIELD.hotkey());
         Self {
@@ -457,6 +468,7 @@ pub(super) fn detail_form(
             "snoozed-until",
             DateTimePickerDropdown::<AppMsg>::new()
                 .value(task.snoozed_until)
+                .placeholder("")
                 .panel("Snoozed until")
                 .hotkey(keys::TASK_SNOOZED_UNTIL_FIELD.hotkey())
                 .on_select({
@@ -477,6 +489,7 @@ pub(super) fn detail_form(
             "start-date",
             DatePickerDropdown::<AppMsg>::new()
                 .value(parse_date(task.start_date.as_deref()))
+                .placeholder("")
                 .panel("Start date")
                 .hotkey(keys::TASK_START_DATE_FIELD.hotkey())
                 .on_select({
@@ -494,6 +507,7 @@ pub(super) fn detail_form(
             "end-date",
             DatePickerDropdown::<AppMsg>::new()
                 .value(parse_date(task.due_date.as_deref()))
+                .placeholder("")
                 .panel("End date")
                 .hotkey(keys::TASK_END_DATE_FIELD.hotkey())
                 .on_select({
@@ -659,6 +673,7 @@ pub(super) fn dropdown_single(
 ) -> Dropdown<Choice, String> {
     Dropdown::single(rows, |row| row.id.clone(), |row| row.label.clone())
         .label(label)
+        .placeholder("")
         .selected_one(selected.to_string())
         .search_mode(DropdownSearchMode::Contains)
         .commit_mode(DropdownCommitMode::Explicit)
@@ -677,7 +692,7 @@ pub(super) fn dropdown_multi(
 ) -> Dropdown<Choice, String> {
     Dropdown::multi(rows, |row| row.id.clone(), |row| row.label.clone())
         .label(label)
-        .placeholder("Select")
+        .placeholder("")
         .selected(selected.iter().cloned())
         .search_mode(DropdownSearchMode::Contains)
         .on_select(on_select)

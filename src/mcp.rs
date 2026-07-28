@@ -559,6 +559,7 @@ async fn run_http_inner(
         StreamableHttpServerConfig {
             stateful_mode: true,
             sse_keep_alive: None,
+            ..Default::default()
         },
     );
     let router = axum::Router::new().nest_service("/mcp", mcp);
@@ -617,6 +618,34 @@ mod tests {
         collect_formats(&tools, &mut formats);
 
         assert!(!formats.iter().any(|format| format == "uint64"));
+    }
+
+    #[test]
+    fn tool_schemas_use_json_schema_2020_12() {
+        let tools = McpServer::tool_router().list_all();
+
+        for tool in tools {
+            if let Some(dialect) = tool.input_schema.get("$schema") {
+                assert_eq!(
+                    dialect,
+                    &serde_json::json!("https://json-schema.org/draft/2020-12/schema"),
+                    "{} input schema",
+                    tool.name
+                );
+            }
+            let output_schema = tool
+                .output_schema
+                .as_ref()
+                .unwrap_or_else(|| panic!("{} output schema is missing", tool.name));
+            assert_eq!(
+                output_schema.get("$schema"),
+                Some(&serde_json::json!(
+                    "https://json-schema.org/draft/2020-12/schema"
+                )),
+                "{} output schema",
+                tool.name
+            );
+        }
     }
 
     #[test]

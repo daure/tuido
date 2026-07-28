@@ -8,6 +8,8 @@ pub(super) enum AppDialog {
     DeleteManagement(ConfirmationDialog<AppMsg>),
     CreateTask(DialogHost<CreateTaskDialog, AppMsg>),
     DeleteTask(ConfirmationDialog<AppMsg>),
+    TaskQuickMenu(Box<TaskQuickMenu>),
+    Settings(DialogHost<SettingsDialog, AppMsg>),
     Empty(Dialog<AppMsg>),
     Snooze(Box<SnoozeDialog>),
 }
@@ -34,6 +36,8 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::DeleteManagement(dialog) => dialog.measure(proposal),
             Self::CreateTask(dialog) => measure_dialog_host(dialog, proposal),
             Self::DeleteTask(dialog) => dialog.measure(proposal),
+            Self::TaskQuickMenu(menu) => menu.measure(proposal),
+            Self::Settings(dialog) => measure_dialog_host(dialog, proposal),
             Self::Empty(dialog) => dialog.measure(proposal),
             Self::Snooze(dialog) => dialog.measure(proposal),
         }
@@ -48,6 +52,8 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::DeleteManagement(dialog) => dialog.layout(area, ctx),
             Self::CreateTask(dialog) => dialog.layout(area, ctx),
             Self::DeleteTask(dialog) => dialog.layout(area, ctx),
+            Self::TaskQuickMenu(dialog) => dialog.layout(area, ctx),
+            Self::Settings(dialog) => dialog.layout(area, ctx),
             Self::Empty(dialog) => dialog.layout(area, ctx),
             Self::Snooze(dialog) => dialog.layout(area, ctx),
         }
@@ -62,6 +68,8 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::DeleteManagement(dialog) => dialog.render(frame, area),
             Self::CreateTask(dialog) => dialog.render(frame, area, ctx),
             Self::DeleteTask(dialog) => dialog.render(frame, area),
+            Self::TaskQuickMenu(dialog) => dialog.render(frame, area, ctx),
+            Self::Settings(dialog) => dialog.render(frame, area, ctx),
             Self::Empty(dialog) => dialog.render(frame, area),
             Self::Snooze(dialog) => dialog.render(frame, area, ctx),
         }
@@ -76,6 +84,8 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::DeleteManagement(dialog) => dialog.event(event, ctx),
             Self::CreateTask(dialog) => dialog.event(event, ctx),
             Self::DeleteTask(dialog) => dialog.event(event, ctx),
+            Self::TaskQuickMenu(dialog) => dialog.event(event, ctx),
+            Self::Settings(dialog) => dialog.event(event, ctx),
             Self::Empty(dialog) => dialog.event(event, ctx),
             Self::Snooze(dialog) => dialog.event(event, ctx),
         }
@@ -95,6 +105,8 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::DeleteManagement(dialog) => dialog.dispatch_event(route, event, ctx),
             Self::CreateTask(dialog) => dialog.dispatch_event(route, event, ctx),
             Self::DeleteTask(dialog) => dialog.dispatch_event(route, event, ctx),
+            Self::TaskQuickMenu(dialog) => dialog.dispatch_event(route, event, ctx),
+            Self::Settings(dialog) => dialog.dispatch_event(route, event, ctx),
             Self::Empty(dialog) => dialog.dispatch_event(route, event, ctx),
             Self::Snooze(dialog) => dialog.dispatch_event(route, event, ctx),
         }
@@ -109,6 +121,8 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::DeleteManagement(dialog) => dialog.dispatch_focus(target, focused, ctx),
             Self::CreateTask(dialog) => dialog.dispatch_focus(target, focused, ctx),
             Self::DeleteTask(dialog) => dialog.dispatch_focus(target, focused, ctx),
+            Self::TaskQuickMenu(dialog) => dialog.dispatch_focus(target, focused, ctx),
+            Self::Settings(dialog) => dialog.dispatch_focus(target, focused, ctx),
             Self::Empty(dialog) => dialog.dispatch_focus(target, focused, ctx),
             Self::Snooze(dialog) => dialog.dispatch_focus(target, focused, ctx),
         }
@@ -123,6 +137,8 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::DeleteManagement(dialog) => dialog.tick(dt, settings),
             Self::CreateTask(dialog) => dialog.tick(dt, settings),
             Self::DeleteTask(dialog) => dialog.tick(dt, settings),
+            Self::TaskQuickMenu(dialog) => dialog.tick(dt, settings),
+            Self::Settings(dialog) => dialog.tick(dt, settings),
             Self::Empty(dialog) => dialog.tick(dt, settings),
             Self::Snooze(dialog) => dialog.tick(dt, settings),
         }
@@ -137,6 +153,8 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::DeleteManagement(dialog) => dialog.init(ctx),
             Self::CreateTask(dialog) => dialog.init(ctx),
             Self::DeleteTask(dialog) => dialog.init(ctx),
+            Self::TaskQuickMenu(dialog) => dialog.init(ctx),
+            Self::Settings(dialog) => dialog.init(ctx),
             Self::Empty(dialog) => dialog.init(ctx),
             Self::Snooze(dialog) => dialog.init(ctx),
         }
@@ -151,6 +169,8 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::DeleteManagement(dialog) => dialog.mount(ctx),
             Self::CreateTask(dialog) => dialog.mount(ctx),
             Self::DeleteTask(dialog) => dialog.mount(ctx),
+            Self::TaskQuickMenu(dialog) => dialog.mount(ctx),
+            Self::Settings(dialog) => dialog.mount(ctx),
             Self::Empty(dialog) => dialog.mount(ctx),
             Self::Snooze(dialog) => dialog.mount(ctx),
         }
@@ -165,6 +185,8 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::DeleteManagement(dialog) => dialog.unmount(ctx),
             Self::CreateTask(dialog) => dialog.unmount(ctx),
             Self::DeleteTask(dialog) => dialog.unmount(ctx),
+            Self::TaskQuickMenu(dialog) => dialog.unmount(ctx),
+            Self::Settings(dialog) => dialog.unmount(ctx),
             Self::Empty(dialog) => dialog.unmount(ctx),
             Self::Snooze(dialog) => dialog.unmount(ctx),
         }
@@ -179,6 +201,8 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::DeleteManagement(dialog) => dialog.destroy(ctx),
             Self::CreateTask(dialog) => dialog.destroy(ctx),
             Self::DeleteTask(dialog) => dialog.destroy(ctx),
+            Self::TaskQuickMenu(dialog) => dialog.destroy(ctx),
+            Self::Settings(dialog) => dialog.destroy(ctx),
             Self::Empty(dialog) => dialog.destroy(ctx),
             Self::Snooze(dialog) => dialog.destroy(ctx),
         }

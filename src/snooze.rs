@@ -25,6 +25,10 @@ const STORAGE_FORMAT: &[time::format_description::FormatItem<'static>] =
 const MENU_HOST_WIDTH: u16 = 46;
 const MENU_HOST_HEIGHT: u16 = 12;
 const MENU_FIELD_WIDTH: u16 = 36;
+pub(crate) const DEFAULT_SNOOZE_TIME_SETTING: &str = "snooze.default_time";
+const DEFAULT_SNOOZE_TIME: Time = time::macros::time!(8:00);
+const TIME_SETTING_FORMAT: &[time::format_description::FormatItem<'static>] =
+    format_description!("[hour]:[minute]");
 
 pub(crate) fn format_datetime(value: PrimitiveDateTime) -> String {
     value.format(STORAGE_FORMAT).expect("fixed datetime format")
@@ -46,27 +50,41 @@ pub(crate) struct QuickSnoozes {
     weekend_is_next: bool,
 }
 
-pub(crate) fn quick_snoozes(now: PrimitiveDateTime) -> QuickSnoozes {
+pub(crate) fn parse_default_snooze_time(value: Option<&str>) -> Result<Time, String> {
+    match value {
+        None => Ok(DEFAULT_SNOOZE_TIME),
+        Some(value) => Time::parse(value, TIME_SETTING_FORMAT)
+            .map_err(|_| format!("invalid value for {DEFAULT_SNOOZE_TIME_SETTING}: {value}")),
+    }
+}
+
+pub(crate) fn format_default_snooze_time(value: Time) -> String {
+    value
+        .format(TIME_SETTING_FORMAT)
+        .expect("fixed time setting format")
+}
+
+pub(crate) fn quick_snoozes(now: PrimitiveDateTime, default_time: Time) -> QuickSnoozes {
     QuickSnoozes {
-        tomorrow: at_eight(now.date() + Duration::days(1)),
-        weekend: next_weekday_at_eight(now.date(), Weekday::Saturday),
-        next_week: next_weekday_at_eight(now.date(), Weekday::Monday),
+        tomorrow: now
+            .date()
+            .next_day()
+            .expect("date should have a next day")
+            .with_time(default_time),
+        weekend: next_weekday_at(now.date(), Weekday::Saturday, default_time),
+        next_week: next_weekday_at(now.date(), Weekday::Monday, default_time),
         weekend_is_next: matches!(now.weekday(), Weekday::Saturday | Weekday::Sunday),
     }
 }
 
-fn next_weekday_at_eight(date: Date, target: Weekday) -> PrimitiveDateTime {
+fn next_weekday_at(date: Date, target: Weekday, time: Time) -> PrimitiveDateTime {
     let current = date.weekday().number_days_from_monday() as i64;
     let target = target.number_days_from_monday() as i64;
     let mut days = (target - current).rem_euclid(7);
     if days == 0 {
         days = 7;
     }
-    at_eight(date + Duration::days(days))
-}
-
-fn at_eight(date: Date) -> PrimitiveDateTime {
-    date.with_time(Time::from_hms(8, 0, 0).expect("08:00 is valid"))
+    (date + Duration::days(days)).with_time(time)
 }
 
 fn short_weekday(value: Weekday) -> &'static str {
@@ -219,13 +237,30 @@ fn build_snooze_dropdown(
 }
 
 impl SnoozeDialog {
+    #[cfg(test)]
     pub(crate) fn new(
         task_id: String,
         now: PrimitiveDateTime,
         last_custom: Option<PrimitiveDateTime>,
         is_snoozed: bool,
     ) -> Self {
-        let quick = quick_snoozes(now);
+        Self::new_with_default_time(
+            task_id,
+            now,
+            parse_default_snooze_time(None).expect("default snooze time should be valid"),
+            last_custom,
+            is_snoozed,
+        )
+    }
+
+    pub(crate) fn new_with_default_time(
+        task_id: String,
+        now: PrimitiveDateTime,
+        default_time: Time,
+        last_custom: Option<PrimitiveDateTime>,
+        is_snoozed: bool,
+    ) -> Self {
+        let quick = quick_snoozes(now, default_time);
         let picker_task_id = task_id.clone();
         let actions = Rc::new(RefCell::new(Vec::new()));
         let mut dropdown =
@@ -359,7 +394,7 @@ impl TuiNode<AppMsg> for SnoozeDialog {
         };
         if keybindings().focus().unfocus_matches(*key) {
             match self.mode {
-                SnoozeMode::Menu => ctx.emit(AppMsg::CloseDialog),
+                SnoozeMode::Menu => ctx.emit(AppMsg::CloseSnoozeDialog),
                 SnoozeMode::Picker if !self.picker_on_time => {
                     self.mode = SnoozeMode::Menu;
                     ctx.request_layout();
@@ -397,7 +432,7 @@ impl TuiNode<AppMsg> for SnoozeDialog {
         let outcome = self.dropdown.event(event, ctx);
         let activated = self.drain_actions(ctx);
         if was_open && !self.dropdown.is_open() && !activated {
-            ctx.emit(AppMsg::CloseDialog);
+            ctx.emit(AppMsg::CloseSnoozeDialog);
         }
         outcome
     }
@@ -425,7 +460,7 @@ impl TuiNode<AppMsg> for SnoozeDialog {
             let outcome = self.dropdown.dispatch_event(route, event, ctx);
             let activated = self.drain_actions(ctx);
             if was_open && !self.dropdown.is_open() && !activated {
-                ctx.emit(AppMsg::CloseDialog);
+                ctx.emit(AppMsg::CloseSnoozeDialog);
             }
             outcome
         } else {
@@ -469,21 +504,52 @@ mod tests {
     use time::{Month, macros::datetime};
     use tuicore::{FocusManager, Key, KeyEvent, KeyModifiers, TreeDispatcher};
 
+    fn default_time() -> Time {
+        time::macros::time!(8:00)
+    }
+
     #[test]
     fn quick_options_are_strictly_future_across_weekday_boundaries() {
-        let saturday = quick_snoozes(datetime!(2026-07-25 12:00));
+        let saturday = quick_snoozes(datetime!(2026-07-25 12:00), default_time());
         assert_eq!(saturday.tomorrow, datetime!(2026-07-26 8:00));
         assert_eq!(saturday.weekend, datetime!(2026-08-01 8:00));
         assert_eq!(saturday.next_week, datetime!(2026-07-27 8:00));
 
-        let monday = quick_snoozes(datetime!(2026-07-27 12:00));
+        let monday = quick_snoozes(datetime!(2026-07-27 12:00), default_time());
         assert_eq!(monday.next_week, datetime!(2026-08-03 8:00));
         assert_eq!(monday.weekend, datetime!(2026-08-01 8:00));
     }
 
     #[test]
+    fn configured_default_time_applies_to_every_quick_snooze() {
+        let configured = time::macros::time!(8:15);
+        let quick = quick_snoozes(datetime!(2026-07-27 12:00), configured);
+
+        assert_eq!(quick.tomorrow.time(), configured);
+        assert_eq!(quick.weekend.time(), configured);
+        assert_eq!(quick.next_week.time(), configured);
+    }
+
+    #[test]
+    fn default_snooze_time_setting_round_trips_and_defaults_to_eight() {
+        assert_eq!(
+            parse_default_snooze_time(None),
+            Ok(time::macros::time!(8:00))
+        );
+        assert_eq!(
+            parse_default_snooze_time(Some("08:15")),
+            Ok(time::macros::time!(8:15))
+        );
+        assert_eq!(
+            format_default_snooze_time(time::macros::time!(8:15)),
+            "08:15"
+        );
+        assert!(parse_default_snooze_time(Some("8:15 AM")).is_err());
+    }
+
+    #[test]
     fn sunday_labels_upcoming_saturday_as_next_weekend() {
-        let quick = quick_snoozes(datetime!(2026-07-26 18:13));
+        let quick = quick_snoozes(datetime!(2026-07-26 18:13), default_time());
         let weekend = snooze_options(quick, None, false)
             .into_iter()
             .find(|option| option.choice == SnoozeChoice::Weekend)
@@ -494,10 +560,14 @@ mod tests {
 
     #[test]
     fn next_weekend_is_listed_after_next_week() {
-        let choices = snooze_options(quick_snoozes(datetime!(2026-07-26 18:13)), None, false)
-            .into_iter()
-            .map(|option| option.choice)
-            .collect::<Vec<_>>();
+        let choices = snooze_options(
+            quick_snoozes(datetime!(2026-07-26 18:13), default_time()),
+            None,
+            false,
+        )
+        .into_iter()
+        .map(|option| option.choice)
+        .collect::<Vec<_>>();
 
         assert_eq!(
             &choices[..3],
@@ -511,7 +581,7 @@ mod tests {
 
     #[test]
     fn custom_date_option_uses_material_calendar_icon() {
-        let quick = quick_snoozes(datetime!(2026-07-26 18:13));
+        let quick = quick_snoozes(datetime!(2026-07-26 18:13), default_time());
         let pick = snooze_options(quick, None, false)
             .into_iter()
             .find(|option| option.choice == SnoozeChoice::Pick)
@@ -522,9 +592,10 @@ mod tests {
 
     #[test]
     fn picker_opens_at_tomorrow_eight_instead_of_last_custom_value() {
-        let dialog = SnoozeDialog::new(
+        let dialog = SnoozeDialog::new_with_default_time(
             "task".into(),
             datetime!(2026-07-26 18:13),
+            default_time(),
             Some(datetime!(2026-08-05 14:30)),
             false,
         );
@@ -532,6 +603,22 @@ mod tests {
         assert_eq!(
             dialog.picker.current_value(),
             Some(datetime!(2026-07-27 8:00))
+        );
+    }
+
+    #[test]
+    fn picker_opens_at_configured_default_time() {
+        let dialog = SnoozeDialog::new_with_default_time(
+            "task".into(),
+            datetime!(2026-07-26 18:13),
+            time::macros::time!(8:15),
+            None,
+            false,
+        );
+
+        assert_eq!(
+            dialog.picker.current_value(),
+            Some(datetime!(2026-07-27 8:15))
         );
     }
 
@@ -680,7 +767,7 @@ mod tests {
 
     #[test]
     fn unsnooze_choice_exists_only_for_snoozed_tasks() {
-        let quick = quick_snoozes(datetime!(2026-07-23 12:00));
+        let quick = quick_snoozes(datetime!(2026-07-23 12:00), default_time());
         assert!(
             snooze_options(quick, None, true)
                 .iter()
@@ -826,7 +913,10 @@ mod tests {
             &TuiEvent::Key(Key::Esc.into()),
             AnimationSettings::default(),
         );
-        assert!(matches!(close.messages.as_slice(), [AppMsg::CloseDialog]));
+        assert!(matches!(
+            close.messages.as_slice(),
+            [AppMsg::CloseSnoozeDialog]
+        ));
     }
 
     #[test]

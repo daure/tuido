@@ -1,7 +1,7 @@
 use std::time::Duration as StdDuration;
 
 use ratatui::{Frame, layout::Rect};
-use time::{Duration, PrimitiveDateTime};
+use time::{Date, Duration, OffsetDateTime, PrimitiveDateTime};
 use tuicore::{
     AnimationSettings, Calendar, CalendarEntryRole, CalendarSpan, EventCtx, EventOutcome,
     EventRoute, FocusCtx, FocusTarget, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint,
@@ -30,20 +30,24 @@ pub(crate) struct CalendarWorkspace {
     calendar: TaskCalendar,
     observed_version: u64,
     setting_status: SaveStatusLine,
+    today: Date,
 }
 
 impl CalendarWorkspace {
     pub(crate) fn new(context: AppContext, show_weekends: bool) -> Self {
         let state = context.store.borrow();
         let observed_version = state.state().version;
-        let calendar =
-            task_calendar(snoozed_task_entries(&state.state().tasks)).show_weekends(show_weekends);
+        let today = current_date();
+        let calendar = task_calendar(snoozed_task_entries(&state.state().tasks))
+            .today(today)
+            .show_weekends(show_weekends);
         drop(state);
         Self {
             context,
             calendar,
             observed_version,
             setting_status: SaveStatusLine::new(None),
+            today,
         }
     }
 
@@ -82,6 +86,21 @@ impl CalendarWorkspace {
                 });
         }
     }
+
+    fn sync_today(&mut self, today: Date) -> bool {
+        if self.today == today {
+            return false;
+        }
+        self.today = today;
+        self.calendar.set_today(today);
+        true
+    }
+}
+
+fn current_date() -> Date {
+    OffsetDateTime::now_local()
+        .unwrap_or_else(|_| OffsetDateTime::now_utc())
+        .date()
 }
 
 pub(crate) fn parse_show_weekends_setting(value: Option<&str>) -> Result<bool, String> {
@@ -196,7 +215,16 @@ impl TuiNode<AppMsg> for CalendarWorkspace {
     }
 
     fn tick(&mut self, dt: StdDuration, settings: AnimationSettings) -> TickResult {
-        self.calendar.tick(dt, settings)
+        let mut result = self.calendar.tick(dt, settings);
+        if self.sync_today(current_date()) {
+            result = result.merge(TickResult {
+                changed: true,
+                layout: false,
+                active: false,
+                next_tick: None,
+            });
+        }
+        result
     }
 
     fn init(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
@@ -228,6 +256,7 @@ mod tests {
     fn task(id: &str, title: &str, state: TaskState, until: Option<PrimitiveDateTime>) -> Task {
         Task {
             id: id.to_string(),
+            rank: 1,
             title: title.to_string(),
             state,
             size: TaskSize::Small,
@@ -261,6 +290,22 @@ mod tests {
         assert!(text.contains(&format!("{SNOOZE_ICON} Follow up")));
         assert!(!text.contains("Still active"));
         assert!(!text.contains("Missing return date"));
+    }
+
+    #[test]
+    fn calendar_workspace_updates_today_without_recreation() {
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks: Vec::new(),
+            people: Vec::new(),
+            projects: Vec::new(),
+            tags: Vec::new(),
+        });
+        let mut workspace = CalendarWorkspace::new(context, true);
+        let next_day = workspace.today.next_day().unwrap();
+
+        assert!(workspace.sync_today(next_day));
+        assert_eq!(workspace.today, next_day);
+        assert!(!workspace.sync_today(next_day));
     }
 
     #[test]

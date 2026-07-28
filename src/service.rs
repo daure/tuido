@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::{
     domain::{
-        Person, PersonPatch, Project, ProjectPatch, Tag, TagPatch, Task, TaskPatch,
+        Person, PersonPatch, Project, ProjectPatch, Tag, TagPatch, Task, TaskPatch, TaskRank,
         WorkspaceSnapshot,
     },
     storage::{self, SqlDialect, Storage},
@@ -82,6 +82,12 @@ pub struct Versioned<T> {
 pub struct TaskPatchResult {
     pub revision: u64,
     pub related_revisions: HashMap<String, u64>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TaskRankUpdate {
+    pub rank: TaskRank,
+    pub expected_revision: u64,
 }
 
 pub(crate) struct ConsistentWorkspace {
@@ -503,7 +509,7 @@ impl TuidoService {
         normalize_task_links(&mut task.links);
         validation::validate_task_links(&task.links)?;
         let sql = format!(
-            "INSERT INTO tasks (id, title, state, workflow_state, rejected, size, priority, start_date, due_date, snoozed_until, description, created_at, updated_at) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
+            "INSERT INTO tasks (id, rank, title, state, workflow_state, rejected, size, priority, start_date, due_date, snoozed_until, description, created_at, updated_at) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
             self.dialect.placeholder(1),
             self.dialect.placeholder(2),
             self.dialect.placeholder(3),
@@ -516,12 +522,20 @@ impl TuidoService {
             self.dialect.placeholder(10),
             self.dialect.placeholder(11),
             self.dialect.placeholder(12),
-            self.dialect.placeholder(13)
+            self.dialect.placeholder(13),
+            self.dialect.placeholder(14)
         );
         let now = now_text();
         let mut tx = self.pool.begin().await.map_err(storage_error)?;
+        bump_workspace(&mut tx, self.dialect).await?;
+        let row = sqlx::query("SELECT COALESCE(MAX(rank), 0) + 1 AS rank FROM tasks")
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(storage_error)?;
+        task.rank = row.try_get("rank").map_err(storage_error)?;
         sqlx::query(AssertSqlSafe(sql.as_str()))
             .bind(&task.id)
+            .bind(task.rank)
             .bind(&task.title)
             .bind(storage_legacy_state(task.state.id()))
             .bind(storage_workflow_state(task.state.id()))
@@ -557,7 +571,6 @@ impl TuidoService {
             .await?;
         self.replace_task_links(&mut tx, &task.id, &task.links)
             .await?;
-        bump_workspace(&mut tx, self.dialect).await?;
         tx.commit().await.map_err(storage_error)?;
         Ok(Versioned {
             revision: 1,
@@ -580,6 +593,7 @@ impl TuidoService {
             .map_err(|e| ServiceError::Invalid(e.to_string()))?;
         self.create_task_entity(Task {
             id: Uuid::new_v4().to_string(),
+            rank: 0,
             title: input.title.trim().into(),
             state,
             size,
@@ -752,6 +766,76 @@ impl TuidoService {
         self.patch_task(id.clone(), expected_revision, TaskPatch::Links(links))
             .await?;
         self.get_task(&id).await
+    }
+
+    pub(crate) async fn reorder_tasks(
+        &self,
+        updates: Vec<TaskRankUpdate>,
+    ) -> ServiceResult<HashMap<String, u64>> {
+        if updates.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let mut ids = HashSet::new();
+        let mut ranks = HashSet::new();
+        if updates
+            .iter()
+            .any(|update| !ids.insert(update.rank.id.clone()) || !ranks.insert(update.rank.rank))
+        {
+            return Err(ServiceError::Invalid(
+                "task reorder contains duplicate IDs or ranks".into(),
+            ));
+        }
+
+        let mut tx = self.pool.begin().await.map_err(storage_error)?;
+        let mut revisions = HashMap::new();
+        let mut current_ranks = HashSet::new();
+        for update in &updates {
+            self.claim(
+                &mut tx,
+                "tasks",
+                "task",
+                &update.rank.id,
+                update.expected_revision,
+            )
+            .await?;
+            let select = format!(
+                "SELECT rank FROM tasks WHERE id = {}",
+                self.dialect.placeholder(1)
+            );
+            let row = sqlx::query(AssertSqlSafe(select.as_str()))
+                .bind(&update.rank.id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(storage_error)?;
+            current_ranks.insert(row.try_get::<i64, _>("rank").map_err(storage_error)?);
+        }
+        if current_ranks != ranks {
+            return Err(ServiceError::Invalid(
+                "task reorder must preserve the existing rank set".into(),
+            ));
+        }
+        for update in &updates {
+            let sql = format!(
+                "UPDATE tasks SET rank = {}, updated_at = {} WHERE id = {}",
+                self.dialect.placeholder(1),
+                self.dialect.placeholder(2),
+                self.dialect.placeholder(3)
+            );
+            sqlx::query(AssertSqlSafe(sql.as_str()))
+                .bind(update.rank.rank)
+                .bind(now_text())
+                .bind(&update.rank.id)
+                .execute(&mut *tx)
+                .await
+                .map_err(storage_error)?;
+            revisions.insert(
+                format!("task:{}", update.rank.id),
+                update.expected_revision + 1,
+            );
+        }
+        bump_workspace(&mut tx, self.dialect).await?;
+        tx.commit().await.map_err(storage_error)?;
+        Ok(revisions)
     }
 
     pub async fn set_task_tags_by_label(

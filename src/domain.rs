@@ -161,6 +161,7 @@ impl AppState {
 pub enum AppEvent {
     TaskCreated(Task),
     TaskDeleted(String),
+    TaskRanksChanged(Vec<TaskRank>),
     SelectTask(String),
     PatchTask {
         task_id: String,
@@ -209,6 +210,7 @@ pub enum AppEvent {
         key: String,
         revision: Option<u64>,
     },
+    WorkspaceRevisionCommitted,
     EntityRevisionsMerged(HashMap<String, u64>),
     WorkspaceRefreshed {
         snapshot: WorkspaceSnapshot,
@@ -281,6 +283,22 @@ pub fn reduce_app_state(state: &mut AppState, event: AppEvent) -> DispatchOutcom
                 .retain(|target, _| target.entity_id != task_id);
             if state.selected_task_id.as_deref() == Some(&task_id) {
                 state.selected_task_id = None;
+            }
+            state.version += 1;
+            DispatchOutcome::layout()
+        }
+        AppEvent::TaskRanksChanged(ranks) => {
+            let mut changed = false;
+            for rank in ranks {
+                if let Some(task) = state.tasks.iter_mut().find(|task| task.id == rank.id)
+                    && task.rank != rank.rank
+                {
+                    task.rank = rank.rank;
+                    changed = true;
+                }
+            }
+            if !changed {
+                return DispatchOutcome::unchanged();
             }
             state.version += 1;
             DispatchOutcome::layout()
@@ -620,6 +638,10 @@ pub fn reduce_app_state(state: &mut AppState, event: AppEvent) -> DispatchOutcom
             state.workspace_revision += 1;
             DispatchOutcome::unchanged()
         }
+        AppEvent::WorkspaceRevisionCommitted => {
+            state.workspace_revision += 1;
+            DispatchOutcome::unchanged()
+        }
         AppEvent::EntityRevisionsMerged(revisions) => {
             state.entity_revisions.extend(revisions);
             DispatchOutcome::unchanged()
@@ -684,6 +706,7 @@ fn retained_selection<T>(
 #[derive(Debug, Clone)]
 pub struct Task {
     pub id: String,
+    pub rank: i64,
     pub title: String,
     pub state: TaskState,
     pub size: TaskSize,
@@ -702,6 +725,7 @@ impl Task {
     pub fn quick_capture(id: String, title: String, description: String, size: TaskSize) -> Self {
         Self {
             id,
+            rank: 0,
             title: title.trim().to_string(),
             state: TaskState::Todo,
             size,
@@ -716,6 +740,12 @@ impl Task {
             description,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskRank {
+    pub id: String,
+    pub rank: i64,
 }
 
 #[derive(Debug, Clone)]

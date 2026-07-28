@@ -5,13 +5,18 @@ use crate::calendar::{CalendarWorkspace, SHOW_WEEKENDS_SETTING, parse_show_weeke
 use crate::create_management_dialog::{CreateManagementDialog, ManagementEntityDraft};
 use crate::create_task_dialog::{CreateTaskDialog, CreateTaskDraft};
 use crate::domain::{
-    AppEvent, AppState, Person, Project, Tag, Task, TaskPatch, TaskPriority, TaskSize, TaskState,
-    reduce_app_state,
+    AppEvent, AppState, Person, Project, Tag, Task, TaskPatch, TaskPriority, TaskRank, TaskSize,
+    TaskState, reduce_app_state,
 };
 use crate::persistence_coordinator::{AppStore, PersistenceCommand, PersistenceCoordinator};
 use crate::service::TuidoService;
-use crate::snooze::{SnoozeDialog, local_now};
+use crate::settings_dialog::SettingsDialog;
+use crate::snooze::{
+    DEFAULT_SNOOZE_TIME_SETTING, SnoozeDialog, format_default_snooze_time, local_now,
+    parse_default_snooze_time,
+};
 use crate::storage::Storage;
+use crate::task_quick_menu::TaskQuickMenu;
 use crate::task_title::format_title;
 use crate::ui::management::{ManagementDialogKind, people, projects, tags};
 use crate::ui::responsive_split::ResponsiveSplit;
@@ -22,16 +27,17 @@ use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
 };
-use time::{Date, PrimitiveDateTime};
+use time::{Date, PrimitiveDateTime, Time};
 use tuicore::{
     ActivationMode, AnimationSettings, AxisProposal, Button, CellContext, ChildKey, ChipColorRole,
     Column, ConfirmationDialog, ConfirmationDialogOutcome, CrossAlign, DataView,
     DataViewTypedEvent, DatePickerDropdown, DateTimePickerDropdown, Dialog, DialogBackdrop,
     DialogHost, DialogLayer, Dropdown, DropdownCommitMode, DropdownSearchMode, EventCtx,
     EventOutcome, EventRoute, Flex, FlexItem, FocusCtx, FocusId, FocusRequest, FocusTarget,
-    HotkeyLabelMode, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, Menu,
-    MenuItem, MenuSearchMode, Paragraph, RenderCtx, SelectedTag, SelectionMode, SelectionTrigger,
-    Split, StatusBar, StatusBarMenuItem, Store, Tab, Tabs, TabsVariant, TagInput, TagInputEvent,
+    HotkeyLabelMode, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx,
+    ListControl, ListControlEvent, ListControlField, ListControlKeyBindings, Menu, MenuItem,
+    MenuSearchMode, Paragraph, RenderCtx, SelectedTag, SelectionMode, SelectionTrigger, Split,
+    StatusBar, StatusBarMenuItem, Store, Tab, Tabs, TabsVariant, TagInput, TagInputEvent,
     TextInput, TextareaInput, TickResult, TreeApp, TreePath, TuiEvent, TuiNode,
     WeatherProviderConfig,
 };
@@ -46,7 +52,12 @@ use task_links_input::TaskLinksInput;
 const PEOPLE_MENU_ID: &str = "people";
 const PROJECTS_MENU_ID: &str = "projects";
 const TAGS_MENU_ID: &str = "tags";
-const STATUS_BAR_MENU_ITEMS: [StatusBarMenuItem; 5] = [
+const SETTINGS_MENU_ID: &str = "settings";
+const STATUS_BAR_MENU_ITEMS: [StatusBarMenuItem; 6] = [
+    StatusBarMenuItem::Custom {
+        id: SETTINGS_MENU_ID,
+        label: "Settings",
+    },
     StatusBarMenuItem::Custom {
         id: PEOPLE_MENU_ID,
         label: "People",
@@ -67,9 +78,26 @@ fn weather_provider_config() -> WeatherProviderConfig {
     WeatherProviderConfig::new().enabled(true)
 }
 
+fn default_snooze_time() -> Time {
+    parse_default_snooze_time(None).expect("default snooze time should be valid")
+}
+
+fn seed_app_setting(state: &mut AppState, key: &str, value: String) {
+    for values in [
+        &mut state.app_setting_values,
+        &mut state.app_setting_confirmed_values,
+        &mut state.app_setting_desired_values,
+    ] {
+        values.insert(key.to_string(), value.clone());
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum AppMsg {
     Noop,
+    OpenSettings,
+    SetShowCalendarWeekends(bool),
+    SetDefaultSnoozeTime(Time),
     OpenManagementDialog(ManagementDialogKind),
     OpenCreateManagement(ManagementDialogKind),
     CreateManagementSubmitted(ManagementEntityDraft),
@@ -85,6 +113,9 @@ pub(crate) enum AppMsg {
     CreateTaskSubmitted(CreateTaskDraft),
     OpenDeleteTask(String),
     DeleteTaskConfirmed(String),
+    OpenTaskQuickMenu(String),
+    MoveTaskToTop(String),
+    MoveTaskToBottom(String),
     OpenTaskSnooze(String),
     SnoozeTask {
         task_id: String,
@@ -93,6 +124,7 @@ pub(crate) enum AppMsg {
     },
     UnsnoozeTask(String),
     CloseManagementOverlay,
+    CloseSnoozeDialog,
     CloseDialog,
 }
 
@@ -126,18 +158,22 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             .as_deref(),
     )
     .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?;
+    let default_snooze_time = parse_default_snooze_time(
+        runtime
+            .block_on(service.app_setting(DEFAULT_SNOOZE_TIME_SETTING))?
+            .as_deref(),
+    )
+    .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?;
     let mut app_state = AppState::from_snapshot(workspace.snapshot);
-    app_state.app_setting_values.insert(
-        SHOW_WEEKENDS_SETTING.to_string(),
+    seed_app_setting(
+        &mut app_state,
+        SHOW_WEEKENDS_SETTING,
         show_calendar_weekends.to_string(),
     );
-    app_state.app_setting_confirmed_values.insert(
-        SHOW_WEEKENDS_SETTING.to_string(),
-        show_calendar_weekends.to_string(),
-    );
-    app_state.app_setting_desired_values.insert(
-        SHOW_WEEKENDS_SETTING.to_string(),
-        show_calendar_weekends.to_string(),
+    seed_app_setting(
+        &mut app_state,
+        DEFAULT_SNOOZE_TIME_SETTING,
+        format_default_snooze_time(default_snooze_time),
     );
     app_state.refresh_error = startup_expiry_error;
     app_state.workspace_revision = workspace.revision;
@@ -161,6 +197,9 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     .initial_focus(initial_task_table_focus_request())
     .on_message(|app, message, ctx| match message {
         AppMsg::Noop => {}
+        AppMsg::OpenSettings => app.open_settings_dialog(ctx),
+        AppMsg::SetShowCalendarWeekends(show) => app.set_show_calendar_weekends(show),
+        AppMsg::SetDefaultSnoozeTime(time) => app.set_default_snooze_time(time),
         AppMsg::OpenManagementDialog(kind) => app.open_management_dialog(kind, ctx),
         AppMsg::OpenCreateManagement(kind) => app.open_create_management_dialog(kind, ctx),
         AppMsg::CreateManagementSubmitted(draft) => app.submit_create_management(draft, ctx),
@@ -174,6 +213,9 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         AppMsg::CreateTaskSubmitted(draft) => app.submit_create_task(draft, ctx),
         AppMsg::OpenDeleteTask(task_id) => app.open_delete_task_dialog(&task_id, ctx),
         AppMsg::DeleteTaskConfirmed(task_id) => app.delete_task(task_id, ctx),
+        AppMsg::OpenTaskQuickMenu(task_id) => app.open_task_quick_menu(&task_id, ctx),
+        AppMsg::MoveTaskToTop(task_id) => app.move_task_to_edge(&task_id, true, ctx),
+        AppMsg::MoveTaskToBottom(task_id) => app.move_task_to_edge(&task_id, false, ctx),
         AppMsg::OpenTaskSnooze(task_id) => app.open_task_snooze_dialog(&task_id, ctx),
         AppMsg::SnoozeTask {
             task_id,
@@ -182,6 +224,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         } => app.snooze_task(task_id, until, remember_custom, ctx),
         AppMsg::UnsnoozeTask(task_id) => app.unsnooze_task(task_id, ctx),
         AppMsg::CloseManagementOverlay => app.close_management_overlay(ctx),
+        AppMsg::CloseSnoozeDialog => app.close_snooze_dialog(ctx),
         AppMsg::CloseDialog => app.close_dialog(ctx),
     })
     .run();
@@ -232,6 +275,7 @@ impl App {
                 .menu_items(STATUS_BAR_MENU_ITEMS)
                 .weather_provider(weather_provider_config())
                 .on_custom_menu_item(|id| match id {
+                    SETTINGS_MENU_ID => AppMsg::OpenSettings,
                     PEOPLE_MENU_ID => AppMsg::OpenManagementDialog(ManagementDialogKind::People),
                     PROJECTS_MENU_ID => {
                         AppMsg::OpenManagementDialog(ManagementDialogKind::Projects)
@@ -260,6 +304,58 @@ impl App {
 
     fn primary_dialog(&mut self) -> &mut PrimaryDialogLayer {
         self.root.base_mut()
+    }
+
+    fn open_settings_dialog(&mut self, ctx: &mut EventCtx<AppMsg>) {
+        let state = self.context.store.borrow();
+        let show_weekends = state
+            .state()
+            .app_setting_values
+            .get(SHOW_WEEKENDS_SETTING)
+            .and_then(|value| parse_show_weekends_setting(Some(value)).ok())
+            .unwrap_or(true);
+        let default_time = state
+            .state()
+            .app_setting_values
+            .get(DEFAULT_SNOOZE_TIME_SETTING)
+            .and_then(|value| parse_default_snooze_time(Some(value)).ok())
+            .unwrap_or(default_snooze_time());
+        drop(state);
+        let settings = SettingsDialog::new(show_weekends, default_time);
+        let dialog = Dialog::new()
+            .top_left("Settings")
+            .actions([tuicore::DialogAction::new("Close")
+                .hotkey(keys::DIALOG_CANCEL.key_spec())
+                .on_trigger(|| AppMsg::CloseDialog)])
+            .close_on_unfocus_from_descendants(true)
+            .on_close(|_| AppMsg::CloseDialog)
+            .host(settings);
+        let primary = self.primary_dialog();
+        primary.replace_layer(AppDialog::Settings(dialog), ctx);
+        primary.set_fit_content(true);
+        primary.set_active_with_context(true, ctx);
+    }
+
+    fn set_show_calendar_weekends(&mut self, show: bool) {
+        self.persist_app_setting(SHOW_WEEKENDS_SETTING, show.to_string());
+    }
+
+    fn set_default_snooze_time(&mut self, time: Time) {
+        self.persist_app_setting(
+            DEFAULT_SNOOZE_TIME_SETTING,
+            format_default_snooze_time(time),
+        );
+    }
+
+    fn persist_app_setting(&mut self, key: &str, value: String) {
+        self.context
+            .coordinator
+            .borrow_mut()
+            .submit(PersistenceCommand::SetAppSetting {
+                key: key.to_string(),
+                value,
+                generation: 0,
+            });
     }
 
     fn open_management_dialog(&mut self, kind: ManagementDialogKind, ctx: &mut EventCtx<AppMsg>) {
@@ -471,12 +567,23 @@ impl App {
             return;
         }
 
-        let task = Task::quick_capture(
+        let mut task = Task::quick_capture(
             Uuid::new_v4().to_string(),
             title,
             String::new(),
             TaskSize::Small,
         );
+        task.rank = self
+            .context
+            .store
+            .borrow()
+            .state()
+            .tasks
+            .iter()
+            .map(|task| task.rank)
+            .max()
+            .unwrap_or(0)
+            + 1;
         self.context
             .store
             .borrow_mut()
@@ -496,6 +603,42 @@ impl App {
         primary.replace_layer(delete_task_dialog(&task), ctx);
         primary.set_fit_content(true);
         primary.set_active_with_context(true, ctx);
+    }
+
+    fn open_task_quick_menu(&mut self, task_id: &str, ctx: &mut EventCtx<AppMsg>) {
+        if self.task(task_id).is_none() {
+            return;
+        }
+        let primary = self.primary_dialog();
+        primary.replace_layer(
+            AppDialog::TaskQuickMenu(Box::new(TaskQuickMenu::new(task_id.to_string()))),
+            ctx,
+        );
+        primary.set_layer_percent(40);
+        primary.set_layer_cross_percent(35);
+        primary.set_fit_content(true);
+        primary.set_active_with_context(true, ctx);
+    }
+
+    fn move_task_to_edge(&mut self, task_id: &str, to_top: bool, ctx: &mut EventCtx<AppMsg>) {
+        let state = self.context.store.borrow().state().clone();
+        let mut ordered = state
+            .tasks
+            .iter()
+            .map(|task| task.id.clone())
+            .collect::<Vec<_>>();
+        let Some(index) = ordered.iter().position(|id| id == task_id) else {
+            return;
+        };
+        let task_id = ordered.remove(index);
+        if to_top {
+            ordered.insert(0, task_id);
+        } else {
+            ordered.push(task_id);
+        }
+        persist_task_order(&self.context, &state, &ordered);
+        self.close_dialog(ctx);
+        focus_task_table(ctx);
     }
 
     fn delete_task(&mut self, task_id: String, ctx: &mut EventCtx<AppMsg>) {
@@ -534,11 +677,21 @@ impl App {
             }
         };
         let last_custom = self.context.store.borrow().state().last_custom_snooze;
+        let default_time = self
+            .context
+            .store
+            .borrow()
+            .state()
+            .app_setting_values
+            .get(DEFAULT_SNOOZE_TIME_SETTING)
+            .and_then(|value| parse_default_snooze_time(Some(value)).ok())
+            .unwrap_or(default_snooze_time());
         let primary = self.primary_dialog();
         primary.replace_layer(
-            AppDialog::Snooze(Box::new(SnoozeDialog::new(
+            AppDialog::Snooze(Box::new(SnoozeDialog::new_with_default_time(
                 task.id,
                 now,
+                default_time,
                 last_custom,
                 task.state == TaskState::Snoozed,
             ))),
@@ -612,6 +765,11 @@ impl App {
         self.primary_dialog().set_active_with_context(false, ctx);
     }
 
+    fn close_snooze_dialog(&mut self, ctx: &mut EventCtx<AppMsg>) {
+        self.close_dialog(ctx);
+        focus_task_table(ctx);
+    }
+
     fn close_management_overlay(&mut self, ctx: &mut EventCtx<AppMsg>) {
         self.root.set_active_with_context(false, ctx);
     }
@@ -680,7 +838,7 @@ impl TuiNode<AppMsg> for App {
 }
 
 type TaskRow = Task;
-type TaskTable = DataView<TaskRow, String>;
+type TaskTable = ListControl<TaskRow, String, AppMsg>;
 type TaskDetail = TaskDetailForm;
 type TaskPane = ResponsiveSplit<TaskTable, TaskDetail>;
 type TaskWorkspaceLayout = Split<Flex<AppMsg>, TaskPane>;
@@ -688,6 +846,64 @@ type TaskViewChange = Rc<RefCell<Option<TaskView>>>;
 type ActiveTaskView = Rc<RefCell<TaskView>>;
 type VisibleTaskSelection = Rc<RefCell<Option<String>>>;
 type PatchSink = Rc<RefCell<Vec<TaskPatch>>>;
+
+fn persist_task_order(context: &AppContext, state: &AppState, ordered_ids: &[String]) -> bool {
+    let mut ranks = ordered_ids
+        .iter()
+        .filter_map(|id| state.tasks.iter().find(|task| task.id == *id))
+        .map(|task| task.rank)
+        .collect::<Vec<_>>();
+    ranks.sort_unstable();
+    if ranks.len() != ordered_ids.len() {
+        return false;
+    }
+
+    let before = ordered_ids
+        .iter()
+        .filter_map(|id| {
+            state
+                .tasks
+                .iter()
+                .find(|task| task.id == *id)
+                .map(|task| TaskRank {
+                    id: id.clone(),
+                    rank: task.rank,
+                })
+        })
+        .collect::<Vec<_>>();
+    let after = ordered_ids
+        .iter()
+        .cloned()
+        .zip(ranks)
+        .map(|(id, rank)| TaskRank { id, rank })
+        .filter(|rank| {
+            before
+                .iter()
+                .find(|previous| previous.id == rank.id)
+                .is_some_and(|previous| previous.rank != rank.rank)
+        })
+        .collect::<Vec<_>>();
+    if after.is_empty() {
+        return false;
+    }
+    let before = before
+        .into_iter()
+        .filter(|rank| after.iter().any(|changed| changed.id == rank.id))
+        .collect::<Vec<_>>();
+    context
+        .store
+        .borrow_mut()
+        .dispatch(AppEvent::TaskRanksChanged(after.clone()));
+    context
+        .coordinator
+        .borrow_mut()
+        .submit(PersistenceCommand::ReorderTasks {
+            before,
+            after,
+            expected_revisions: std::collections::HashMap::new(),
+        });
+    true
+}
 
 fn initial_task_table_focus_request() -> FocusRequest {
     FocusRequest::TargetAt {
@@ -698,6 +914,7 @@ fn initial_task_table_focus_request() -> FocusRequest {
             ChildKey::new("tab-0"),
             ChildKey::second(),
             ChildKey::first(),
+            ChildKey::new("data"),
         ]),
         id: FocusId::new("data-view"),
     }
@@ -971,12 +1188,20 @@ impl TaskWorkspace {
         }
     }
 
-    fn table(&self) -> &TaskTable {
+    fn task_list(&self) -> &TaskTable {
         self.layout.second().first()
     }
 
-    fn table_mut(&mut self) -> &mut TaskTable {
+    fn task_list_mut(&mut self) -> &mut TaskTable {
         self.layout.second_mut().first_mut()
+    }
+
+    fn table(&self) -> &DataView<TaskRow, String> {
+        self.task_list().data_view()
+    }
+
+    fn table_mut(&mut self) -> &mut DataView<TaskRow, String> {
+        self.task_list_mut().data_view_mut()
     }
 
     fn detail(&self) -> &TaskDetail {
@@ -1116,6 +1341,30 @@ impl TaskWorkspace {
     }
 
     fn sync_table_events(&mut self, ctx: &mut EventCtx<AppMsg>) {
+        let list_events = self.task_list_mut().take_events();
+        for event in list_events {
+            match event {
+                ListControlEvent::Reordered { row_ids } => {
+                    let state = self.context.store.borrow().state().clone();
+                    if persist_task_order(&self.context, &state, &row_ids) {
+                        ctx.request_layout();
+                        ctx.request_redraw();
+                    }
+                }
+                ListControlEvent::ReorderUnavailable { reason } => {
+                    ctx.notify(tuicore::Notification::warning(
+                        "Cannot move tasks",
+                        format!("Task ordering is unavailable: {reason:?}"),
+                    ));
+                }
+                ListControlEvent::Added { .. }
+                | ListControlEvent::Removed { .. }
+                | ListControlEvent::Edited { .. }
+                | ListControlEvent::AddCancelled
+                | ListControlEvent::EditCancelled { .. }
+                | ListControlEvent::ReorderCancelled { .. } => {}
+            }
+        }
         let events = self.table_mut().take_events();
         let mut focus_detail = false;
         let mut selected_changed = false;
@@ -1223,7 +1472,9 @@ impl TaskWorkspace {
             return outcome;
         }
         let visible_task_id = self.visible_selection.borrow().clone();
-        let message = if self.table_focused
+        let message = if visible_task_id.is_some() && keys::TASK_QUICK_MENU.matches(event) {
+            visible_task_id.map(AppMsg::OpenTaskQuickMenu)
+        } else if self.table_focused
             && visible_task_id.is_some()
             && app_keymap::matches_any(
                 event,
@@ -1232,7 +1483,8 @@ impl TaskWorkspace {
                     keys::TASK_DELETE,
                     keys::TASK_DELETE_BACKSPACE,
                 ],
-            ) {
+            )
+        {
             visible_task_id.map(AppMsg::OpenDeleteTask)
         } else if self.table_focused
             && visible_task_id.is_some()
@@ -1253,6 +1505,29 @@ impl TaskWorkspace {
         }
         outcome
     }
+
+    fn handle_task_shortcut_outside_table(
+        &mut self,
+        event: &TuiEvent,
+        ctx: &mut EventCtx<AppMsg>,
+    ) -> Option<EventOutcome> {
+        if self.table_focused {
+            return None;
+        }
+        let task_id = self.visible_selection.borrow().clone()?;
+        if keys::TASK_SNOOZE.matches(event) {
+            focus_task_table(ctx);
+            ctx.emit(AppMsg::OpenTaskSnooze(task_id));
+            return Some(EventOutcome::Handled);
+        }
+        if keys::TASK_MOVE_MODE.matches(event) {
+            focus_task_table(ctx);
+            let outcome = self.task_list_mut().event(event, ctx);
+            self.sync_table_events(ctx);
+            return Some(outcome);
+        }
+        None
+    }
 }
 
 impl TuiNode<AppMsg> for TaskWorkspace {
@@ -1267,6 +1542,9 @@ impl TuiNode<AppMsg> for TaskWorkspace {
 
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<AppMsg>) -> EventOutcome {
         self.sync_store_version();
+        if let Some(outcome) = self.handle_task_shortcut_outside_table(event, ctx) {
+            return outcome;
+        }
         let outcome = self.layout.event(event, ctx);
         let view_changed = self.sync_task_view_change();
         let detail_sync = self.sync_detail_changes();
@@ -1288,6 +1566,9 @@ impl TuiNode<AppMsg> for TaskWorkspace {
         ctx: &mut EventCtx<AppMsg>,
     ) -> EventOutcome {
         self.sync_store_version();
+        if let Some(outcome) = self.handle_task_shortcut_outside_table(event, ctx) {
+            return outcome;
+        }
         let outcome = self.layout.dispatch_event(route, event, ctx);
         let view_changed = self.sync_task_view_change();
         let detail_sync = self.sync_detail_changes();

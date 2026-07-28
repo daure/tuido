@@ -4,8 +4,8 @@ use ratatui::{Frame, layout::Constraint, layout::Rect};
 use tuicore::{
     AnimationSettings, Column, DataViewTypedEvent, EventCtx, EventOutcome, EventRoute, FocusCtx,
     FocusTarget, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx,
-    ListControl, ListControlEvent, ListControlField, Notification, RenderCtx, TickResult, TuiEvent,
-    TuiNode,
+    ListControl, ListControlEvent, ListControlField, ListControlKeyBindings, Notification,
+    RenderCtx, TickResult, TuiEvent, TuiNode,
 };
 use uuid::Uuid;
 
@@ -71,6 +71,7 @@ impl TaskLinksInput {
         .headers(false)
         .title("Links")
         .hotkey(keys::TASK_LINKS_FIELD.hotkey())
+        .keybindings(ListControlKeyBindings::default().remove([keys::TASK_LINK_DELETE.key_spec()]))
         .max_rows(usize::MAX);
         Self {
             input,

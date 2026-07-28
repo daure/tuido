@@ -9,6 +9,7 @@ use tuicore::{
 fn test_task() -> Task {
     Task {
         id: "task-1".to_string(),
+        rank: 1,
         title: "Original".to_string(),
         state: TaskState::InProgress,
         size: TaskSize::Small,
@@ -28,6 +29,74 @@ fn test_task() -> Task {
 fn status_bar_enables_weather_and_exposes_forecast_menu() {
     assert!(weather_provider_config().is_enabled());
     assert!(STATUS_BAR_MENU_ITEMS.contains(&StatusBarMenuItem::WeatherForecast));
+    assert_eq!(
+        STATUS_BAR_MENU_ITEMS.first(),
+        Some(&StatusBarMenuItem::Custom {
+            id: SETTINGS_MENU_ID,
+            label: "Settings",
+        })
+    );
+}
+
+#[test]
+fn task_move_mode_uses_configured_control_m_and_emits_completed_order() {
+    let mut table = task_table(
+        vec![
+            task_with_rank("first", "First", TaskState::Todo, 10),
+            task_with_rank("second", "Second", TaskState::Todo, 20),
+        ],
+        Some("first"),
+    );
+    table.data_view_mut().highlight_id(&"first".to_string());
+    let mut ctx = EventCtx::default();
+
+    let plain_m = table.event(&TuiEvent::Key(KeyEvent::from(Key::Char('m'))), &mut ctx);
+    assert!(!plain_m.handled());
+    assert!(!table.is_reordering());
+
+    table.event(
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('m'),
+            modifiers: KeyModifiers::CONTROL,
+        }),
+        &mut ctx,
+    );
+    assert!(table.is_reordering());
+    table.event(&TuiEvent::Key(KeyEvent::from(Key::Down)), &mut ctx);
+    table.event(&TuiEvent::Key(KeyEvent::from(Key::Enter)), &mut ctx);
+
+    assert!(matches!(
+        table.take_events().as_slice(),
+        [ListControlEvent::Reordered { row_ids }]
+            if row_ids == &["second".to_string(), "first".to_string()]
+    ));
+}
+
+#[test]
+fn settings_changes_update_app_state_before_persistence_completes() {
+    let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+        tasks: Vec::new(),
+        people: Vec::new(),
+        projects: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(context.store, context.coordinator);
+
+    app.set_show_calendar_weekends(false);
+    app.set_default_snooze_time(time::macros::time!(8:15));
+
+    let state = store.borrow();
+    assert_eq!(
+        state.state().app_setting_values.get(SHOW_WEEKENDS_SETTING),
+        Some(&"false".to_string())
+    );
+    assert_eq!(
+        state
+            .state()
+            .app_setting_values
+            .get(DEFAULT_SNOOZE_TIME_SETTING),
+        Some(&"08:15".to_string())
+    );
 }
 
 #[test]
@@ -100,9 +169,15 @@ fn task_with(id: &str, title: &str, state: TaskState) -> Task {
     task
 }
 
+fn task_with_rank(id: &str, title: &str, state: TaskState, rank: i64) -> Task {
+    let mut task = task_with(id, title, state);
+    task.rank = rank;
+    task
+}
+
 fn yank_task_table(table: &mut TaskTable) -> tuicore::DispatchEffects<AppMsg> {
     let mut ctx = EventCtx::default();
-    let outcome = table.event(&TuiEvent::Yank, &mut ctx);
+    let outcome = table.data_view_mut().event(&TuiEvent::Yank, &mut ctx);
     tuicore::DispatchEffects::from_event_ctx(outcome, ctx)
 }
 
@@ -402,7 +477,7 @@ fn task_table_priority_is_icon_only_in_second_column() {
 }
 
 #[test]
-fn task_table_sorts_high_priority_first_and_newest_first_within_priority() {
+fn task_table_uses_persisted_rank_order() {
     let mut older_medium = task_with("older-medium", "Older medium", TaskState::Todo);
     older_medium.priority = TaskPriority::Medium;
     let mut high = task_with("high", "High priority", TaskState::Todo);
@@ -411,6 +486,10 @@ fn task_table_sorts_high_priority_first_and_newest_first_within_priority() {
     newer_medium.priority = TaskPriority::Medium;
     let mut low = task_with("low", "Low priority", TaskState::Todo);
     low.priority = TaskPriority::Low;
+    high.rank = 1;
+    newer_medium.rank = 2;
+    older_medium.rank = 3;
+    low.rank = 4;
     let rows = task_rows_for_view(&[older_medium, high, newer_medium, low], TaskView::Active);
     let mut table = task_table(rows, None);
     let area = Rect::new(0, 0, 100, 10);
@@ -493,7 +572,9 @@ fn yanking_highlighted_task_copies_pretty_resolved_agent_json() {
         &[urgent.clone(), backend.clone()],
     );
     let mut table = task_table_with_copy_context(vec![first, highlighted], None, copy_context);
-    table.highlight_id(&"task-highlighted".to_string());
+    table
+        .data_view_mut()
+        .highlight_id(&"task-highlighted".to_string());
 
     let effects = yank_task_table(&mut table);
     let payload = effects
@@ -590,11 +671,13 @@ fn yanking_task_with_missing_relation_copies_descriptive_json_error() {
 }
 
 #[test]
-fn app_startup_selects_and_focuses_first_sorted_task() {
+fn app_startup_selects_and_focuses_first_ranked_task() {
     let mut older_low = task_with("older-low", "Older low", TaskState::InProgress);
     older_low.priority = TaskPriority::Low;
+    older_low.rank = 2;
     let mut newer_high = task_with("newer-high", "Newer high", TaskState::InProgress);
     newer_high.priority = TaskPriority::High;
+    newer_high.rank = 1;
     let (_runtime, context, store) = test_context(WorkspaceSnapshot {
         tasks: vec![older_low, newer_high],
         people: Vec::new(),
@@ -722,6 +805,77 @@ fn enter_on_task_link_opens_it_in_the_browser() {
 
     assert!(effects.outcome.handled());
     assert_eq!(opened.borrow().as_slice(), ["https://www.example.com/item"]);
+}
+
+#[test]
+fn ctrl_x_removes_highlighted_task_link() {
+    let mut task = test_task();
+    task.links = vec!["https://example.com/item".to_string()];
+    let patches = Rc::new(RefCell::new(Vec::new()));
+    let mut input = TaskLinksInput::with_opener(&task, Rc::clone(&patches), |_| Ok(()));
+    let area = Rect::new(0, 0, 40, 5);
+    let mut layout = LayoutCtx::new();
+    input.layout(area, &mut layout);
+    let target = layout
+        .focus_targets()
+        .iter()
+        .find(|target| target.id.as_str() == "data-view")
+        .expect("links list should be focusable")
+        .clone();
+    let mut focus = FocusManager::new();
+    let transition = focus
+        .apply_request(
+            &FocusRequest::TargetAt {
+                path: target.path.clone(),
+                id: target.id.clone(),
+            },
+            layout.focus_targets(),
+        )
+        .expect("links list focus should apply");
+    let mut dispatcher = TreeDispatcher::new();
+    dispatcher.dispatch_focus(&mut input, transition, AnimationSettings::default());
+
+    let effects = dispatcher.dispatch_event(
+        &mut input,
+        &EventRoute::new(target.path),
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('x'),
+            modifiers: KeyModifiers::CONTROL,
+        }),
+        AnimationSettings::default(),
+    );
+
+    assert!(effects.outcome.handled());
+    assert!(matches!(patches.borrow().as_slice(), [TaskPatch::Links(links)] if links.is_empty()));
+}
+
+#[test]
+fn task_detail_uses_blank_empty_value_placeholders() {
+    let mut task = test_task();
+    task.start_date = None;
+    task.due_date = None;
+    task.people_ids.clear();
+    task.project_ids.clear();
+    task.tag_ids.clear();
+    let mut form = detail_form(
+        Some(&task),
+        &[],
+        &[],
+        &[],
+        Rc::new(RefCell::new(Vec::new())),
+        SaveStatusLine::new(None),
+    );
+
+    let area = Rect::new(0, 0, 100, 30);
+    form.layout(area, &mut LayoutCtx::new());
+    let text = rendered_text(&form, area);
+
+    for placeholder in ["Select...", "Select date", "add tags"] {
+        assert!(
+            !text.contains(placeholder),
+            "placeholder leaked: {placeholder}"
+        );
+    }
 }
 
 #[test]
@@ -1051,9 +1205,9 @@ fn task_views_group_tasks_by_workflow_state() {
 fn switching_views_selects_first_visible_task() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![
-            task_with("active-1", "Active one", TaskState::InProgress),
-            task_with("backlog-1", "Backlog one", TaskState::Backlog),
-            task_with("backlog-2", "Backlog two", TaskState::Backlog),
+            task_with_rank("active-1", "Active one", TaskState::InProgress, 1),
+            task_with_rank("backlog-1", "Backlog one", TaskState::Backlog, 2),
+            task_with_rank("backlog-2", "Backlog two", TaskState::Backlog, 1),
         ],
         people: Vec::new(),
         projects: Vec::new(),
@@ -1100,9 +1254,9 @@ fn switching_task_view_clears_table_search() {
 fn switching_views_focuses_first_visible_table_row() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![
-            task_with("active-1", "Active one", TaskState::InProgress),
-            task_with("backlog-1", "Backlog one", TaskState::Backlog),
-            task_with("backlog-2", "Backlog two", TaskState::Backlog),
+            task_with_rank("active-1", "Active one", TaskState::InProgress, 1),
+            task_with_rank("backlog-1", "Backlog one", TaskState::Backlog, 2),
+            task_with_rank("backlog-2", "Backlog two", TaskState::Backlog, 1),
         ],
         people: Vec::new(),
         projects: Vec::new(),
@@ -1128,9 +1282,9 @@ fn switching_views_focuses_first_visible_table_row() {
 fn state_change_selects_next_visible_task() {
     let (_runtime, context, store) = test_context(WorkspaceSnapshot {
         tasks: vec![
-            task_with("active-1", "Active one", TaskState::InProgress),
-            task_with("active-2", "Active two", TaskState::InProgress),
-            task_with("active-3", "Active three", TaskState::InProgress),
+            task_with_rank("active-1", "Active one", TaskState::InProgress, 3),
+            task_with_rank("active-2", "Active two", TaskState::InProgress, 2),
+            task_with_rank("active-3", "Active three", TaskState::InProgress, 1),
         ],
         people: Vec::new(),
         projects: Vec::new(),
@@ -1156,9 +1310,9 @@ fn state_change_selects_next_visible_task() {
 fn detail_state_change_focuses_newly_selected_table_row() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![
-            task_with("active-1", "Active one", TaskState::InProgress),
-            task_with("active-2", "Active two", TaskState::InProgress),
-            task_with("active-3", "Active three", TaskState::InProgress),
+            task_with_rank("active-1", "Active one", TaskState::InProgress, 3),
+            task_with_rank("active-2", "Active two", TaskState::InProgress, 2),
+            task_with_rank("active-3", "Active three", TaskState::InProgress, 1),
         ],
         people: Vec::new(),
         projects: Vec::new(),
@@ -1218,10 +1372,13 @@ fn deleting_task_selects_next_visible_row_or_previous_at_end() {
     let tasks = || {
         let mut low = task_with("low", "Low", TaskState::InProgress);
         low.priority = TaskPriority::Low;
+        low.rank = 3;
         let mut medium = task_with("medium", "Medium", TaskState::InProgress);
         medium.priority = TaskPriority::Medium;
+        medium.rank = 2;
         let mut high = task_with("high", "High", TaskState::InProgress);
         high.priority = TaskPriority::High;
+        high.rank = 1;
         vec![low, medium, high]
     };
 

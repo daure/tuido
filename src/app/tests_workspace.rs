@@ -162,7 +162,7 @@ fn delete_opens_confirmation_from_focused_task_table() {
 }
 
 #[test]
-fn snooze_opens_only_from_focused_table_with_visible_selection() {
+fn quick_menu_opens_from_task_list_or_detail_and_b_snoozes_from_either() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
@@ -170,27 +170,77 @@ fn snooze_opens_only_from_focused_table_with_visible_selection() {
         tags: Vec::new(),
     });
     let mut workspace = TaskWorkspace::new(context);
-    let event = TuiEvent::Key(KeyEvent::from(Key::Char('b')));
+    let snooze = TuiEvent::Key(KeyEvent::from(Key::Char('b')));
+    let quick_menu = TuiEvent::Key(KeyEvent::from(Key::Char('.')));
 
-    let mut unfocused = EventCtx::default();
+    let mut detail_snooze = EventCtx::default();
+    assert!(workspace.event(&snooze, &mut detail_snooze).handled());
     assert_eq!(
-        workspace.event(&event, &mut unfocused),
-        EventOutcome::Ignored
+        detail_snooze.focus_request(),
+        Some(&initial_task_table_focus_request())
     );
-    assert!(unfocused.messages().is_empty());
+    assert!(matches!(
+        detail_snooze.messages(),
+        [AppMsg::OpenTaskSnooze(task_id)] if task_id == "task-1"
+    ));
+
+    let mut detail = EventCtx::default();
+    assert!(workspace.event(&quick_menu, &mut detail).handled());
+    assert!(matches!(
+        detail.messages(),
+        [AppMsg::OpenTaskQuickMenu(task_id)] if task_id == "task-1"
+    ));
 
     workspace.table_focused = true;
+    let mut snooze_ctx = EventCtx::default();
+    assert!(workspace.event(&snooze, &mut snooze_ctx).handled());
+    assert!(matches!(
+        snooze_ctx.messages(),
+        [AppMsg::OpenTaskSnooze(task_id)] if task_id == "task-1"
+    ));
+
     let mut focused = EventCtx::default();
-    assert!(workspace.event(&event, &mut focused).handled());
+    assert!(workspace.event(&quick_menu, &mut focused).handled());
     assert!(matches!(
         focused.messages(),
-        [AppMsg::OpenTaskSnooze(task_id)] if task_id == "task-1"
+        [AppMsg::OpenTaskQuickMenu(task_id)] if task_id == "task-1"
     ));
 
     *workspace.visible_selection.borrow_mut() = None;
     let mut hidden = EventCtx::default();
-    assert_eq!(workspace.event(&event, &mut hidden), EventOutcome::Ignored);
+    assert_eq!(
+        workspace.event(&quick_menu, &mut hidden),
+        EventOutcome::Ignored
+    );
     assert!(hidden.messages().is_empty());
+}
+
+#[test]
+fn control_m_from_task_detail_focuses_table_and_enters_move_mode() {
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![test_task()],
+        people: Vec::new(),
+        projects: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut workspace = TaskWorkspace::new(context);
+    workspace.table_focused = false;
+    let mut ctx = EventCtx::default();
+
+    let outcome = workspace.event(
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('m'),
+            modifiers: KeyModifiers::CONTROL,
+        }),
+        &mut ctx,
+    );
+
+    assert!(outcome.handled());
+    assert_eq!(
+        ctx.focus_request(),
+        Some(&initial_task_table_focus_request())
+    );
+    assert!(workspace.task_list().is_reordering());
 }
 
 #[test]
@@ -921,6 +971,7 @@ fn title_blur_during_description_hotkey_preserves_description_focus() {
         AppState::from_snapshot(WorkspaceSnapshot {
             tasks: vec![Task {
                 id: "task-1".to_string(),
+                rank: 1,
                 title: "Original".to_string(),
                 state: TaskState::InProgress,
                 size: TaskSize::Small,
