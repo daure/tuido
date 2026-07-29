@@ -94,8 +94,14 @@ impl TaskQuickMenu {
         for action in actions {
             let task_id = self.task_id.clone();
             ctx.emit(match action {
-                TaskQuickAction::Snooze => AppMsg::OpenTaskSnooze(task_id),
-                TaskQuickAction::Delete => AppMsg::OpenDeleteTask(task_id),
+                TaskQuickAction::Snooze => AppMsg::OpenTaskSnooze {
+                    task_id,
+                    return_focus: None,
+                },
+                TaskQuickAction::Delete => AppMsg::OpenDeleteTask {
+                    task_id,
+                    return_focus: None,
+                },
                 TaskQuickAction::MoveToTop => AppMsg::MoveTaskToTop(task_id),
                 TaskQuickAction::MoveToBottom => AppMsg::MoveTaskToBottom(task_id),
             });
@@ -219,6 +225,23 @@ mod tests {
         assert!(matches!(
             ctx.messages(),
             [AppMsg::MoveTaskToTop(task_id)] if task_id == "task-1"
+        ));
+    }
+
+    #[test]
+    fn quick_menu_delete_has_no_detail_return_focus() {
+        let mut menu = TaskQuickMenu::new("task-1".into());
+        menu.actions.borrow_mut().push(TaskQuickAction::Delete);
+        let mut ctx = EventCtx::default();
+
+        assert!(menu.drain_actions(&mut ctx));
+
+        assert!(matches!(
+            ctx.messages(),
+            [AppMsg::OpenDeleteTask {
+                task_id,
+                return_focus: None,
+            }] if task_id == "task-1"
         ));
     }
 }

@@ -1,6 +1,6 @@
 use std::{collections::HashMap, env, error::Error, fmt, sync::OnceLock};
 
-use tuicore::{Key, KeyModifiers, KeySpec, TuiEvent};
+use tuicore::{Key, KeyEvent, KeyModifiers, KeySpec, TuiEvent};
 
 static KEYMAP: OnceLock<AppKeymap> = OnceLock::new();
 
@@ -75,6 +75,7 @@ impl AppBinding {
 
         ResolvedBinding {
             raw: self.default.into(),
+            event: parse_key_event(self.default),
             spec: self
                 .spec(self.default)
                 .unwrap_or_else(|error| panic!("invalid app key `{}`: {error}", self.name)),
@@ -115,6 +116,15 @@ impl AppKeymapError {
         }
     }
 
+    fn runtime_conflict(binding: AppBinding) -> Self {
+        Self {
+            message: format!(
+                "app key `{}` conflicts with runtime quit binding",
+                binding.name
+            ),
+        }
+    }
+
     fn already_initialized() -> Self {
         Self {
             message: "app keymap already initialized".into(),
@@ -147,7 +157,8 @@ impl AppKeymap {
                 .remove(binding.name)
                 .unwrap_or_else(|| binding.default.into());
             let spec = binding.spec(&raw)?;
-            bindings.insert(binding.name, ResolvedBinding { raw, spec });
+            let event = (!binding.sequence).then(|| parse_key_event(&raw)).flatten();
+            bindings.insert(binding.name, ResolvedBinding { raw, spec, event });
         }
 
         if let Some(name) = overrides.keys().next() {
@@ -163,6 +174,28 @@ impl AppKeymap {
         Self::from_overrides(env_overrides()?)
     }
 
+    fn validate_runtime_quit(
+        &self,
+        runtime: &tuicore::RuntimeKeyBindings,
+    ) -> Result<(), AppKeymapError> {
+        for binding in [
+            keys::TASK_COMPLETE,
+            keys::COMPLETE_DONE,
+            keys::COMPLETE_REJECT,
+            keys::DIALOG_CANCEL,
+            keys::DIALOG_CLOSE,
+        ] {
+            let resolved = &self.bindings[binding.name];
+            if resolved
+                .event
+                .is_some_and(|event| runtime.quit_matches(event))
+            {
+                return Err(AppKeymapError::runtime_conflict(binding));
+            }
+        }
+        Ok(())
+    }
+
     fn binding(&self, name: &'static str) -> Option<ResolvedBinding> {
         self.bindings.get(name).cloned()
     }
@@ -172,6 +205,7 @@ impl AppKeymap {
 struct ResolvedBinding {
     raw: String,
     spec: Option<KeySpec>,
+    event: Option<KeyEvent>,
 }
 
 fn validate_contexts(
@@ -211,6 +245,7 @@ fn is_prefix(first: &[String], second: &[String]) -> bool {
 
 pub fn try_init() -> Result<(), AppKeymapError> {
     let keymap = AppKeymap::from_env()?;
+    keymap.validate_runtime_quit(tuicore::keybindings().runtime())?;
     KEYMAP
         .set(keymap)
         .map_err(|_| AppKeymapError::already_initialized())?;
@@ -260,10 +295,14 @@ pub fn matches_any(event: &TuiEvent, bindings: &[AppBinding]) -> bool {
 }
 
 fn parse_key(value: &str) -> Option<KeySpec> {
+    parse_key_event(value).map(KeySpec::from)
+}
+
+fn parse_key_event(value: &str) -> Option<KeyEvent> {
     let value = value.trim().to_ascii_lowercase();
 
     if let Some(rest) = value.strip_prefix("ctrl+") {
-        return modified_key(rest, KeyModifiers::CONTROL);
+        return modified_key_event(rest, KeyModifiers::CONTROL);
     }
 
     let code = match value.as_str() {
@@ -273,13 +312,13 @@ fn parse_key(value: &str) -> Option<KeySpec> {
         "backspace" => Key::Backspace,
         "delete" => Key::Delete,
         "space" => Key::Char(' '),
-        text => return single_char(text).map(KeySpec::plain),
+        text => return single_char(text).map(|character| KeyEvent::from(Key::Char(character))),
     };
 
-    Some(KeySpec::key(code))
+    Some(KeyEvent::from(code))
 }
 
-fn modified_key(value: &str, modifiers: KeyModifiers) -> Option<KeySpec> {
+fn modified_key_event(value: &str, modifiers: KeyModifiers) -> Option<KeyEvent> {
     let code = match value {
         "enter" => Key::Enter,
         "backspace" => Key::Backspace,
@@ -287,7 +326,7 @@ fn modified_key(value: &str, modifiers: KeyModifiers) -> Option<KeySpec> {
         "space" => Key::Char(' '),
         text => Key::Char(single_char(text)?),
     };
-    Some(KeySpec::key_with_modifiers(code, modifiers))
+    Some(KeyEvent { code, modifiers })
 }
 
 fn single_char(value: &str) -> Option<char> {
@@ -315,7 +354,8 @@ pub mod keys {
     pub const TASK_DELETE_CTRL_X: AppBinding = AppBinding::new("TASK_DELETE_CTRL_X", "ctrl+x");
     pub const TASK_QUICK_MENU: AppBinding = AppBinding::new("TASK_QUICK_MENU", ".");
     pub const TASK_MOVE_MODE: AppBinding = AppBinding::new("TASK_MOVE_MODE", "ctrl+m");
-    pub const TASK_SNOOZE: AppBinding = AppBinding::new("TASK_SNOOZE", "b");
+    pub const TASK_SNOOZE: AppBinding = AppBinding::new("TASK_SNOOZE", "ctrl+z");
+    pub const TASK_COMPLETE: AppBinding = AppBinding::new("TASK_COMPLETE", "ctrl+c");
     pub const TASK_AGENT_YANK: AppBinding = AppBinding::new_sequence("TASK_AGENT_YANK", "ya");
     pub const MANAGEMENT_CREATE: AppBinding = AppBinding::new("MANAGEMENT_CREATE", "n");
     pub const MANAGEMENT_DELETE: AppBinding = AppBinding::new("MANAGEMENT_DELETE", "delete");
@@ -434,6 +474,8 @@ pub mod keys {
     pub const DIALOG_CANCEL: AppBinding = AppBinding::new("DIALOG_CANCEL", "c");
     pub const DIALOG_SUBMIT: AppBinding = AppBinding::new("DIALOG_SUBMIT", "ctrl+enter");
     pub const DELETE_CONFIRM: AppBinding = AppBinding::new("DELETE_CONFIRM", "d");
+    pub const COMPLETE_DONE: AppBinding = AppBinding::new("COMPLETE_DONE", "d");
+    pub const COMPLETE_REJECT: AppBinding = AppBinding::new("COMPLETE_REJECT", "r");
 
     pub const ALL: &[AppBinding] = &[
         APP_TASKS_TAB,
@@ -448,6 +490,7 @@ pub mod keys {
         TASK_QUICK_MENU,
         TASK_MOVE_MODE,
         TASK_SNOOZE,
+        TASK_COMPLETE,
         TASK_AGENT_YANK,
         MANAGEMENT_CREATE,
         MANAGEMENT_DELETE,
@@ -550,6 +593,8 @@ pub mod keys {
         DIALOG_CANCEL,
         DIALOG_SUBMIT,
         DELETE_CONFIRM,
+        COMPLETE_DONE,
+        COMPLETE_REJECT,
     ];
 
     pub(super) const CONTEXTS: &[BindingContext] = &[
@@ -568,12 +613,14 @@ pub mod keys {
                 TASK_QUICK_MENU,
                 TASK_MOVE_MODE,
                 TASK_SNOOZE,
+                TASK_COMPLETE,
                 TASK_AGENT_YANK,
             ],
         },
         BindingContext {
             name: "task detail",
             bindings: &[
+                TASK_COMPLETE,
                 TASK_TITLE_FIELD,
                 TASK_DESCRIPTION_FIELD,
                 TASK_DESCRIPTION_EDITOR,
@@ -643,6 +690,10 @@ pub mod keys {
         BindingContext {
             name: "delete confirmation",
             bindings: &[DELETE_CONFIRM, DIALOG_CLOSE],
+        },
+        BindingContext {
+            name: "complete task dialog",
+            bindings: &[COMPLETE_DONE, COMPLETE_REJECT, DIALOG_CANCEL, DIALOG_CLOSE],
         },
     ];
 }
@@ -738,9 +789,11 @@ mod tests {
     }
 
     #[test]
-    fn task_and_management_delete_shortcuts_share_requested_defaults() {
+    fn task_and_management_shortcuts_use_requested_defaults() {
         let keymap = AppKeymap::from_overrides(std::iter::empty::<(String, String)>()).unwrap();
         for (name, expected) in [
+            ("TASK_SNOOZE", "ctrl+z"),
+            ("TASK_COMPLETE", "ctrl+c"),
             ("TASK_DELETE_CTRL_X", "ctrl+x"),
             ("TASK_DELETE", "delete"),
             ("TASK_DELETE_X", "backspace"),
@@ -750,6 +803,10 @@ mod tests {
         ] {
             assert_eq!(keymap.binding(name).unwrap().raw, expected);
         }
+        assert_eq!(
+            keymap.binding("TASK_SNOOZE").unwrap().spec.unwrap().label(),
+            "⌃z"
+        );
     }
 
     #[test]
@@ -789,6 +846,22 @@ mod tests {
     }
 
     #[test]
+    fn complete_dialog_rejects_duplicate_action_bindings() {
+        let error =
+            AppKeymap::from_overrides([("COMPLETE_REJECT".into(), "d".into())]).unwrap_err();
+
+        assert!(error.to_string().contains("complete task dialog context"));
+    }
+
+    #[test]
+    fn task_detail_rejects_complete_binding_collision() {
+        let error =
+            AppKeymap::from_overrides([("TASK_COMPLETE".into(), "esc".into())]).unwrap_err();
+
+        assert!(error.to_string().contains("task detail context"));
+    }
+
+    #[test]
     fn bindings_in_separate_contexts_may_share_prefixes() {
         AppKeymap::from_overrides([
             ("APP_TASKS_TAB".into(), "t".into()),
@@ -804,6 +877,8 @@ mod tests {
             ("DIALOG_CANCEL".into(), "n".into()),
             ("DIALOG_SUBMIT".into(), "ctrl+s".into()),
             ("DELETE_CONFIRM".into(), "x".into()),
+            ("COMPLETE_DONE".into(), "g".into()),
+            ("COMPLETE_REJECT".into(), "j".into()),
         ])
         .unwrap();
 
@@ -811,6 +886,8 @@ mod tests {
             ("DIALOG_OK", "y", Key::Char('y')),
             ("DIALOG_CANCEL", "n", Key::Char('n')),
             ("DELETE_CONFIRM", "x", Key::Char('x')),
+            ("COMPLETE_DONE", "g", Key::Char('g')),
+            ("COMPLETE_REJECT", "j", Key::Char('j')),
         ] {
             let binding = keymap.binding(name).unwrap().spec.unwrap();
             assert_eq!(binding.label(), label);
@@ -822,5 +899,37 @@ mod tests {
             code: Key::Char('s'),
             modifiers: KeyModifiers::CONTROL,
         }));
+    }
+
+    #[test]
+    fn complete_flow_bindings_cannot_shadow_runtime_quit() {
+        for (name, key) in [
+            (
+                "TASK_COMPLETE",
+                KeyEvent {
+                    code: Key::Char('c'),
+                    modifiers: KeyModifiers::CONTROL,
+                },
+            ),
+            ("COMPLETE_DONE", KeyEvent::from(Key::Char('d'))),
+            ("DIALOG_CANCEL", KeyEvent::from(Key::Char('c'))),
+        ] {
+            let keymap = AppKeymap::from_overrides(std::iter::empty::<(String, String)>()).unwrap();
+            let runtime = tuicore::RuntimeKeyBindings::new().with_quit([KeySpec::from(key)]);
+
+            let error = keymap.validate_runtime_quit(&runtime).unwrap_err();
+
+            assert!(error.to_string().contains(name));
+            assert!(error.to_string().contains("runtime quit"));
+        }
+    }
+
+    #[test]
+    fn default_runtime_quit_does_not_conflict_with_task_complete() {
+        let keymap = AppKeymap::from_overrides(std::iter::empty::<(String, String)>()).unwrap();
+
+        keymap
+            .validate_runtime_quit(&tuicore::RuntimeKeyBindings::default())
+            .unwrap();
     }
 }

@@ -227,6 +227,7 @@ fn build_snooze_dropdown(
     .search_mode(DropdownSearchMode::Fuzzy)
     .commit_mode(DropdownCommitMode::Explicit)
     .centered(true)
+    .backdrop_amount(0.0)
     .tab_stop(false)
     .max_popup_height(12)
     .on_select(move |ids| {

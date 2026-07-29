@@ -132,13 +132,13 @@ fn delete_shortcuts_open_confirmation_from_focused_task_table() {
         assert!(outcome.handled());
         assert!(matches!(
             ctx.messages(),
-            [AppMsg::OpenDeleteTask(task_id)] if task_id == "task-1"
+            [AppMsg::OpenDeleteTask { task_id, return_focus: None }] if task_id == "task-1"
         ));
     }
 }
 
 #[test]
-fn quick_menu_opens_from_task_list_or_detail_and_b_snoozes_from_either() {
+fn ctrl_c_opens_complete_dialog_from_focused_task_table() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
@@ -146,19 +146,475 @@ fn quick_menu_opens_from_task_list_or_detail_and_b_snoozes_from_either() {
         tags: Vec::new(),
     });
     let mut workspace = TaskWorkspace::new(context);
-    let snooze = TuiEvent::Key(KeyEvent::from(Key::Char('b')));
-    let quick_menu = TuiEvent::Key(KeyEvent::from(Key::Char('.')));
+    workspace.table_focused = true;
+    let mut ctx = EventCtx::default();
 
-    let mut detail_snooze = EventCtx::default();
-    assert!(workspace.event(&snooze, &mut detail_snooze).handled());
+    let outcome = workspace.event(
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('c'),
+            modifiers: KeyModifiers::CONTROL,
+        }),
+        &mut ctx,
+    );
+
+    assert!(outcome.handled());
+    assert!(matches!(
+        ctx.messages(),
+        [AppMsg::OpenCompleteTask { task_id, return_focus: None }] if task_id == "task-1"
+    ));
+}
+
+#[test]
+fn ctrl_c_from_task_detail_preserves_full_path_and_child_ownership() {
+    let complete = TuiEvent::Key(KeyEvent {
+        code: Key::Char('c'),
+        modifiers: KeyModifiers::CONTROL,
+    });
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![test_task()],
+        people: Vec::new(),
+        projects: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut workspace = TaskWorkspace::new(context);
+    let mut layout = LayoutCtx::new();
+    workspace.layout(Rect::new(0, 0, 120, 80), &mut layout);
+    let title = layout
+        .focus_targets()
+        .iter()
+        .find(|target| target.path.keys().iter().any(|key| key.as_str() == "title"))
+        .expect("title should be focusable");
+    let route = EventRoute::new(title.path.clone());
+
+    let effects = TreeDispatcher::new().dispatch_event(
+        &mut workspace,
+        &route,
+        &complete,
+        AnimationSettings::default(),
+    );
+
+    assert!(effects.outcome.handled());
+    assert!(matches!(
+        effects.messages.as_slice(),
+        [AppMsg::OpenCompleteTask {
+            task_id,
+            return_focus: Some(return_focus),
+        }] if task_id == "task-1" && return_focus == &title.path
+    ));
+
+    for child_outcome in [EventOutcome::Handled, EventOutcome::Ignored] {
+        let mut ctx = EventCtx::default();
+        if !child_outcome.handled() {
+            ctx.stop_propagation();
+        }
+        assert_eq!(
+            workspace.handle_detail_complete_shortcut(child_outcome, &route, &complete, &mut ctx,),
+            None
+        );
+        assert!(ctx.messages().is_empty());
+    }
+}
+
+#[test]
+fn ctrl_x_from_task_detail_opens_delete_except_under_links() {
+    let ctrl_x = TuiEvent::Key(KeyEvent {
+        code: Key::Char('x'),
+        modifiers: KeyModifiers::CONTROL,
+    });
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![test_task()],
+        people: Vec::new(),
+        projects: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut workspace = TaskWorkspace::new(context);
+    let mut layout = LayoutCtx::new();
+    workspace.layout(Rect::new(0, 0, 120, 80), &mut layout);
+    let title = layout
+        .focus_targets()
+        .iter()
+        .find(|target| target.path.keys().iter().any(|key| key.as_str() == "title"))
+        .expect("title should be focusable");
+
+    let effects = TreeDispatcher::new().dispatch_event(
+        &mut workspace,
+        &EventRoute::new(title.path.clone()),
+        &ctrl_x,
+        AnimationSettings::default(),
+    );
+
+    assert!(effects.outcome.handled());
+    assert!(matches!(
+        effects.messages.as_slice(),
+        [AppMsg::OpenDeleteTask {
+            task_id,
+            return_focus: Some(return_focus),
+        }] if task_id == "task-1" && return_focus == &title.path
+    ));
+
+    let title_route = EventRoute::new(title.path.clone());
+    let mut handled_ctx = EventCtx::default();
     assert_eq!(
-        detail_snooze.focus_request(),
+        workspace.handle_detail_delete_shortcut(
+            EventOutcome::Handled,
+            &title_route,
+            &ctrl_x,
+            &mut handled_ctx,
+        ),
+        None
+    );
+    assert!(handled_ctx.messages().is_empty());
+
+    let mut stopped_ctx = EventCtx::default();
+    stopped_ctx.stop_propagation();
+    assert_eq!(
+        workspace.handle_detail_delete_shortcut(
+            EventOutcome::Ignored,
+            &title_route,
+            &ctrl_x,
+            &mut stopped_ctx,
+        ),
+        None
+    );
+    assert!(stopped_ctx.messages().is_empty());
+
+    for links in [Vec::new(), vec!["https://example.com".to_string()]] {
+        let populated = !links.is_empty();
+        let mut task = test_task();
+        task.links = links;
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks: vec![task],
+            people: Vec::new(),
+            projects: Vec::new(),
+            tags: Vec::new(),
+        });
+        let mut workspace = TaskWorkspace::new(context);
+        let mut layout = LayoutCtx::new();
+        workspace.layout(Rect::new(0, 0, 120, 80), &mut layout);
+        let links = layout
+            .focus_targets()
+            .iter()
+            .find(|target| {
+                target.id.as_str() == "data-view"
+                    && target.path.keys().iter().any(|key| key.as_str() == "links")
+            })
+            .expect("links should be focusable");
+
+        let effects = TreeDispatcher::new().dispatch_event(
+            &mut workspace,
+            &EventRoute::new(links.path.clone()),
+            &ctrl_x,
+            AnimationSettings::default(),
+        );
+
+        if populated {
+            assert!(effects.outcome.handled());
+        }
+        assert!(
+            !effects
+                .messages
+                .iter()
+                .any(|message| matches!(message, AppMsg::OpenDeleteTask { .. }))
+        );
+    }
+
+    for editor_key in [Key::Char('+'), Key::Char('e')] {
+        let mut task = test_task();
+        task.links = vec!["https://example.com".to_string()];
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks: vec![task],
+            people: Vec::new(),
+            projects: Vec::new(),
+            tags: Vec::new(),
+        });
+        let mut workspace = TaskWorkspace::new(context);
+        let area = Rect::new(0, 0, 120, 80);
+        let mut layout = LayoutCtx::new();
+        workspace.layout(area, &mut layout);
+        let links = layout
+            .focus_targets()
+            .iter()
+            .find(|target| {
+                target.id.as_str() == "data-view"
+                    && target.path.keys().iter().any(|key| key.as_str() == "links")
+            })
+            .expect("links should be focusable")
+            .path
+            .clone();
+        TreeDispatcher::new().dispatch_event(
+            &mut workspace,
+            &EventRoute::new(links),
+            &TuiEvent::Key(editor_key.into()),
+            AnimationSettings::default(),
+        );
+        let mut editor_layout = LayoutCtx::new();
+        workspace.layout(area, &mut editor_layout);
+        let editor = editor_layout
+            .focus_targets()
+            .iter()
+            .find(|target| {
+                target.path.keys().iter().any(|key| key.as_str() == "links")
+                    && target
+                        .path
+                        .keys()
+                        .iter()
+                        .any(|key| key.as_str() == "add-input")
+            })
+            .expect("link editor should be focusable");
+
+        let effects = TreeDispatcher::new().dispatch_event(
+            &mut workspace,
+            &EventRoute::new(editor.path.clone()),
+            &ctrl_x,
+            AnimationSettings::default(),
+        );
+
+        assert!(
+            !effects
+                .messages
+                .iter()
+                .any(|message| matches!(message, AppMsg::OpenDeleteTask { .. }))
+        );
+    }
+}
+
+#[test]
+fn detail_dialog_cancel_restores_resolvable_full_app_focus_path() {
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![test_task()],
+        people: Vec::new(),
+        projects: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(context.store, context.coordinator);
+    let area = Rect::new(0, 0, 120, 80);
+    let mut layout = LayoutCtx::new();
+    app.layout(area, &mut layout);
+    let description_path = layout
+        .focus_targets()
+        .iter()
+        .find(|target| {
+            target
+                .path
+                .keys()
+                .iter()
+                .any(|key| key.as_str() == "description")
+        })
+        .expect("description should be focusable")
+        .path
+        .clone();
+
+    let effects = TreeDispatcher::new().dispatch_event(
+        &mut app,
+        &EventRoute::new(description_path.clone()),
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('z'),
+            modifiers: KeyModifiers::CONTROL,
+        }),
+        AnimationSettings::default(),
+    );
+    let [
+        AppMsg::OpenTaskSnooze {
+            task_id,
+            return_focus: Some(return_focus),
+        },
+    ] = effects.messages.as_slice()
+    else {
+        panic!("detail snooze should carry return focus");
+    };
+    assert_eq!(task_id, "task-1");
+    assert_eq!(return_focus, &description_path);
+
+    app.open_task_snooze_dialog(
+        task_id,
+        Some(return_focus.clone()),
+        &mut EventCtx::default(),
+    );
+    let mut close_ctx = EventCtx::default();
+    app.close_snooze_dialog(&mut close_ctx);
+    let mut post_close_layout = LayoutCtx::new();
+    app.layout(area, &mut post_close_layout);
+    let transition = FocusManager::new()
+        .apply_request(
+            close_ctx
+                .focus_request()
+                .expect("snooze close should request focus"),
+            post_close_layout.focus_targets(),
+        )
+        .expect("restored detail focus should resolve");
+    assert_eq!(
+        transition.current.expect("detail should regain focus").path,
+        description_path
+    );
+    assert_eq!(app.snooze_return_focus, None);
+
+    let delete_effects = TreeDispatcher::new().dispatch_event(
+        &mut app,
+        &EventRoute::new(description_path.clone()),
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('x'),
+            modifiers: KeyModifiers::CONTROL,
+        }),
+        AnimationSettings::default(),
+    );
+    let [
+        AppMsg::OpenDeleteTask {
+            task_id,
+            return_focus: Some(return_focus),
+        },
+    ] = delete_effects.messages.as_slice()
+    else {
+        panic!("detail delete should carry return focus");
+    };
+    assert_eq!(task_id, "task-1");
+    assert_eq!(return_focus, &description_path);
+
+    app.open_delete_task_dialog(
+        task_id,
+        Some(return_focus.clone()),
+        &mut EventCtx::default(),
+    );
+    let mut delete_close_ctx = EventCtx::default();
+    app.close_delete_task_dialog(&mut delete_close_ctx);
+    let mut delete_close_layout = LayoutCtx::new();
+    app.layout(area, &mut delete_close_layout);
+    let delete_transition = FocusManager::new()
+        .apply_request(
+            delete_close_ctx
+                .focus_request()
+                .expect("delete close should request focus"),
+            delete_close_layout.focus_targets(),
+        )
+        .expect("restored detail focus should resolve");
+    assert_eq!(
+        delete_transition
+            .current
+            .expect("detail should regain focus")
+            .path,
+        description_path
+    );
+    assert_eq!(app.delete_return_focus, None);
+
+    app.open_complete_task_dialog(
+        "task-1",
+        Some(description_path.clone()),
+        &mut EventCtx::default(),
+    );
+    let mut complete_close_ctx = EventCtx::default();
+    app.close_complete_task_dialog(&mut complete_close_ctx);
+    assert_eq!(
+        complete_close_ctx.focus_request(),
+        Some(&FocusRequest::Path(description_path))
+    );
+    assert_eq!(app.complete_return_focus, None);
+}
+
+#[test]
+fn table_origin_dialog_cancel_focuses_task_table() {
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![test_task()],
+        people: Vec::new(),
+        projects: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(context.store, context.coordinator);
+    let mut snooze_ctx = EventCtx::default();
+    app.close_snooze_dialog(&mut snooze_ctx);
+    assert_eq!(
+        snooze_ctx.focus_request(),
         Some(&initial_task_table_focus_request())
     );
+
+    let mut dialog = delete_task_dialog(&test_task());
+    let mut dialog_ctx = EventCtx::default();
+    dialog.event(&TuiEvent::Key(Key::Esc.into()), &mut dialog_ctx);
     assert!(matches!(
-        detail_snooze.messages(),
-        [AppMsg::OpenTaskSnooze(task_id)] if task_id == "task-1"
+        dialog_ctx.messages(),
+        [AppMsg::CloseDeleteTaskDialog]
     ));
+
+    app.open_delete_task_dialog("task-1", None, &mut EventCtx::default());
+    let mut delete_ctx = EventCtx::default();
+    app.close_delete_task_dialog(&mut delete_ctx);
+    assert_eq!(
+        delete_ctx.focus_request(),
+        Some(&initial_task_table_focus_request())
+    );
+
+    app.open_complete_task_dialog("task-1", None, &mut EventCtx::default());
+    let mut complete_ctx = EventCtx::default();
+    app.close_complete_task_dialog(&mut complete_ctx);
+    assert_eq!(
+        complete_ctx.focus_request(),
+        Some(&initial_task_table_focus_request())
+    );
+}
+
+#[test]
+fn missing_task_dialog_targets_clear_origin_and_focus_task_table() {
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![test_task()],
+        people: Vec::new(),
+        projects: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(context.store, context.coordinator);
+    app.open_task_quick_menu("task-1", &mut EventCtx::default());
+    app.snooze_return_focus = Some(TreePath::from_keys([ChildKey::new("stale")]));
+    let mut ctx = EventCtx::default();
+
+    app.open_task_snooze_dialog("missing", None, &mut ctx);
+
+    assert_eq!(app.snooze_return_focus, None);
+    assert!(!app.primary_dialog().is_active());
+    assert_eq!(
+        ctx.focus_request(),
+        Some(&initial_task_table_focus_request())
+    );
+
+    app.open_task_quick_menu("task-1", &mut EventCtx::default());
+    app.delete_return_focus = Some(TreePath::from_keys([ChildKey::new("stale")]));
+    let mut delete_ctx = EventCtx::default();
+    app.open_delete_task_dialog("missing", None, &mut delete_ctx);
+
+    assert_eq!(app.delete_return_focus, None);
+    assert!(!app.primary_dialog().is_active());
+    assert_eq!(
+        delete_ctx.focus_request(),
+        Some(&initial_task_table_focus_request())
+    );
+
+    app.open_task_quick_menu("task-1", &mut EventCtx::default());
+    app.complete_return_focus = Some(CompleteReturnFocus {
+        task_id: "task-1".into(),
+        task_state: TaskState::InProgress,
+        path: TreePath::from_keys([ChildKey::new("stale")]),
+    });
+    let mut complete_ctx = EventCtx::default();
+    app.open_complete_task_dialog("missing", None, &mut complete_ctx);
+
+    assert_eq!(app.complete_return_focus, None);
+    assert!(!app.primary_dialog().is_active());
+    assert_eq!(
+        complete_ctx.focus_request(),
+        Some(&initial_task_table_focus_request())
+    );
+}
+
+#[test]
+fn quick_menu_opens_with_visible_task_and_ctrl_z_snoozes_from_table() {
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![test_task()],
+        people: Vec::new(),
+        projects: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut workspace = TaskWorkspace::new(context);
+    let snooze = TuiEvent::Key(KeyEvent {
+        code: Key::Char('z'),
+        modifiers: KeyModifiers::CONTROL,
+    });
+    let quick_menu = TuiEvent::Key(KeyEvent::from(Key::Char('.')));
 
     let mut detail = EventCtx::default();
     assert!(workspace.event(&quick_menu, &mut detail).handled());
@@ -172,8 +628,15 @@ fn quick_menu_opens_from_task_list_or_detail_and_b_snoozes_from_either() {
     assert!(workspace.event(&snooze, &mut snooze_ctx).handled());
     assert!(matches!(
         snooze_ctx.messages(),
-        [AppMsg::OpenTaskSnooze(task_id)] if task_id == "task-1"
+        [AppMsg::OpenTaskSnooze { task_id, return_focus: None }] if task_id == "task-1"
     ));
+
+    let mut plain_b_ctx = EventCtx::default();
+    assert_eq!(
+        workspace.event(&TuiEvent::Key(Key::Char('b').into()), &mut plain_b_ctx),
+        EventOutcome::Ignored
+    );
+    assert!(plain_b_ctx.messages().is_empty());
 
     let mut focused = EventCtx::default();
     assert!(workspace.event(&quick_menu, &mut focused).handled());
@@ -220,7 +683,7 @@ fn control_m_from_task_detail_focuses_table_and_enters_move_mode() {
 }
 
 #[test]
-fn custom_snooze_returns_focus_to_task_table() {
+fn successful_snooze_and_unsnooze_clear_return_focus_and_focus_task_table() {
     let (_runtime, context, store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
@@ -229,12 +692,14 @@ fn custom_snooze_returns_focus_to_task_table() {
     });
     let mut app = App::new(context.store, context.coordinator);
     let mut open_ctx = EventCtx::default();
-    app.open_task_snooze_dialog("task-1", &mut open_ctx);
+    let detail_path = TreePath::from_keys([ChildKey::new("detail"), ChildKey::new("title")]);
+    app.open_task_snooze_dialog("task-1", Some(detail_path.clone()), &mut open_ctx);
     let custom = time::macros::datetime!(2026-07-30 14:30);
     let mut submit_ctx = EventCtx::default();
 
     app.snooze_task("task-1".into(), custom, Some(custom), &mut submit_ctx);
 
+    assert_eq!(app.snooze_return_focus, None);
     assert_eq!(
         submit_ctx.focus_request(),
         Some(&initial_task_table_focus_request())
@@ -242,6 +707,16 @@ fn custom_snooze_returns_focus_to_task_table() {
     assert_eq!(
         store.borrow().state().selected_task_id.as_deref(),
         Some("task-1")
+    );
+
+    app.snooze_return_focus = Some(detail_path);
+    let mut unsnooze_ctx = EventCtx::default();
+    app.unsnooze_task("task-1".into(), &mut unsnooze_ctx);
+
+    assert_eq!(app.snooze_return_focus, None);
+    assert_eq!(
+        unsnooze_ctx.focus_request(),
+        Some(&initial_task_table_focus_request())
     );
 }
 
@@ -290,6 +765,65 @@ fn snooze_dialog_renders_search_and_options_through_modal_portals() {
     assert!(text.contains("Tomorrow"));
     assert!(text.contains("This weekend"));
     assert!(text.contains("Pick date & time"));
+}
+
+#[test]
+fn snooze_dropdown_does_not_dim_dialog_backdrop_twice() {
+    let mut dialog = DialogLayer::new(
+        Flex::<AppMsg>::column(),
+        SnoozeDialog::new(
+            "task-1".into(),
+            time::macros::datetime!(2026-07-23 12:00),
+            None,
+            false,
+        ),
+    )
+    .fit_content()
+    .backdrop(DialogBackdrop::dim().amount(0.5));
+    let area = Rect::new(0, 0, 100, 30);
+    let mut layout = LayoutCtx::new();
+    dialog.layout(area, &mut layout);
+    let modal = layout
+        .overlays()
+        .iter()
+        .find(|overlay| overlay.layer == tuicore::OverlayLayer::Modal)
+        .expect("snooze dialog should register a modal")
+        .area;
+    let popover = layout
+        .overlays()
+        .iter()
+        .find(|overlay| overlay.layer == tuicore::OverlayLayer::Popover)
+        .expect("snooze dropdown should register a popover");
+    let contains =
+        |rect: Rect, x, y| x >= rect.x && x < rect.right() && y >= rect.y && y < rect.bottom();
+    let outside_dialog = (0..area.height)
+        .flat_map(|y| (0..area.width).map(move |x| (x, y)))
+        .find(|&(x, y)| !contains(modal, x, y))
+        .expect("canvas should include space outside dialog");
+    let inside_dialog = (modal.y..modal.bottom())
+        .flat_map(|y| (modal.x..modal.right()).map(move |x| (x, y)))
+        .find(|&(x, y)| !contains(popover.anchor, x, y) && !contains(popover.area, x, y))
+        .expect("dialog should include space outside dropdown");
+    let mut terminal =
+        Terminal::new(TestBackend::new(area.width, area.height)).expect("terminal should build");
+
+    terminal
+        .draw(|frame| {
+            let mut ctx = RenderCtx::new();
+            dialog.render(frame, area, &mut ctx);
+            ctx.flush(frame);
+        })
+        .expect("dialog should render");
+
+    let buffer = terminal.backend().buffer();
+    let outside = buffer
+        .cell(outside_dialog)
+        .expect("outside dialog cell should exist");
+    let inside = buffer
+        .cell(inside_dialog)
+        .expect("inside dialog cell should exist");
+    assert!(outside.modifier.contains(Modifier::DIM));
+    assert_eq!(inside.fg, outside.fg);
 }
 
 #[test]
@@ -477,7 +1011,7 @@ fn backspace_targets_visible_task_even_when_store_selection_is_stale() {
     assert!(outcome.handled());
     assert!(matches!(
         ctx.messages(),
-        [AppMsg::OpenDeleteTask(task_id)] if task_id == "task-2"
+        [AppMsg::OpenDeleteTask { task_id, return_focus: None }] if task_id == "task-2"
     ));
 }
 
@@ -521,10 +1055,12 @@ fn confirmed_delete_removes_task_from_state_immediately() {
         tags: Vec::new(),
     });
     let mut app = App::new(context.store, context.coordinator);
+    app.delete_return_focus = Some(TreePath::from_keys([ChildKey::new("detail")]));
 
     app.delete_task("task-1".to_string(), &mut EventCtx::default());
 
     assert!(app.context.store.borrow().state().tasks.is_empty());
+    assert_eq!(app.delete_return_focus, None);
 }
 
 #[test]
@@ -576,6 +1112,109 @@ fn delete_confirmation_uses_d_shortcut() {
 }
 
 #[test]
+fn complete_dialog_has_done_reject_and_cancel_actions() {
+    for (key, expected_state) in [
+        (Key::Char('d'), Some(TaskState::Done)),
+        (Key::Char('r'), Some(TaskState::Rejected)),
+        (Key::Char('c'), None),
+        (Key::Esc, None),
+    ] {
+        let mut dialog = complete_task_dialog(&test_task());
+        let mut ctx = EventCtx::default();
+
+        let outcome = dialog.event(&TuiEvent::Key(KeyEvent::from(key)), &mut ctx);
+
+        assert!(outcome.handled());
+        match expected_state {
+            Some(state) => assert!(matches!(
+                ctx.messages(),
+                [AppMsg::CompleteTask { task_id, state: actual }]
+                    if task_id == "task-1" && *actual == state
+            )),
+            None => assert!(matches!(ctx.messages(), [AppMsg::CloseCompleteTaskDialog])),
+        }
+    }
+
+    let text = rendered_text(&complete_task_dialog(&test_task()), Rect::new(0, 0, 80, 8));
+    assert!(text.contains("Done (d)"));
+    assert!(text.contains("Reject (r)"));
+    assert!(text.contains("Cancel (c)"));
+}
+
+#[test]
+fn complete_outcomes_patch_optimistically_persist_and_focus_task_table() {
+    for state in [TaskState::Done, TaskState::Rejected] {
+        let mut task = test_task();
+        task.snoozed_until = Some(time::macros::datetime!(2026-08-24 8:00));
+        let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+            tasks: vec![task],
+            people: Vec::new(),
+            projects: Vec::new(),
+            tags: Vec::new(),
+        });
+        let coordinator = Rc::clone(&context.coordinator);
+        let mut workspace = TaskWorkspace::new(context.clone());
+        let area = Rect::new(0, 0, 120, 40);
+        workspace.layout(area, &mut LayoutCtx::new());
+        assert_eq!(
+            workspace.table().highlighted_id().as_deref(),
+            Some("task-1")
+        );
+        assert_eq!(workspace.detail().task_id.as_deref(), Some("task-1"));
+        let mut app = App::new(context.store, context.coordinator);
+        app.complete_return_focus = Some(CompleteReturnFocus {
+            task_id: "task-1".into(),
+            task_state: TaskState::InProgress,
+            path: TreePath::from_keys([ChildKey::new("detail")]),
+        });
+        let mut ctx = EventCtx::default();
+
+        app.complete_task("task-1".into(), state, &mut ctx);
+
+        let store = store.borrow();
+        let saved = &store.state().tasks[0];
+        assert_eq!(saved.state, state);
+        assert_eq!(saved.snoozed_until, None);
+        assert!(coordinator.borrow().has_pending());
+        assert_eq!(app.complete_return_focus, None);
+        assert_eq!(
+            ctx.focus_request(),
+            Some(&initial_task_table_focus_request())
+        );
+        assert!(!app.primary_dialog().is_active());
+        drop(store);
+        workspace.layout(area, &mut LayoutCtx::new());
+        assert_eq!(workspace.table().highlighted_id(), None);
+        assert_eq!(workspace.detail().task_id, None);
+    }
+}
+
+#[test]
+fn complete_cancel_falls_back_to_task_table_when_origin_task_disappears() {
+    let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+        tasks: vec![test_task()],
+        people: Vec::new(),
+        projects: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(context.store, context.coordinator);
+    let origin = TreePath::from_keys([ChildKey::new("detail"), ChildKey::new("title")]);
+    app.open_complete_task_dialog("task-1", Some(origin), &mut EventCtx::default());
+    store
+        .borrow_mut()
+        .dispatch(AppEvent::TaskDeleted("task-1".into()));
+    let mut ctx = EventCtx::default();
+
+    app.close_complete_task_dialog(&mut ctx);
+
+    assert_eq!(app.complete_return_focus, None);
+    assert_eq!(
+        ctx.focus_request(),
+        Some(&initial_task_table_focus_request())
+    );
+}
+
+#[test]
 fn delete_task_dialog_fits_its_content() {
     let snapshot = WorkspaceSnapshot {
         tasks: vec![test_task()],
@@ -587,7 +1226,7 @@ fn delete_task_dialog_fits_its_content() {
     let mut app = App::new(context.store, context.coordinator);
     let area = Rect::new(0, 0, 120, 40);
 
-    app.open_delete_task_dialog("task-1", &mut EventCtx::default());
+    app.open_delete_task_dialog("task-1", None, &mut EventCtx::default());
     let mut delete_layout = LayoutCtx::new();
     app.layout(area, &mut delete_layout);
     let delete_area = delete_layout
@@ -769,7 +1408,7 @@ fn created_task_state_hotkey_focuses_open_dropdown() {
 }
 
 #[test]
-fn open_size_dropdown_consumes_b_without_snoozing_task() {
+fn focused_dropdown_search_allows_ctrl_z_to_snooze_task() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
@@ -814,16 +1453,26 @@ fn open_size_dropdown_consumes_b_without_snoozing_task() {
     let focused = transition
         .current
         .expect("dropdown search should become focused");
+    let focused_path = focused.path.clone();
 
     let effects = dispatcher.dispatch_event(
         &mut workspace,
-        &EventRoute::new(focused.path),
-        &TuiEvent::Key(KeyEvent::from(Key::Char('b'))),
+        &EventRoute::new(focused_path.clone()),
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('z'),
+            modifiers: KeyModifiers::CONTROL,
+        }),
         AnimationSettings::default(),
     );
 
     assert!(effects.outcome.handled());
-    assert!(effects.messages.is_empty());
+    assert!(matches!(
+        effects.messages.as_slice(),
+        [AppMsg::OpenTaskSnooze {
+            task_id,
+            return_focus: Some(return_focus),
+        }] if task_id == "task-1" && return_focus == &focused_path
+    ));
 }
 
 #[test]

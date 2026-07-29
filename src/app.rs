@@ -36,9 +36,9 @@ use tuicore::{
     EventOutcome, EventRoute, Flex, FlexItem, FocusCtx, FocusId, FocusRequest, FocusTarget,
     HotkeyEvent, HotkeyLabelMode, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint,
     LifecycleCtx, ListControl, ListControlEvent, ListControlField, ListControlKeyBindings, Menu,
-    MenuItem, MenuSearchMode, Paragraph, RenderCtx, SelectedTag, SelectionMode, SelectionTrigger,
-    Split, StatusBar, StatusBarMenuItem, Store, Tab, Tabs, TabsVariant, TagInput, TagInputEvent,
-    TextInput, TextareaInput, TickResult, TreeApp, TreePath, TuiEvent, TuiNode,
+    MenuItem, MenuSearchMode, Paragraph, Propagation, RenderCtx, SelectedTag, SelectionMode,
+    SelectionTrigger, Split, StatusBar, StatusBarMenuItem, Store, Tab, Tabs, TabsVariant, TagInput,
+    TagInputEvent, TextInput, TextareaInput, TickResult, TreeApp, TreePath, TuiEvent, TuiNode,
     WeatherProviderConfig,
 };
 use uuid::Uuid;
@@ -111,12 +111,26 @@ pub(crate) enum AppMsg {
     },
     OpenCreateTask,
     CreateTaskSubmitted(CreateTaskDraft),
-    OpenDeleteTask(String),
+    OpenDeleteTask {
+        task_id: String,
+        return_focus: Option<TreePath>,
+    },
     DeleteTaskConfirmed(String),
     OpenTaskQuickMenu(String),
     MoveTaskToTop(String),
     MoveTaskToBottom(String),
-    OpenTaskSnooze(String),
+    OpenTaskSnooze {
+        task_id: String,
+        return_focus: Option<TreePath>,
+    },
+    OpenCompleteTask {
+        task_id: String,
+        return_focus: Option<TreePath>,
+    },
+    CompleteTask {
+        task_id: String,
+        state: TaskState,
+    },
     SnoozeTask {
         task_id: String,
         until: PrimitiveDateTime,
@@ -125,6 +139,8 @@ pub(crate) enum AppMsg {
     UnsnoozeTask(String),
     CloseManagementOverlay,
     CloseSnoozeDialog,
+    CloseDeleteTaskDialog,
+    CloseCompleteTaskDialog,
     CloseDialog,
 }
 
@@ -211,20 +227,33 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         }
         AppMsg::OpenCreateTask => app.open_create_task_dialog(ctx),
         AppMsg::CreateTaskSubmitted(draft) => app.submit_create_task(draft, ctx),
-        AppMsg::OpenDeleteTask(task_id) => app.open_delete_task_dialog(&task_id, ctx),
+        AppMsg::OpenDeleteTask {
+            task_id,
+            return_focus,
+        } => app.open_delete_task_dialog(&task_id, return_focus, ctx),
         AppMsg::DeleteTaskConfirmed(task_id) => app.delete_task(task_id, ctx),
         AppMsg::OpenTaskQuickMenu(task_id) => app.open_task_quick_menu(&task_id, ctx),
         AppMsg::MoveTaskToTop(task_id) => app.move_task_to_edge(&task_id, true, ctx),
         AppMsg::MoveTaskToBottom(task_id) => app.move_task_to_edge(&task_id, false, ctx),
-        AppMsg::OpenTaskSnooze(task_id) => app.open_task_snooze_dialog(&task_id, ctx),
+        AppMsg::OpenTaskSnooze {
+            task_id,
+            return_focus,
+        } => app.open_task_snooze_dialog(&task_id, return_focus, ctx),
         AppMsg::SnoozeTask {
             task_id,
             until,
             remember_custom,
         } => app.snooze_task(task_id, until, remember_custom, ctx),
         AppMsg::UnsnoozeTask(task_id) => app.unsnooze_task(task_id, ctx),
+        AppMsg::OpenCompleteTask {
+            task_id,
+            return_focus,
+        } => app.open_complete_task_dialog(&task_id, return_focus, ctx),
+        AppMsg::CompleteTask { task_id, state } => app.complete_task(task_id, state, ctx),
         AppMsg::CloseManagementOverlay => app.close_management_overlay(ctx),
         AppMsg::CloseSnoozeDialog => app.close_snooze_dialog(ctx),
+        AppMsg::CloseDeleteTaskDialog => app.close_delete_task_dialog(ctx),
+        AppMsg::CloseCompleteTaskDialog => app.close_complete_task_dialog(ctx),
         AppMsg::CloseDialog => app.close_dialog(ctx),
     })
     .run();
@@ -242,6 +271,16 @@ type AppDialogLayers = DialogLayer<PrimaryDialogLayer, AppDialog>;
 struct App {
     root: AppDialogLayers,
     context: AppContext,
+    snooze_return_focus: Option<TreePath>,
+    delete_return_focus: Option<TreePath>,
+    complete_return_focus: Option<CompleteReturnFocus>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CompleteReturnFocus {
+    task_id: String,
+    task_state: TaskState,
+    path: TreePath,
 }
 
 impl App {
@@ -299,6 +338,9 @@ impl App {
                 .base_overlays_visible(true)
                 .backdrop(DialogBackdrop::dim().amount(0.5)),
             context,
+            snooze_return_focus: None,
+            delete_return_focus: None,
+            complete_return_focus: None,
         }
     }
 
@@ -595,14 +637,23 @@ impl App {
         self.close_dialog(ctx);
     }
 
-    fn open_delete_task_dialog(&mut self, task_id: &str, ctx: &mut EventCtx<AppMsg>) {
+    fn open_delete_task_dialog(
+        &mut self,
+        task_id: &str,
+        return_focus: Option<TreePath>,
+        ctx: &mut EventCtx<AppMsg>,
+    ) {
+        self.delete_return_focus = None;
         let Some(task) = self.task(task_id) else {
+            self.close_dialog(ctx);
+            focus_task_table(ctx);
             return;
         };
         let primary = self.primary_dialog();
         primary.replace_layer(delete_task_dialog(&task), ctx);
         primary.set_fit_content(true);
         primary.set_active_with_context(true, ctx);
+        self.delete_return_focus = return_focus;
     }
 
     fn open_task_quick_menu(&mut self, task_id: &str, ctx: &mut EventCtx<AppMsg>) {
@@ -642,6 +693,7 @@ impl App {
     }
 
     fn delete_task(&mut self, task_id: String, ctx: &mut EventCtx<AppMsg>) {
+        self.delete_return_focus = None;
         let task = {
             let store = self.context.store.borrow();
             let state = store.state();
@@ -662,8 +714,16 @@ impl App {
         self.close_dialog(ctx);
     }
 
-    fn open_task_snooze_dialog(&mut self, task_id: &str, ctx: &mut EventCtx<AppMsg>) {
+    fn open_task_snooze_dialog(
+        &mut self,
+        task_id: &str,
+        return_focus: Option<TreePath>,
+        ctx: &mut EventCtx<AppMsg>,
+    ) {
+        self.snooze_return_focus = None;
         let Some(task) = self.task(task_id) else {
+            self.close_dialog(ctx);
+            focus_task_table(ctx);
             return;
         };
         let now = match local_now() {
@@ -673,6 +733,8 @@ impl App {
                     "Local time unavailable",
                     format!("Cannot open snooze options: {error}"),
                 ));
+                self.close_dialog(ctx);
+                focus_task_table(ctx);
                 return;
             }
         };
@@ -699,6 +761,51 @@ impl App {
         );
         primary.set_fit_content(true);
         primary.set_active_with_context(true, ctx);
+        self.snooze_return_focus = return_focus;
+    }
+
+    fn open_complete_task_dialog(
+        &mut self,
+        task_id: &str,
+        return_focus: Option<TreePath>,
+        ctx: &mut EventCtx<AppMsg>,
+    ) {
+        self.complete_return_focus = None;
+        let Some(task) = self.task(task_id) else {
+            self.close_dialog(ctx);
+            focus_task_table(ctx);
+            return;
+        };
+        let primary = self.primary_dialog();
+        primary.replace_layer(complete_task_dialog(&task), ctx);
+        primary.set_fit_content(true);
+        primary.set_active_with_context(true, ctx);
+        self.complete_return_focus = return_focus.map(|path| CompleteReturnFocus {
+            task_id: task.id,
+            task_state: task.state,
+            path,
+        });
+    }
+
+    fn complete_task(&mut self, task_id: String, state: TaskState, ctx: &mut EventCtx<AppMsg>) {
+        let patch = TaskPatch::State(state);
+        let outcome = self
+            .context
+            .store
+            .borrow_mut()
+            .dispatch(AppEvent::PatchTask {
+                task_id: task_id.clone(),
+                patch: patch.clone(),
+            });
+        if outcome.changed {
+            self.context
+                .coordinator
+                .borrow_mut()
+                .submit(PersistenceCommand::PatchTask(task_id, patch));
+        }
+        self.complete_return_focus = None;
+        self.close_dialog(ctx);
+        focus_task_table(ctx);
     }
 
     fn snooze_task(
@@ -726,6 +833,7 @@ impl App {
                 .borrow_mut()
                 .submit(PersistenceCommand::PatchTask(task_id, patch));
         }
+        self.snooze_return_focus = None;
         self.close_dialog(ctx);
         focus_task_table(ctx);
     }
@@ -746,6 +854,7 @@ impl App {
                 .borrow_mut()
                 .submit(PersistenceCommand::PatchTask(task_id, patch));
         }
+        self.snooze_return_focus = None;
         self.close_dialog(ctx);
         focus_task_table(ctx);
     }
@@ -766,8 +875,50 @@ impl App {
     }
 
     fn close_snooze_dialog(&mut self, ctx: &mut EventCtx<AppMsg>) {
+        let return_focus = self.snooze_return_focus.take();
         self.close_dialog(ctx);
-        focus_task_table(ctx);
+        if let Some(path) = return_focus {
+            ctx.focus(FocusRequest::Path(path));
+            ctx.stop_propagation();
+            ctx.request_redraw();
+        } else {
+            focus_task_table(ctx);
+        }
+    }
+
+    fn close_delete_task_dialog(&mut self, ctx: &mut EventCtx<AppMsg>) {
+        let return_focus = self.delete_return_focus.take();
+        self.close_dialog(ctx);
+        if let Some(path) = return_focus {
+            ctx.focus(FocusRequest::Path(path));
+            ctx.stop_propagation();
+            ctx.request_redraw();
+        } else {
+            focus_task_table(ctx);
+        }
+    }
+
+    fn close_complete_task_dialog(&mut self, ctx: &mut EventCtx<AppMsg>) {
+        let return_focus = self.complete_return_focus.take();
+        self.close_dialog(ctx);
+        let valid_return_path = return_focus.and_then(|origin| {
+            let store = self.context.store.borrow();
+            let state = store.state();
+            let task_is_selected = state.selected_task_id.as_deref() == Some(&origin.task_id);
+            state
+                .tasks
+                .iter()
+                .any(|task| task.id == origin.task_id && task.state == origin.task_state)
+                .then_some(origin.path)
+                .filter(|_| task_is_selected)
+        });
+        if let Some(path) = valid_return_path {
+            ctx.focus(FocusRequest::Path(path));
+            ctx.stop_propagation();
+            ctx.request_redraw();
+        } else {
+            focus_task_table(ctx);
+        }
     }
 
     fn close_management_overlay(&mut self, ctx: &mut EventCtx<AppMsg>) {
@@ -1476,6 +1627,14 @@ impl TaskWorkspace {
             visible_task_id.map(AppMsg::OpenTaskQuickMenu)
         } else if self.table_focused
             && visible_task_id.is_some()
+            && keys::TASK_COMPLETE.matches(event)
+        {
+            visible_task_id.map(|task_id| AppMsg::OpenCompleteTask {
+                task_id,
+                return_focus: None,
+            })
+        } else if self.table_focused
+            && visible_task_id.is_some()
             && app_keymap::matches_any(
                 event,
                 &[
@@ -1485,12 +1644,18 @@ impl TaskWorkspace {
                 ],
             )
         {
-            visible_task_id.map(AppMsg::OpenDeleteTask)
+            visible_task_id.map(|task_id| AppMsg::OpenDeleteTask {
+                task_id,
+                return_focus: None,
+            })
         } else if self.table_focused
             && visible_task_id.is_some()
             && keys::TASK_SNOOZE.matches(event)
         {
-            visible_task_id.map(AppMsg::OpenTaskSnooze)
+            visible_task_id.map(|task_id| AppMsg::OpenTaskSnooze {
+                task_id,
+                return_focus: None,
+            })
         } else {
             None
         };
@@ -1509,6 +1674,7 @@ impl TaskWorkspace {
     fn handle_task_shortcut_outside_table(
         &mut self,
         event: &TuiEvent,
+        snooze_return_focus: Option<TreePath>,
         ctx: &mut EventCtx<AppMsg>,
     ) -> Option<EventOutcome> {
         if self.table_focused {
@@ -1516,8 +1682,10 @@ impl TaskWorkspace {
         }
         let task_id = self.visible_selection.borrow().clone()?;
         if keys::TASK_SNOOZE.matches(event) {
-            focus_task_table(ctx);
-            ctx.emit(AppMsg::OpenTaskSnooze(task_id));
+            ctx.emit(AppMsg::OpenTaskSnooze {
+                task_id,
+                return_focus: snooze_return_focus,
+            });
             return Some(EventOutcome::Handled);
         }
         if keys::TASK_MOVE_MODE.matches(event) {
@@ -1527,6 +1695,60 @@ impl TaskWorkspace {
             return Some(outcome);
         }
         None
+    }
+
+    fn handle_detail_delete_shortcut(
+        &self,
+        child_outcome: EventOutcome,
+        route: &EventRoute,
+        event: &TuiEvent,
+        ctx: &mut EventCtx<AppMsg>,
+    ) -> Option<EventOutcome> {
+        let route_keys = route.path.keys();
+        let detail_route = route_keys.first() == Some(&ChildKey::second())
+            && route_keys.get(1) == Some(&ChildKey::second());
+        let links_route = route_keys.iter().any(|key| key.as_str() == "links");
+        if child_outcome.handled()
+            || ctx.propagation() != Propagation::Continue
+            || !detail_route
+            || links_route
+            || !keys::TASK_DELETE_CTRL_X.matches(event)
+        {
+            return None;
+        }
+        let task_id = self.visible_selection.borrow().clone()?;
+        ctx.emit(AppMsg::OpenDeleteTask {
+            task_id,
+            return_focus: Some(ctx.current_path()),
+        });
+        ctx.stop_propagation();
+        Some(EventOutcome::Handled)
+    }
+
+    fn handle_detail_complete_shortcut(
+        &self,
+        child_outcome: EventOutcome,
+        route: &EventRoute,
+        event: &TuiEvent,
+        ctx: &mut EventCtx<AppMsg>,
+    ) -> Option<EventOutcome> {
+        let route_keys = route.path.keys();
+        let detail_route = route_keys.first() == Some(&ChildKey::second())
+            && route_keys.get(1) == Some(&ChildKey::second());
+        if child_outcome.handled()
+            || ctx.propagation() != Propagation::Continue
+            || !detail_route
+            || !keys::TASK_COMPLETE.matches(event)
+        {
+            return None;
+        }
+        let task_id = self.visible_selection.borrow().clone()?;
+        ctx.emit(AppMsg::OpenCompleteTask {
+            task_id,
+            return_focus: Some(ctx.current_path()),
+        });
+        ctx.stop_propagation();
+        Some(EventOutcome::Handled)
     }
 
     fn handle_task_agent_yank(
@@ -1589,7 +1811,7 @@ impl TuiNode<AppMsg> for TaskWorkspace {
         }
         self.sync_table_events(ctx);
         if !outcome.handled()
-            && let Some(outcome) = self.handle_task_shortcut_outside_table(event, ctx)
+            && let Some(outcome) = self.handle_task_shortcut_outside_table(event, None, ctx)
         {
             return outcome;
         }
@@ -1617,8 +1839,15 @@ impl TuiNode<AppMsg> for TaskWorkspace {
             ctx.focus(initial_task_table_focus_request());
         }
         self.sync_table_events(ctx);
+        if let Some(outcome) = self.handle_detail_delete_shortcut(outcome, route, event, ctx) {
+            return outcome;
+        }
+        if let Some(outcome) = self.handle_detail_complete_shortcut(outcome, route, event, ctx) {
+            return outcome;
+        }
         if !outcome.handled()
-            && let Some(outcome) = self.handle_task_shortcut_outside_table(event, ctx)
+            && let Some(outcome) =
+                self.handle_task_shortcut_outside_table(event, Some(ctx.current_path()), ctx)
         {
             return outcome;
         }
