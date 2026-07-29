@@ -38,7 +38,20 @@ impl<F, S> ManagementPane<F, S> {
         }
     }
 
-    #[cfg(test)]
+    pub(super) fn detail_visible(mut self, visible: bool) -> Self {
+        self.split = self.split.second_visible(visible);
+        self
+    }
+
+    pub(super) fn set_detail_visible(&mut self, visible: bool) -> bool {
+        self.split.set_second_visible(visible)
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn is_detail_visible(&self) -> bool {
+        self.split.is_second_visible()
+    }
+
     pub(super) fn first(&self) -> &F {
         self.split.first()
     }

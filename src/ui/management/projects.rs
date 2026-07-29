@@ -8,8 +8,8 @@ use tuicore::{
     ActivationMode, AnimationSettings, ChildKey, Column, DataView, DataViewTypedEvent, Dialog,
     DialogHost, EventCtx, EventOutcome, EventRoute, Flex, FlexItem, FocusCtx, FocusTarget, Key,
     KeyEvent, KeyModifiers, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx,
-    Paragraph, RenderCtx, SelectionMode, SelectionTrigger, TextInput, TextareaInput, TickResult,
-    TuiEvent, TuiNode,
+    RenderCtx, SeasonalEmptyState, SelectionMode, SelectionTrigger, TextInput, TextareaInput,
+    TickResult, TuiEvent, TuiNode,
 };
 
 use super::ManagementDialogKind;
@@ -21,6 +21,8 @@ use crate::{
     persistence_coordinator::PersistenceCommand,
     ui::save_status::SaveStatusLine,
 };
+
+const EMPTY_MESSAGE: &str = "No projects for this filter";
 
 type ProjectTable = DataView<Project, String>;
 type ProjectPatchSink = Rc<RefCell<Vec<ProjectPatch>>>;
@@ -83,17 +85,22 @@ impl ProjectsWorkspace {
         let rows = state.projects.clone();
         let people = state.people.clone();
         let selected_id = state.selected_project_id.clone();
-        let project = selected_id
-            .as_deref()
-            .and_then(|id| state.projects.iter().find(|project| project.id == id))
-            .cloned();
-        let error = selected_id
-            .as_deref()
-            .and_then(|id| state.project_save_error(id))
-            .map(str::to_string);
         drop(store);
         if table_people_changed {
-            *self.split.first_mut() = project_table(rows, &people, selected_id.as_deref());
+            let transform_mode = self.split.first().transform_mode();
+            let transform = self.split.first().transform_state().clone();
+            let highlighted_id = self.split.first().highlighted_id();
+            let mut table = project_table(rows, &people, selected_id.as_deref())
+                .empty_state(SeasonalEmptyState::new(EMPTY_MESSAGE));
+            table.set_transform_mode(transform_mode);
+            table.set_search_query(transform.search);
+            for filter in transform.filters {
+                table.set_filter(filter.column_id, filter.value);
+            }
+            if let Some(id) = highlighted_id {
+                table.highlight_id(&id);
+            }
+            *self.split.first_mut() = table;
             self.table_people = people_signature.clone();
         } else {
             self.split.first_mut().set_rows(rows);
@@ -103,7 +110,21 @@ impl ProjectsWorkspace {
             self.split.first_mut().select_id(id.clone());
         }
         self.split.first_mut().take_events();
-        if self.split.second().project_id.as_deref() != selected_id.as_deref()
+        let visible_id = self.split.first().highlighted_id();
+        let (project, error) = {
+            let store = self.context.store.borrow();
+            let state = store.state();
+            let project = visible_id
+                .as_deref()
+                .and_then(|id| state.projects.iter().find(|project| project.id == id))
+                .cloned();
+            let error = visible_id
+                .as_deref()
+                .and_then(|id| state.project_save_error(id))
+                .map(str::to_string);
+            (project, error)
+        };
+        if self.split.second().project_id.as_deref() != visible_id.as_deref()
             || (external_refresh && !protect_detail)
             || (detail_people_changed && !self.detail_draft_protected && !protect_detail)
         {
@@ -117,6 +138,7 @@ impl ProjectsWorkspace {
         } else {
             self.split.second_mut().set_save_error(error.as_deref());
         }
+        self.split.set_detail_visible(visible_id.is_some());
         self.observed_version = version;
         if !protect_detail {
             self.observed_external_refresh_version = external_refresh_version;
@@ -133,8 +155,15 @@ impl ProjectsWorkspace {
                     selected_changed |= self.select_project(id, ctx);
                     focus_detail |= matches!(event, DataViewTypedEvent::Activated { .. });
                 }
-                DataViewTypedEvent::HighlightChanged { row_id: None }
-                | DataViewTypedEvent::SelectionChanged { .. }
+                DataViewTypedEvent::HighlightChanged { row_id: None } => {
+                    let people = self.context.store.borrow().state().people.clone();
+                    self.split
+                        .second_mut()
+                        .set_project(None, &people, None, ctx);
+                    self.detail_draft_protected = false;
+                    selected_changed |= self.split.set_detail_visible(false);
+                }
+                DataViewTypedEvent::SelectionChanged { .. }
                 | DataViewTypedEvent::TransformChanged { .. } => {}
             }
         }
@@ -153,16 +182,24 @@ impl ProjectsWorkspace {
             .store
             .borrow_mut()
             .dispatch(AppEvent::SelectProject(id.to_string()));
-        if outcome.changed {
-            let store = self.context.store.borrow();
-            let state = store.state();
-            let project = state.projects.iter().find(|project| project.id == id);
-            let error = project.and_then(|project| state.project_save_error(&project.id));
-            self.split
-                .second_mut()
-                .set_project(project, &state.people, error, ctx);
-        }
-        outcome.changed
+        let store = self.context.store.borrow();
+        let state = store.state();
+        let project = state
+            .projects
+            .iter()
+            .find(|project| project.id == id)
+            .cloned();
+        let people = state.people.clone();
+        let error = project
+            .as_ref()
+            .and_then(|project| state.project_save_error(&project.id))
+            .map(str::to_string);
+        drop(store);
+        self.split
+            .second_mut()
+            .set_project(project.as_ref(), &people, error.as_deref(), ctx);
+        let visibility_changed = self.split.set_detail_visible(project.is_some());
+        outcome.changed || visibility_changed
     }
     fn sync_detail_changes(&mut self) -> bool {
         let patches = self.split.second_mut().take_patches();
@@ -208,13 +245,7 @@ impl ProjectsWorkspace {
         if outcome.handled() || !self.table_focused {
             return outcome;
         }
-        let selected = self
-            .context
-            .store
-            .borrow()
-            .state()
-            .selected_project_id
-            .clone();
+        let selected = self.split.first().highlighted_id();
         if let Some(entity_id) = selected
             && app_keymap::matches_any(
                 event,
@@ -421,10 +452,12 @@ fn project_split(context: &AppContext) -> ManagementPane<ProjectTable, ProjectDe
         project.and_then(|project| state.project_save_error(&project.id)),
     );
     ManagementPane::new(
-        project_table(state.projects.clone(), &state.people, selected),
+        project_table(state.projects.clone(), &state.people, selected)
+            .empty_state(SeasonalEmptyState::new(EMPTY_MESSAGE)),
         detail,
         ManagementDialogKind::Projects,
     )
+    .detail_visible(project.is_some())
 }
 
 fn project_table(rows: Vec<Project>, people: &[Person], selected: Option<&str>) -> ProjectTable {
@@ -565,11 +598,7 @@ fn project_detail_form(
     status: SaveStatusLine,
 ) -> Flex<AppMsg> {
     let Some(project) = project else {
-        return Flex::column().child(
-            "empty",
-            Paragraph::new("No project selected."),
-            FlexItem::fixed(1),
-        );
+        return Flex::column();
     };
     Flex::column()
         .gap(0)
@@ -836,6 +865,123 @@ mod tests {
                 entity_id,
             }] if entity_id == "project-1"
         ));
+    }
+
+    #[test]
+    fn delete_hotkey_does_nothing_when_search_has_no_highlighted_project() {
+        let project = Project::new(
+            "project-1".into(),
+            "CORE".into(),
+            "Core".into(),
+            String::new(),
+        );
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks: vec![],
+            people: vec![],
+            projects: vec![project],
+            tags: vec![],
+        });
+        let mut workspace = ProjectsWorkspace::new(context);
+        workspace.table_focused = true;
+        workspace.split.first_mut().set_search_query("App");
+        workspace.sync_table_events(&mut EventCtx::default());
+        let mut ctx = EventCtx::default();
+
+        let outcome = workspace.handle_workspace_event(
+            EventOutcome::Ignored,
+            &TuiEvent::Key(KeyEvent {
+                code: Key::Char('x'),
+                modifiers: KeyModifiers::CONTROL,
+            }),
+            &mut ctx,
+        );
+
+        assert!(!outcome.handled());
+        assert!(ctx.messages().is_empty());
+    }
+
+    #[test]
+    fn search_match_after_no_match_shows_different_project_detail() {
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks: vec![],
+            people: vec![],
+            projects: vec![
+                Project::new(
+                    "project-1".into(),
+                    "CORE".into(),
+                    "Core".into(),
+                    String::new(),
+                ),
+                Project::new(
+                    "project-2".into(),
+                    "APP".into(),
+                    "App".into(),
+                    String::new(),
+                ),
+            ],
+            tags: vec![],
+        });
+        let mut workspace = ProjectsWorkspace::new(context);
+        let mut ctx = EventCtx::default();
+
+        workspace.split.first_mut().set_search_query("nobody");
+        workspace.sync_table_events(&mut ctx);
+        workspace.split.first_mut().set_search_query("App");
+        workspace.sync_table_events(&mut ctx);
+
+        assert_eq!(
+            workspace.split.first().highlighted_id().as_deref(),
+            Some("project-2")
+        );
+        assert_eq!(
+            workspace.split.second().project_id.as_deref(),
+            Some("project-2")
+        );
+        assert!(workspace.split.is_detail_visible());
+    }
+
+    #[test]
+    fn person_refresh_preserves_project_search_and_visible_detail() {
+        let person = Person::new("person-1".into(), "Ada".into(), String::new());
+        let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+            tasks: vec![],
+            people: vec![person],
+            projects: vec![
+                Project::new(
+                    "project-1".into(),
+                    "CORE".into(),
+                    "Core".into(),
+                    String::new(),
+                ),
+                Project::new(
+                    "project-2".into(),
+                    "APP".into(),
+                    "App".into(),
+                    String::new(),
+                ),
+            ],
+            tags: vec![],
+        });
+        let mut workspace = ProjectsWorkspace::new(context);
+        workspace.split.first_mut().set_search_query("App");
+        workspace.sync_table_events(&mut EventCtx::default());
+        store.borrow_mut().dispatch(AppEvent::PatchPerson {
+            person_id: "person-1".into(),
+            patch: PersonPatch::Name("Grace".into()),
+        });
+
+        workspace.layout(Rect::new(0, 0, 100, 30), &mut LayoutCtx::new());
+
+        assert_eq!(workspace.split.first().transform_state().search, "App");
+        assert_eq!(
+            workspace.split.first().highlighted_id().as_deref(),
+            Some("project-2")
+        );
+        assert_eq!(
+            workspace.split.second().project_id.as_deref(),
+            Some("project-2")
+        );
+        assert!(workspace.split.is_detail_visible());
     }
 
     #[test]

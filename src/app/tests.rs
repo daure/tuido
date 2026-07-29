@@ -33,7 +33,7 @@ fn status_bar_enables_weather_and_exposes_forecast_menu() {
         STATUS_BAR_MENU_ITEMS.first(),
         Some(&StatusBarMenuItem::Custom {
             id: SETTINGS_MENU_ID,
-            label: "Settings",
+            label: " Settings",
         })
     );
 }
@@ -325,7 +325,9 @@ fn task_toolbar_shows_icon_view_label_and_new_binding() {
     for expected in [
         " Active",
         &keys::TASK_VIEW_MENU.label(),
+        &keys::TASK_LABEL_FILTER.label(),
         &keys::TASK_QUICK_CREATE.label(),
+        " Labels",
         "New",
     ] {
         assert!(text.contains(expected), "missing toolbar text: {expected}");
@@ -333,6 +335,68 @@ fn task_toolbar_shows_icon_view_label_and_new_binding() {
     assert!(!text.contains("View:"));
     assert!(!text.contains("Resolve"));
     assert!(!text.contains("Permanently"));
+}
+
+#[test]
+fn task_label_filter_uses_and_logic_after_state_filtering() {
+    let mut active_both = task_with("active-both", "Active both", TaskState::Todo);
+    active_both.tag_ids = vec!["api".into(), "urgent".into()];
+    let mut active_one = task_with("active-one", "Active one", TaskState::InProgress);
+    active_one.tag_ids = vec!["api".into()];
+    let mut backlog_both = task_with("backlog-both", "Backlog both", TaskState::Backlog);
+    backlog_both.tag_ids = vec!["api".into(), "urgent".into()];
+    let tasks = [active_both, active_one, backlog_both];
+    let labels = ["api".to_string(), "urgent".to_string()];
+
+    let active = task_rows_for_view(&tasks, TaskView::Active, &labels);
+    let backlog = task_rows_for_view(&tasks, TaskView::Backlog, &labels);
+
+    assert_eq!(
+        active
+            .iter()
+            .map(|task| task.id.as_str())
+            .collect::<Vec<_>>(),
+        ["active-both"]
+    );
+    assert_eq!(
+        backlog
+            .iter()
+            .map(|task| task.id.as_str())
+            .collect::<Vec<_>>(),
+        ["backlog-both"]
+    );
+}
+
+#[test]
+fn committed_label_filter_refreshes_workspace_rows() {
+    let mut both = task_with("both", "Both labels", TaskState::Todo);
+    both.tag_ids = vec!["api".into(), "urgent".into()];
+    let mut one = task_with("one", "One label", TaskState::InProgress);
+    one.tag_ids = vec!["api".into()];
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![both, one],
+        people: Vec::new(),
+        projects: Vec::new(),
+        tags: vec![
+            Tag::new("api".into(), "API".into()),
+            Tag::new("urgent".into(), "Urgent".into()),
+        ],
+    });
+    let mut workspace = TaskWorkspace::new(context);
+    *workspace.active_label_filter.borrow_mut() = vec!["api".into(), "urgent".into()];
+
+    assert!(workspace.sync_label_filter_change());
+
+    assert_eq!(
+        workspace
+            .table()
+            .rows()
+            .iter()
+            .map(|task| task.id.as_str())
+            .collect::<Vec<_>>(),
+        ["both"]
+    );
+    assert_eq!(workspace.detail().task_id.as_deref(), Some("both"));
 }
 
 #[test]
@@ -460,7 +524,11 @@ fn task_table_uses_persisted_rank_order() {
     newer_medium.rank = 2;
     older_medium.rank = 3;
     low.rank = 4;
-    let rows = task_rows_for_view(&[older_medium, high, newer_medium, low], TaskView::Active);
+    let rows = task_rows_for_view(
+        &[older_medium, high, newer_medium, low],
+        TaskView::Active,
+        &[],
+    );
     let mut table = task_table(rows, None);
     let area = Rect::new(0, 0, 100, 10);
     <TaskTable as TuiNode<AppMsg>>::layout(&mut table, area, &mut LayoutCtx::new());
@@ -948,9 +1016,7 @@ fn escape_from_task_toolbar_controls_focuses_data_view() {
             .find(|target| {
                 let path = target.path.keys();
                 path.iter().any(|part| part.as_str() == "view")
-                    && path
-                        .iter()
-                        .any(|part| part.as_str() == TASK_VIEW_MENU_TRIGGER)
+                    && path.iter().any(|part| part.as_str() == "trigger")
             })
             .expect("task filter button should be focusable")
             .path
@@ -1071,9 +1137,7 @@ fn task_view_menu_shortcut_opens_and_switches_to_snoozed() {
         .find(|target| {
             let path = target.path.keys();
             path.iter().any(|part| part.as_str() == "view")
-                && path
-                    .iter()
-                    .any(|part| part.as_str() == TASK_VIEW_MENU_TRIGGER)
+                && path.iter().any(|part| part.as_str() == "trigger")
         })
         .expect("view menu trigger should be focusable")
         .clone();
@@ -1098,9 +1162,7 @@ fn task_view_menu_shortcut_opens_and_switches_to_snoozed() {
         .find(|target| {
             let path = target.path.keys();
             path.iter().any(|part| part.as_str() == "view")
-                && path
-                    .iter()
-                    .any(|part| part.as_str() == TASK_VIEW_MENU_PANEL)
+                && path.iter().any(|part| part.as_str() == "menu")
         })
         .expect("open view menu search should be focusable")
         .clone();
@@ -1118,6 +1180,7 @@ fn task_view_menu_shortcut_opens_and_switches_to_snoozed() {
     assert_eq!(workspace.task_view, TaskView::Snoozed);
     workspace.layout(area, &mut LayoutCtx::new());
     let text = rendered_text(&workspace, area);
+    assert!(text.contains("󰒲 Snoozed"));
     assert!(text.contains("Snoozed work"));
     assert!(!text.contains("Active work"));
 }
@@ -1418,10 +1481,11 @@ fn detail_state_change_with_no_remaining_tasks_clears_detail() {
     workspace.layout(area, &mut LayoutCtx::new());
 
     let text = rendered_text(&workspace, area);
-    assert!(text.contains("No results found."));
-    assert!(text.contains("No task selected."));
+    assert!(text.contains("No tasks for this filter"));
+    assert!(!text.contains("No task selected."));
     assert_eq!(workspace.table().highlighted_id(), None);
     assert_eq!(workspace.detail().task_id, None);
+    assert!(!workspace.layout.second().is_second_visible());
 }
 
 #[path = "tests_workspace.rs"]

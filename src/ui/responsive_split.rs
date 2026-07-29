@@ -18,6 +18,7 @@ pub(crate) struct ResponsiveSplit<F, S> {
     breakpoint: u16,
     wide_ratio: (u16, u16),
     narrow_second_content: bool,
+    second_visible: bool,
     first_area: Rect,
     second_area: Rect,
 }
@@ -36,6 +37,7 @@ impl<F, S> ResponsiveSplit<F, S> {
             breakpoint,
             wide_ratio: (50, 50),
             narrow_second_content: false,
+            second_visible: true,
             first_area: Rect::default(),
             second_area: Rect::default(),
         }
@@ -49,6 +51,24 @@ impl<F, S> ResponsiveSplit<F, S> {
     pub(crate) fn narrow_second_content(mut self) -> Self {
         self.narrow_second_content = true;
         self
+    }
+
+    pub(crate) fn second_visible(mut self, visible: bool) -> Self {
+        self.second_visible = visible;
+        self
+    }
+
+    pub(crate) fn set_second_visible(&mut self, visible: bool) -> bool {
+        if self.second_visible == visible {
+            return false;
+        }
+        self.second_visible = visible;
+        true
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn is_second_visible(&self) -> bool {
+        self.second_visible
     }
 
     pub(crate) fn first(&self) -> &F {
@@ -92,6 +112,9 @@ where
 {
     fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
         let first = self.first.measure(proposal);
+        if !self.second_visible {
+            return first.normalized(proposal);
+        }
         let second = self.second.measure(proposal);
         let stacked = match proposal.width {
             AxisProposal::Exact(width) | AxisProposal::AtMost(width) => self.is_stacked(width),
@@ -115,6 +138,14 @@ where
     }
 
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
+        if !self.second_visible {
+            self.first_area = area;
+            self.second_area = Rect::default();
+            ctx.push_slot(ChildKey::first(), area, |ctx| {
+                self.first.layout(area, ctx);
+            });
+            return LayoutResult::new(area);
+        }
         let stacked = self.is_stacked(area.width);
         let direction = if stacked {
             Direction::Vertical
@@ -152,7 +183,9 @@ where
 
     fn render<'a>(&'a self, frame: &mut Frame, _area: Rect, ctx: &mut tuicore::RenderCtx<'a>) {
         self.first.render(frame, self.first_area, ctx);
-        self.second.render(frame, self.second_area, ctx);
+        if self.second_visible {
+            self.second.render(frame, self.second_area, ctx);
+        }
     }
 
     fn dispatch_event(
@@ -174,10 +207,11 @@ where
                 .dispatch_event(&route, event, ctx)
                 .bubble(ctx, |ctx| self.event(event, ctx));
         }
-        if let Some(route) = route
-            .path
-            .without_first_if(&ChildKey::second())
-            .map(EventRoute::new)
+        if self.second_visible
+            && let Some(route) = route
+                .path
+                .without_first_if(&ChildKey::second())
+                .map(EventRoute::new)
         {
             return self
                 .second
@@ -190,15 +224,20 @@ where
     fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<M>) {
         if let Some(target) = target.for_child(&ChildKey::first()) {
             self.first.dispatch_focus(&target, focused, ctx);
-        } else if let Some(target) = target.for_child(&ChildKey::second()) {
+        } else if self.second_visible
+            && let Some(target) = target.for_child(&ChildKey::second())
+        {
             self.second.dispatch_focus(&target, focused, ctx);
         }
     }
 
     fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
-        self.first
-            .tick(dt, settings)
-            .merge(self.second.tick(dt, settings))
+        let result = self.first.tick(dt, settings);
+        if self.second_visible {
+            result.merge(self.second.tick(dt, settings))
+        } else {
+            result
+        }
     }
 
     fn init(&mut self, ctx: &mut LifecycleCtx<M>) {
@@ -225,7 +264,40 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tuicore::Paragraph;
+    use ratatui::{Terminal, backend::TestBackend};
+    use std::{cell::Cell, rc::Rc};
+    use tuicore::{FocusId, Key, Paragraph, RenderCtx};
+
+    #[derive(Default)]
+    struct ProbeState {
+        layouts: Cell<usize>,
+        renders: Cell<usize>,
+        events: Cell<usize>,
+        focuses: Cell<usize>,
+    }
+
+    struct Probe(Rc<ProbeState>);
+
+    impl TuiNode<()> for Probe {
+        fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
+            self.0.layouts.set(self.0.layouts.get() + 1);
+            ctx.register_focusable(FocusId::new("probe"), area, true);
+            LayoutResult::new(area)
+        }
+
+        fn render<'a>(&'a self, _frame: &mut Frame, _area: Rect, _ctx: &mut RenderCtx<'a>) {
+            self.0.renders.set(self.0.renders.get() + 1);
+        }
+
+        fn event(&mut self, _event: &TuiEvent, _ctx: &mut EventCtx<()>) -> EventOutcome {
+            self.0.events.set(self.0.events.get() + 1);
+            EventOutcome::Handled
+        }
+
+        fn focus(&mut self, _target: Option<&FocusId>, _focused: bool, _ctx: &mut FocusCtx<()>) {
+            self.0.focuses.set(self.0.focuses.get() + 1);
+        }
+    }
 
     fn split() -> ResponsiveSplit<Paragraph, Paragraph> {
         ResponsiveSplit::master_detail(Paragraph::new("first"), Paragraph::new("second"))
@@ -295,5 +367,59 @@ mod tests {
         let (master, detail) = split.child_areas();
         assert_eq!(master.height, 2);
         assert_eq!(detail.height, 0);
+    }
+
+    #[test]
+    fn hidden_detail_gives_master_full_wide_and_narrow_areas_then_restores() {
+        for area in [Rect::new(2, 3, 120, 30), Rect::new(2, 3, 80, 30)] {
+            let mut split = split().second_visible(false);
+            <ResponsiveSplit<_, _> as TuiNode<()>>::layout(&mut split, area, &mut LayoutCtx::new());
+            assert_eq!(split.child_areas(), (area, Rect::default()));
+            assert!(!split.is_second_visible());
+
+            assert!(split.set_second_visible(true));
+            <ResponsiveSplit<_, _> as TuiNode<()>>::layout(&mut split, area, &mut LayoutCtx::new());
+            assert_ne!(split.child_areas().1, Rect::default());
+            assert!(split.is_second_visible());
+        }
+    }
+
+    #[test]
+    fn hidden_detail_is_not_laid_out_rendered_or_routed() {
+        let first_state = Rc::new(ProbeState::default());
+        let second_state = Rc::new(ProbeState::default());
+        let mut split = ResponsiveSplit::master_detail(
+            Probe(Rc::clone(&first_state)),
+            Probe(Rc::clone(&second_state)),
+        );
+        let area = Rect::new(0, 0, 120, 20);
+        let mut visible_layout = LayoutCtx::new();
+        split.layout(area, &mut visible_layout);
+        let second_target = visible_layout
+            .focus_targets()
+            .iter()
+            .find(|target| target.path.keys().first() == Some(&ChildKey::second()))
+            .expect("visible second probe should register focus")
+            .clone();
+        split.set_second_visible(false);
+        split.layout(area, &mut LayoutCtx::new());
+
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| split.render(frame, area, &mut RenderCtx::new()))
+            .unwrap();
+        split.dispatch_event(
+            &EventRoute::new(second_target.path.clone()),
+            &TuiEvent::Key(Key::Enter.into()),
+            &mut EventCtx::default(),
+        );
+        split.dispatch_focus(&second_target, true, &mut FocusCtx::default());
+
+        assert_eq!(first_state.layouts.get(), 2);
+        assert_eq!(second_state.layouts.get(), 1);
+        assert_eq!(first_state.renders.get(), 1);
+        assert_eq!(second_state.renders.get(), 0);
+        assert_eq!(second_state.events.get(), 0);
+        assert_eq!(second_state.focuses.get(), 0);
     }
 }

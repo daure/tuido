@@ -349,6 +349,7 @@ pub mod keys {
     pub const APP_PEOPLE_TAB: AppBinding = AppBinding::new_sequence("APP_PEOPLE_TAB", "pe");
     pub const TASK_QUICK_CREATE: AppBinding = AppBinding::new("TASK_QUICK_CREATE", "n");
     pub const TASK_VIEW_MENU: AppBinding = AppBinding::new("TASK_VIEW_MENU", "f");
+    pub const TASK_LABEL_FILTER: AppBinding = AppBinding::new("TASK_LABEL_FILTER", "a");
     pub const TASK_DELETE: AppBinding = AppBinding::new("TASK_DELETE", "delete");
     pub const TASK_DELETE_BACKSPACE: AppBinding = AppBinding::new("TASK_DELETE_X", "backspace");
     pub const TASK_DELETE_CTRL_X: AppBinding = AppBinding::new("TASK_DELETE_CTRL_X", "ctrl+x");
@@ -376,7 +377,7 @@ pub mod keys {
     pub const PROJECT_DESCRIPTION_EDITOR: AppBinding =
         AppBinding::new_sequence("PROJECT_DESCRIPTION_EDITOR", "do");
     pub const PROJECT_LEAD_FIELD: AppBinding = AppBinding::new_sequence("PROJECT_LEAD_FIELD", "ea");
-    pub const TAG_LABEL_FIELD: AppBinding = AppBinding::new_sequence("TAG_LABEL_FIELD", "la");
+    pub const TAG_LABEL_FIELD: AppBinding = AppBinding::new_sequence("TAG_LABEL_FIELD", "ab");
     pub const TASK_TITLE_FIELD: AppBinding = AppBinding::new_sequence("TASK_TITLE_FIELD", "ti");
     pub const TASK_DESCRIPTION_FIELD: AppBinding =
         AppBinding::new_sequence("TASK_DESCRIPTION_FIELD", "dd");
@@ -390,7 +391,7 @@ pub mod keys {
     pub const TASK_PROJECTS_FIELD: AppBinding =
         AppBinding::new_sequence("TASK_PROJECTS_FIELD", "pro");
     pub const TASK_TAGS_FIELD: AppBinding = AppBinding::new_sequence("TASK_TAGS_FIELD", "ta");
-    pub const TASK_LINKS_FIELD: AppBinding = AppBinding::new_sequence("TASK_LINKS_FIELD", "li");
+    pub const TASK_LINKS_FIELD: AppBinding = AppBinding::new_sequence("TASK_LINKS_FIELD", "ur");
     pub const TASK_LINK_DELETE: AppBinding = AppBinding::new("TASK_LINK_DELETE", "ctrl+x");
     pub const TASK_START_DATE_FIELD: AppBinding =
         AppBinding::new_sequence("TASK_START_DATE_FIELD", "sd");
@@ -484,6 +485,7 @@ pub mod keys {
         APP_PEOPLE_TAB,
         TASK_QUICK_CREATE,
         TASK_VIEW_MENU,
+        TASK_LABEL_FILTER,
         TASK_DELETE,
         TASK_DELETE_BACKSPACE,
         TASK_DELETE_CTRL_X,
@@ -607,6 +609,7 @@ pub mod keys {
             bindings: &[
                 TASK_QUICK_CREATE,
                 TASK_VIEW_MENU,
+                TASK_LABEL_FILTER,
                 TASK_DELETE,
                 TASK_DELETE_BACKSPACE,
                 TASK_DELETE_CTRL_X,
@@ -621,6 +624,7 @@ pub mod keys {
             name: "task detail",
             bindings: &[
                 TASK_COMPLETE,
+                TASK_LABEL_FILTER,
                 TASK_TITLE_FIELD,
                 TASK_DESCRIPTION_FIELD,
                 TASK_DESCRIPTION_EDITOR,
@@ -748,6 +752,7 @@ mod tests {
             ("TASK_PEOPLE_FIELD", "pe"),
             ("TASK_PROJECTS_FIELD", "pro"),
             ("TASK_TAGS_FIELD", "ta"),
+            ("TASK_LINKS_FIELD", "ur"),
             ("TASK_SNOOZED_UNTIL_FIELD", "su"),
         ];
 
@@ -775,7 +780,7 @@ mod tests {
             ("PROJECT_DESCRIPTION_FIELD", "dd"),
             ("PROJECT_DESCRIPTION_EDITOR", "do"),
             ("PROJECT_LEAD_FIELD", "ea"),
-            ("TAG_LABEL_FIELD", "la"),
+            ("TAG_LABEL_FIELD", "ab"),
         ];
 
         for (name, default) in expected {
@@ -789,9 +794,26 @@ mod tests {
     }
 
     #[test]
+    fn detail_hotkeys_leave_data_view_scroll_right_key_unclaimed() {
+        let keymap = AppKeymap::from_overrides(std::iter::empty::<(String, String)>()).unwrap();
+
+        for context in keys::CONTEXTS
+            .iter()
+            .filter(|context| matches!(context.name, "task detail" | "tag management"))
+        {
+            assert!(context.bindings.iter().all(|binding| {
+                !binding_pattern(*binding, &keymap.bindings[binding.name])
+                    .first()
+                    .is_some_and(|key| key == "l")
+            }));
+        }
+    }
+
+    #[test]
     fn task_and_management_shortcuts_use_requested_defaults() {
         let keymap = AppKeymap::from_overrides(std::iter::empty::<(String, String)>()).unwrap();
         for (name, expected) in [
+            ("TASK_LABEL_FILTER", "a"),
             ("TASK_SNOOZE", "ctrl+z"),
             ("TASK_COMPLETE", "ctrl+c"),
             ("TASK_DELETE_CTRL_X", "ctrl+x"),

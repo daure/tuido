@@ -7,8 +7,8 @@ use ratatui::{
 use tuicore::{
     ActivationMode, AnimationSettings, ChildKey, Column, DataView, DataViewTypedEvent, Dialog,
     DialogHost, EventCtx, EventOutcome, EventRoute, Flex, FlexItem, FocusCtx, FocusTarget,
-    LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, Paragraph, RenderCtx,
-    SelectionMode, SelectionTrigger, TextInput, TickResult, TuiEvent, TuiNode,
+    LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, RenderCtx,
+    SeasonalEmptyState, SelectionMode, SelectionTrigger, TextInput, TickResult, TuiEvent, TuiNode,
 };
 
 use super::ManagementDialogKind;
@@ -20,6 +20,8 @@ use crate::{
     persistence_coordinator::PersistenceCommand,
     ui::save_status::SaveStatusLine,
 };
+
+const EMPTY_MESSAGE: &str = "No tags for this filter";
 
 type TagTable = DataView<Tag, String>;
 type TagPatchSink = Rc<RefCell<Vec<TagPatch>>>;
@@ -70,14 +72,6 @@ impl TagsWorkspace {
         let external_refresh_version = state.external_refresh_version;
         let rows = state.tags.clone();
         let selected_id = state.selected_tag_id.clone();
-        let tag = selected_id
-            .as_deref()
-            .and_then(|id| state.tags.iter().find(|tag| tag.id == id))
-            .cloned();
-        let error = selected_id
-            .as_deref()
-            .and_then(|id| state.tag_save_error(id))
-            .map(str::to_string);
         drop(store);
         self.split.first_mut().set_rows(rows);
         if let Some(id) = selected_id.as_ref() {
@@ -85,7 +79,21 @@ impl TagsWorkspace {
             self.split.first_mut().select_id(id.clone());
         }
         self.split.first_mut().take_events();
-        if self.split.second().tag_id.as_deref() != selected_id.as_deref()
+        let visible_id = self.split.first().highlighted_id();
+        let (tag, error) = {
+            let store = self.context.store.borrow();
+            let state = store.state();
+            let tag = visible_id
+                .as_deref()
+                .and_then(|id| state.tags.iter().find(|tag| tag.id == id))
+                .cloned();
+            let error = visible_id
+                .as_deref()
+                .and_then(|id| state.tag_save_error(id))
+                .map(str::to_string);
+            (tag, error)
+        };
+        if self.split.second().tag_id.as_deref() != visible_id.as_deref()
             || (external_refresh && !protect_detail)
         {
             self.split.second_mut().set_tag(
@@ -96,6 +104,7 @@ impl TagsWorkspace {
         } else {
             self.split.second_mut().set_save_error(error.as_deref());
         }
+        self.split.set_detail_visible(visible_id.is_some());
         self.observed_version = version;
         if !protect_detail {
             self.observed_external_refresh_version = external_refresh_version;
@@ -112,8 +121,12 @@ impl TagsWorkspace {
                     selected_changed |= self.select_tag(id, ctx);
                     focus_detail |= matches!(event, DataViewTypedEvent::Activated { .. });
                 }
-                DataViewTypedEvent::HighlightChanged { row_id: None }
-                | DataViewTypedEvent::SelectionChanged { .. }
+                DataViewTypedEvent::HighlightChanged { row_id: None } => {
+                    self.split.second_mut().set_tag(None, None, ctx);
+                    self.detail_draft_protected = false;
+                    selected_changed |= self.split.set_detail_visible(false);
+                }
+                DataViewTypedEvent::SelectionChanged { .. }
                 | DataViewTypedEvent::TransformChanged { .. } => {}
             }
         }
@@ -132,14 +145,19 @@ impl TagsWorkspace {
             .store
             .borrow_mut()
             .dispatch(AppEvent::SelectTag(id.to_string()));
-        if outcome.changed {
-            let store = self.context.store.borrow();
-            let state = store.state();
-            let tag = state.tags.iter().find(|tag| tag.id == id);
-            let error = tag.and_then(|tag| state.tag_save_error(&tag.id));
-            self.split.second_mut().set_tag(tag, error, ctx);
-        }
-        outcome.changed
+        let store = self.context.store.borrow();
+        let state = store.state();
+        let tag = state.tags.iter().find(|tag| tag.id == id).cloned();
+        let error = tag
+            .as_ref()
+            .and_then(|tag| state.tag_save_error(&tag.id))
+            .map(str::to_string);
+        drop(store);
+        self.split
+            .second_mut()
+            .set_tag(tag.as_ref(), error.as_deref(), ctx);
+        let visibility_changed = self.split.set_detail_visible(tag.is_some());
+        outcome.changed || visibility_changed
     }
     fn sync_detail_changes(&mut self) -> bool {
         let patches = self.split.second_mut().take_patches();
@@ -185,7 +203,7 @@ impl TagsWorkspace {
         if outcome.handled() || !self.table_focused {
             return outcome;
         }
-        let selected = self.context.store.borrow().state().selected_tag_id.clone();
+        let selected = self.split.first().highlighted_id();
         if let Some(entity_id) = selected
             && app_keymap::matches_any(
                 event,
@@ -369,10 +387,11 @@ fn tag_split(context: &AppContext) -> ManagementPane<TagTable, TagDetailForm> {
     let tag = selected.and_then(|id| state.tags.iter().find(|tag| tag.id == id));
     let detail = TagDetailForm::new(tag, tag.and_then(|tag| state.tag_save_error(&tag.id)));
     ManagementPane::new(
-        tag_table(state.tags.clone(), selected),
+        tag_table(state.tags.clone(), selected).empty_state(SeasonalEmptyState::new(EMPTY_MESSAGE)),
         detail,
         ManagementDialogKind::Tags,
     )
+    .detail_visible(tag.is_some())
 }
 fn tag_table(rows: Vec<Tag>, selected: Option<&str>) -> TagTable {
     let mut table = DataView::new(rows, |row: &Tag| row.id.clone())
@@ -400,11 +419,7 @@ fn tag_detail_form(
     status: SaveStatusLine,
 ) -> Flex<AppMsg> {
     let Some(tag) = tag else {
-        return Flex::column().child(
-            "empty",
-            Paragraph::new("No tag selected."),
-            FlexItem::fixed(1),
-        );
+        return Flex::column();
     };
     Flex::column()
         .gap(0)
@@ -498,6 +513,60 @@ mod tests {
                 entity_id,
             }] if entity_id == "tag-1"
         ));
+    }
+
+    #[test]
+    fn delete_hotkey_does_nothing_when_search_has_no_highlighted_tag() {
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks: vec![],
+            people: vec![],
+            projects: vec![],
+            tags: vec![Tag::new("tag-1".into(), "api".into())],
+        });
+        let mut workspace = TagsWorkspace::new(context);
+        workspace.table_focused = true;
+        workspace.split.first_mut().set_search_query("frontend");
+        workspace.sync_table_events(&mut EventCtx::default());
+        let mut ctx = EventCtx::default();
+
+        let outcome = workspace.handle_workspace_event(
+            EventOutcome::Ignored,
+            &TuiEvent::Key(KeyEvent {
+                code: Key::Char('x'),
+                modifiers: KeyModifiers::CONTROL,
+            }),
+            &mut ctx,
+        );
+
+        assert!(!outcome.handled());
+        assert!(ctx.messages().is_empty());
+    }
+
+    #[test]
+    fn search_match_after_no_match_shows_different_tag_detail() {
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks: vec![],
+            people: vec![],
+            projects: vec![],
+            tags: vec![
+                Tag::new("tag-1".into(), "api".into()),
+                Tag::new("tag-2".into(), "frontend".into()),
+            ],
+        });
+        let mut workspace = TagsWorkspace::new(context);
+        let mut ctx = EventCtx::default();
+
+        workspace.split.first_mut().set_search_query("nobody");
+        workspace.sync_table_events(&mut ctx);
+        workspace.split.first_mut().set_search_query("frontend");
+        workspace.sync_table_events(&mut ctx);
+
+        assert_eq!(
+            workspace.split.first().highlighted_id().as_deref(),
+            Some("tag-2")
+        );
+        assert_eq!(workspace.split.second().tag_id.as_deref(), Some("tag-2"));
+        assert!(workspace.split.is_detail_visible());
     }
 
     #[test]

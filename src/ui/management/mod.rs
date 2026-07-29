@@ -78,4 +78,58 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn empty_management_workspaces_render_seasonal_content_without_details() {
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks: vec![],
+            people: vec![],
+            projects: vec![],
+            tags: vec![],
+        });
+        let cases: Vec<(Box<dyn TuiNode<AppMsg>>, &str, &[&str])> = vec![
+            (
+                Box::new(people::dialog(context.clone())),
+                "No people for this filter",
+                &["No person selected.", "About"],
+            ),
+            (
+                Box::new(projects::dialog(context.clone())),
+                "No projects for this filter",
+                &["No project selected.", "Description"],
+            ),
+            (
+                Box::new(tags::dialog(context)),
+                "No tags for this filter",
+                &["No tag selected.", "Label"],
+            ),
+        ];
+        let area = Rect::new(0, 0, 100, 30);
+
+        for (mut workspace, message, absent) in cases {
+            workspace.layout(area, &mut LayoutCtx::new());
+            let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+            terminal
+                .draw(|frame| workspace.render(frame, area, &mut RenderCtx::new()))
+                .unwrap();
+            let rendered = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+
+            assert!(rendered.contains(message), "missing {message}: {rendered}");
+            assert!(
+                ["󰧱", "", "󰲓", ""]
+                    .iter()
+                    .any(|ornament| rendered.contains(ornament)),
+                "missing seasonal ornament: {rendered}"
+            );
+            for label in absent {
+                assert!(!rendered.contains(label), "unexpected {label}: {rendered}");
+            }
+        }
+    }
 }

@@ -7,8 +7,9 @@ use ratatui::{
 use tuicore::{
     ActivationMode, AnimationSettings, ChildKey, Column, DataView, DataViewTypedEvent, Dialog,
     DialogHost, EventCtx, EventOutcome, EventRoute, Flex, FlexItem, FocusCtx, FocusTarget,
-    LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, Paragraph, RenderCtx,
-    SelectionMode, SelectionTrigger, TextInput, TextareaInput, TickResult, TuiEvent, TuiNode,
+    LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, RenderCtx,
+    SeasonalEmptyState, SelectionMode, SelectionTrigger, TextInput, TextareaInput, TickResult,
+    TuiEvent, TuiNode,
 };
 
 use super::ManagementDialogKind;
@@ -20,6 +21,8 @@ use crate::{
     persistence_coordinator::PersistenceCommand,
     ui::save_status::SaveStatusLine,
 };
+
+const EMPTY_MESSAGE: &str = "No people for this filter";
 
 type PersonTable = DataView<Person, String>;
 type PersonPatchSink = Rc<RefCell<Vec<PersonPatch>>>;
@@ -72,14 +75,6 @@ impl PeopleWorkspace {
         let external_refresh_version = state.external_refresh_version;
         let rows = state.people.clone();
         let selected_id = state.selected_person_id.clone();
-        let person = selected_id
-            .as_deref()
-            .and_then(|id| state.people.iter().find(|person| person.id == id))
-            .cloned();
-        let save_error = selected_id
-            .as_deref()
-            .and_then(|id| state.person_save_error(id))
-            .map(str::to_string);
         drop(store);
         self.split.first_mut().set_rows(rows);
         if let Some(id) = selected_id.as_ref() {
@@ -87,7 +82,21 @@ impl PeopleWorkspace {
             self.split.first_mut().select_id(id.clone());
         }
         self.split.first_mut().take_events();
-        if self.split.second().person_id.as_deref() != selected_id.as_deref()
+        let visible_id = self.split.first().highlighted_id();
+        let (person, save_error) = {
+            let store = self.context.store.borrow();
+            let state = store.state();
+            let person = visible_id
+                .as_deref()
+                .and_then(|id| state.people.iter().find(|person| person.id == id))
+                .cloned();
+            let error = visible_id
+                .as_deref()
+                .and_then(|id| state.person_save_error(id))
+                .map(str::to_string);
+            (person, error)
+        };
+        if self.split.second().person_id.as_deref() != visible_id.as_deref()
             || (external_refresh && !protect_detail)
         {
             self.split.second_mut().set_person(
@@ -100,6 +109,7 @@ impl PeopleWorkspace {
                 .second_mut()
                 .set_save_error(save_error.as_deref());
         }
+        self.split.set_detail_visible(visible_id.is_some());
         self.observed_version = version;
         if !protect_detail {
             self.observed_external_refresh_version = external_refresh_version;
@@ -117,8 +127,12 @@ impl PeopleWorkspace {
                     selected_changed |= self.select_person(id, ctx);
                     focus_detail |= matches!(event, DataViewTypedEvent::Activated { .. });
                 }
-                DataViewTypedEvent::HighlightChanged { row_id: None }
-                | DataViewTypedEvent::SelectionChanged { .. }
+                DataViewTypedEvent::HighlightChanged { row_id: None } => {
+                    self.split.second_mut().set_person(None, None, ctx);
+                    self.detail_draft_protected = false;
+                    selected_changed |= self.split.set_detail_visible(false);
+                }
+                DataViewTypedEvent::SelectionChanged { .. }
                 | DataViewTypedEvent::TransformChanged { .. } => {}
             }
         }
@@ -138,14 +152,19 @@ impl PeopleWorkspace {
             .store
             .borrow_mut()
             .dispatch(AppEvent::SelectPerson(id.to_string()));
-        if outcome.changed {
-            let store = self.context.store.borrow();
-            let state = store.state();
-            let person = state.people.iter().find(|person| person.id == id);
-            let error = person.and_then(|person| state.person_save_error(&person.id));
-            self.split.second_mut().set_person(person, error, ctx);
-        }
-        outcome.changed
+        let store = self.context.store.borrow();
+        let state = store.state();
+        let person = state.people.iter().find(|person| person.id == id).cloned();
+        let error = person
+            .as_ref()
+            .and_then(|person| state.person_save_error(&person.id))
+            .map(str::to_string);
+        drop(store);
+        self.split
+            .second_mut()
+            .set_person(person.as_ref(), error.as_deref(), ctx);
+        let visibility_changed = self.split.set_detail_visible(person.is_some());
+        outcome.changed || visibility_changed
     }
 
     fn sync_detail_changes(&mut self) -> bool {
@@ -193,13 +212,7 @@ impl PeopleWorkspace {
         if outcome.handled() || !self.table_focused {
             return outcome;
         }
-        let selected = self
-            .context
-            .store
-            .borrow()
-            .state()
-            .selected_person_id
-            .clone();
+        let selected = self.split.first().highlighted_id();
         if let Some(entity_id) = selected
             && app_keymap::matches_any(
                 event,
@@ -394,10 +407,12 @@ fn person_split(context: &AppContext) -> ManagementPane<PersonTable, PersonDetai
         person.and_then(|person| state.person_save_error(&person.id)),
     );
     ManagementPane::new(
-        person_table(state.people.clone(), selected),
+        person_table(state.people.clone(), selected)
+            .empty_state(SeasonalEmptyState::new(EMPTY_MESSAGE)),
         detail,
         ManagementDialogKind::People,
     )
+    .detail_visible(person.is_some())
 }
 
 fn person_table(rows: Vec<Person>, selected_id: Option<&str>) -> PersonTable {
@@ -442,11 +457,7 @@ fn person_detail_form(
     status: SaveStatusLine,
 ) -> Flex<AppMsg> {
     let Some(person) = person else {
-        return Flex::column().child(
-            "empty",
-            Paragraph::new("No person selected."),
-            FlexItem::fixed(1),
-        );
+        return Flex::column();
     };
     Flex::column()
         .gap(0)
@@ -829,5 +840,112 @@ mod tests {
             workspace.split.second().person_id.as_deref(),
             Some("person-2")
         );
+    }
+
+    #[test]
+    fn search_without_matches_hides_detail_and_clear_restores_it() {
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks: vec![],
+            people: vec![Person::new("person-1".into(), "Ada".into(), String::new())],
+            projects: vec![],
+            tags: vec![],
+        });
+        let mut workspace = PeopleWorkspace::new(context);
+        let mut ctx = EventCtx::default();
+
+        workspace.split.first_mut().set_search_query("Grace");
+        workspace.sync_table_events(&mut ctx);
+        assert_eq!(workspace.split.first().highlighted_id(), None);
+        assert_eq!(workspace.split.second().person_id, None);
+        assert!(!workspace.split.is_detail_visible());
+
+        workspace.split.first_mut().clear_search();
+        workspace.sync_table_events(&mut ctx);
+        assert_eq!(
+            workspace.split.first().highlighted_id().as_deref(),
+            Some("person-1")
+        );
+        assert_eq!(
+            workspace.split.second().person_id.as_deref(),
+            Some("person-1")
+        );
+        assert!(workspace.split.is_detail_visible());
+    }
+
+    #[test]
+    fn delete_hotkey_does_nothing_when_search_has_no_highlighted_person() {
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks: vec![],
+            people: vec![Person::new("person-1".into(), "Ada".into(), String::new())],
+            projects: vec![],
+            tags: vec![],
+        });
+        let mut workspace = PeopleWorkspace::new(context);
+        workspace.table_focused = true;
+        workspace.split.first_mut().set_search_query("Grace");
+        workspace.sync_table_events(&mut EventCtx::default());
+        let mut ctx = EventCtx::default();
+
+        let outcome = workspace.handle_workspace_event(
+            EventOutcome::Ignored,
+            &TuiEvent::Key(KeyEvent {
+                code: Key::Char('x'),
+                modifiers: KeyModifiers::CONTROL,
+            }),
+            &mut ctx,
+        );
+
+        assert!(!outcome.handled());
+        assert!(ctx.messages().is_empty());
+    }
+
+    #[test]
+    fn search_match_after_no_match_shows_different_person_detail() {
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks: vec![],
+            people: vec![
+                Person::new("person-1".into(), "Ada".into(), String::new()),
+                Person::new("person-2".into(), "Grace".into(), String::new()),
+            ],
+            projects: vec![],
+            tags: vec![],
+        });
+        let mut workspace = PeopleWorkspace::new(context);
+        let mut ctx = EventCtx::default();
+
+        workspace.split.first_mut().set_search_query("nobody");
+        workspace.sync_table_events(&mut ctx);
+        workspace.split.first_mut().set_search_query("Grace");
+        workspace.sync_table_events(&mut ctx);
+
+        assert_eq!(
+            workspace.split.first().highlighted_id().as_deref(),
+            Some("person-2")
+        );
+        assert_eq!(
+            workspace.split.second().person_id.as_deref(),
+            Some("person-2")
+        );
+        assert!(workspace.split.is_detail_visible());
+    }
+
+    #[test]
+    fn deleting_final_person_hides_detail() {
+        let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+            tasks: vec![],
+            people: vec![Person::new("person-1".into(), "Ada".into(), String::new())],
+            projects: vec![],
+            tags: vec![],
+        });
+        let mut workspace = PeopleWorkspace::new(context);
+        store
+            .borrow_mut()
+            .dispatch(AppEvent::PersonDeleted("person-1".into()));
+
+        workspace.layout(Rect::new(0, 0, 100, 30), &mut LayoutCtx::new());
+
+        assert_eq!(workspace.split.first().highlighted_id(), None);
+        assert_eq!(workspace.split.second().person_id, None);
+        assert!(!workspace.split.is_detail_visible());
     }
 }

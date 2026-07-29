@@ -34,6 +34,80 @@ fn task_table_hides_column_headers() {
 }
 
 #[test]
+fn empty_task_table_centers_seasonal_message_and_ornament() {
+    let table = task_table_with_copy_context_on(
+        Vec::new(),
+        None,
+        TaskCopyContext::default(),
+        time::macros::date!(2026 - 12 - 01),
+    );
+    let area = Rect::new(0, 0, 40, 9);
+    let mut terminal =
+        Terminal::new(TestBackend::new(area.width, area.height)).expect("terminal should build");
+    terminal
+        .draw(|frame| table.render(frame, area, &mut RenderCtx::new()))
+        .expect("task table should render");
+    let buffer = terminal.backend().buffer();
+    let line = |y| {
+        (0..area.width)
+            .map(|x| buffer.cell((x, y)).unwrap().symbol())
+            .collect::<String>()
+    };
+
+    assert_eq!(line(3), "        No tasks for this filter        ");
+    assert!(line(4).trim().is_empty());
+    assert_eq!(line(5).trim(), "╶┄ ✧ ·  · ✧ ┄╴");
+}
+
+#[test]
+fn empty_task_workspace_collapses_detail_and_gives_table_full_pane() {
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: Vec::new(),
+        people: Vec::new(),
+        projects: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut workspace = TaskWorkspace::new(context);
+    let area = Rect::new(0, 0, 120, 30);
+    workspace.layout(area, &mut LayoutCtx::new());
+
+    let text = rendered_text(&workspace, area);
+    let (table_area, detail_area) = workspace.layout.second().child_areas();
+    assert_eq!(table_area, Rect::new(0, 1, 120, 29));
+    assert_eq!(detail_area, Rect::default());
+    assert!(text.contains("No tasks for this filter"));
+    assert!(!text.contains("No task selected."));
+}
+
+#[test]
+fn task_search_hides_detail_and_clearing_search_restores_it() {
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![test_task()],
+        people: Vec::new(),
+        projects: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut workspace = TaskWorkspace::new(context);
+    let mut ctx = EventCtx::default();
+
+    workspace.table_mut().set_search_query("no match");
+    workspace.sync_table_events(&mut ctx);
+    assert_eq!(workspace.table().highlighted_id(), None);
+    assert_eq!(workspace.visible_selection.borrow().as_deref(), None);
+    assert_eq!(workspace.detail().task_id, None);
+    assert!(!workspace.layout.second().is_second_visible());
+
+    workspace.table_mut().clear_search();
+    workspace.sync_table_events(&mut ctx);
+    assert_eq!(
+        workspace.table().highlighted_id().as_deref(),
+        Some("task-1")
+    );
+    assert_eq!(workspace.detail().task_id.as_deref(), Some("task-1"));
+    assert!(workspace.layout.second().is_second_visible());
+}
+
+#[test]
 fn hidden_task_cannot_be_deleted_from_empty_active_view() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![task_with("backlog", "Backlog work", TaskState::Backlog)],
@@ -1035,7 +1109,7 @@ fn completed_task_moves_from_in_progress_to_archived_view() {
 
     let text = rendered_text(&workspace, area);
     assert!(!text.contains("Original"));
-    assert!(text.contains("No results found."));
+    assert!(text.contains("No tasks for this filter"));
 
     *workspace.pending_task_view.borrow_mut() = Some(TaskView::Archived);
     assert!(workspace.sync_task_view_change());

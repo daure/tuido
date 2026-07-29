@@ -1,5 +1,8 @@
 use super::*;
 
+#[cfg(test)]
+use tuicore::SeasonalGlyphs;
+
 pub(super) struct TaskDetailForm {
     pub(super) root: Flex<AppMsg>,
     pub(super) task_id: Option<String>,
@@ -141,8 +144,11 @@ impl TuiNode<AppMsg> for TaskDetailForm {
 pub(super) fn task_toolbar(
     pending_view: TaskViewChange,
     active_view: ActiveTaskView,
+    tags: &[Tag],
+    active_label_filter: ActiveLabelFilter,
 ) -> Flex<AppMsg> {
     let view = TaskViewMenu::new(pending_view, active_view);
+    let labels = label_filter_dropdown(tags, active_label_filter);
     let new_task = Button::new("New")
         .hotkey(keys::TASK_QUICK_CREATE.hotkey())
         .on_press(|| AppMsg::OpenCreateTask);
@@ -151,20 +157,39 @@ pub(super) fn task_toolbar(
         .align(CrossAlign::Center)
         .gap(1)
         .child("view", view, FlexItem::content())
+        .child("labels", labels, FlexItem::content())
         .child("space", Paragraph::new(""), FlexItem::fill(1))
         .child("new", new_task, FlexItem::content())
 }
 
-pub(super) fn task_split(store: &AppStore, task_view: TaskView) -> TaskPane {
+pub(super) fn label_filter_dropdown(
+    tags: &[Tag],
+    active_filter: ActiveLabelFilter,
+) -> Dropdown<Tag, String> {
+    let selected = active_filter.borrow().clone();
+    Dropdown::multi(tags.to_vec(), |tag| tag.id.clone(), |tag| tag.label.clone())
+        .placeholder(" Labels")
+        .hotkey(keys::TASK_LABEL_FILTER.hotkey())
+        .selected(selected)
+        .search_mode(DropdownSearchMode::Contains)
+        .commit_mode(DropdownCommitMode::Explicit)
+        .variant(DropdownVariant::Filled)
+        .max_popup_height(12)
+        .on_select(move |ids| *active_filter.borrow_mut() = ids)
+}
+
+pub(super) fn task_split(
+    store: &AppStore,
+    task_view: TaskView,
+    label_filter: &[String],
+) -> TaskPane {
     let store_ref = store.borrow();
     let state = store_ref.state();
-    let rows = task_rows_for_view(&state.tasks, task_view);
-    let selected = state.selected_task_id.as_deref().filter(|id| {
-        state
-            .tasks
-            .iter()
-            .any(|task| task.id == **id && task_view.contains(task))
-    });
+    let rows = task_rows_for_view(&state.tasks, task_view, label_filter);
+    let selected = state
+        .selected_task_id
+        .as_deref()
+        .filter(|id| rows.iter().any(|task| task.id == **id));
     let copy_context = TaskCopyContext::new(&state.people, &state.projects, &state.tags);
     let table = task_table_with_copy_context(rows, selected, copy_context);
     let selected_task = selected.and_then(|id| state.tasks.iter().find(|task| task.id == id));
@@ -176,13 +201,22 @@ pub(super) fn task_split(store: &AppStore, task_view: TaskView) -> TaskPane {
         &state.tags,
         save_error,
     );
-    ResponsiveSplit::master_detail(table, detail)
+    ResponsiveSplit::master_detail(table, detail).second_visible(selected_task.is_some())
 }
 
-pub(super) fn task_rows_for_view(tasks: &[Task], task_view: TaskView) -> Vec<TaskRow> {
+pub(super) fn task_rows_for_view(
+    tasks: &[Task],
+    task_view: TaskView,
+    label_filter: &[String],
+) -> Vec<TaskRow> {
     let mut rows = tasks
         .iter()
-        .filter(|task| task_view.contains(task))
+        .filter(|task| {
+            task_view.contains(task)
+                && label_filter
+                    .iter()
+                    .all(|tag_id| task.tag_ids.contains(tag_id))
+        })
         .cloned()
         .collect::<Vec<_>>();
     rows.sort_by_key(|task| task.rank);
@@ -199,6 +233,37 @@ pub(super) fn task_table_with_copy_context(
     selected_id: Option<&str>,
     copy_context: TaskCopyContext,
 ) -> TaskTable {
+    task_table_with_copy_context_and_empty(
+        rows,
+        selected_id,
+        copy_context,
+        SeasonalEmptyState::new("No tasks for this filter"),
+    )
+}
+
+#[cfg(test)]
+pub(super) fn task_table_with_copy_context_on(
+    rows: Vec<TaskRow>,
+    selected_id: Option<&str>,
+    copy_context: TaskCopyContext,
+    date: Date,
+) -> TaskTable {
+    task_table_with_copy_context_and_empty(
+        rows,
+        selected_id,
+        copy_context,
+        SeasonalEmptyState::new("No tasks for this filter")
+            .date(date)
+            .glyphs(SeasonalGlyphs::NerdFont),
+    )
+}
+
+fn task_table_with_copy_context_and_empty(
+    rows: Vec<TaskRow>,
+    selected_id: Option<&str>,
+    copy_context: TaskCopyContext,
+    empty_state: SeasonalEmptyState,
+) -> TaskTable {
     let mut table = ListControl::new_fields(
         rows,
         |row: &TaskRow| row.id.clone(),
@@ -206,6 +271,7 @@ pub(super) fn task_table_with_copy_context(
         |_, _| unreachable!("task creation uses the task dialog"),
     )
     .copy_with(move |row| copy_context.export(row))
+    .empty_state(empty_state)
     .hotkey(keys::TASK_AGENT_YANK.hotkey())
     .action_bar(true)
     .panel_visible(false)
@@ -414,11 +480,7 @@ pub(super) fn detail_form(
     save_status: SaveStatusLine,
 ) -> Flex<AppMsg> {
     let Some(task) = task else {
-        return Flex::<AppMsg>::column().child(
-            "empty",
-            Paragraph::new("No task selected."),
-            FlexItem::fixed(1),
-        );
+        return Flex::<AppMsg>::column();
     };
 
     let status_fields = Flex::<AppMsg>::row()

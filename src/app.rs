@@ -32,13 +32,14 @@ use tuicore::{
     ActivationMode, AnimationSettings, AxisProposal, Button, CellContext, ChildKey, ChipColorRole,
     Column, ConfirmationDialog, ConfirmationDialogOutcome, CrossAlign, DataView,
     DataViewTypedEvent, DatePickerDropdown, DateTimePickerDropdown, Dialog, DialogBackdrop,
-    DialogHost, DialogLayer, Dropdown, DropdownCommitMode, DropdownSearchMode, EventCtx,
-    EventOutcome, EventRoute, Flex, FlexItem, FocusCtx, FocusId, FocusRequest, FocusTarget,
-    HotkeyEvent, HotkeyLabelMode, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint,
-    LifecycleCtx, ListControl, ListControlEvent, ListControlField, ListControlKeyBindings, Menu,
-    MenuItem, MenuSearchMode, Paragraph, Propagation, RenderCtx, SelectedTag, SelectionMode,
-    SelectionTrigger, Split, StatusBar, StatusBarMenuItem, Store, Tab, Tabs, TabsVariant, TagInput,
-    TagInputEvent, TextInput, TextareaInput, TickResult, TreeApp, TreePath, TuiEvent, TuiNode,
+    DialogHost, DialogLayer, Dropdown, DropdownCommitMode, DropdownSearchMode, DropdownVariant,
+    EventCtx, EventOutcome, EventRoute, Flex, FlexItem, FocusCtx, FocusId, FocusRequest,
+    FocusTarget, HotkeyEvent, HotkeyLabelMode, LayoutCtx, LayoutProposal, LayoutResult,
+    LayoutSizeHint, LifecycleCtx, ListControl, ListControlEvent, ListControlField,
+    ListControlKeyBindings, MenuButton, MenuItem, Paragraph, Propagation, RenderCtx,
+    SeasonalEmptyState, SelectedTag, SelectionMode, SelectionTrigger, Split, StatusBar,
+    StatusBarMenuItem, Store, Tab, Tabs, TabsVariant, TagInput, TagInputEvent,
+    TextInput, TextareaInput, TickResult, TreeApp, TreePath, TuiEvent, TuiNode,
     WeatherProviderConfig,
 };
 use uuid::Uuid;
@@ -56,19 +57,19 @@ const SETTINGS_MENU_ID: &str = "settings";
 const STATUS_BAR_MENU_ITEMS: [StatusBarMenuItem; 6] = [
     StatusBarMenuItem::Custom {
         id: SETTINGS_MENU_ID,
-        label: "Settings",
+        label: " Settings",
     },
     StatusBarMenuItem::Custom {
         id: PEOPLE_MENU_ID,
-        label: "People",
+        label: " People",
     },
     StatusBarMenuItem::Custom {
         id: PROJECTS_MENU_ID,
-        label: "Projects",
+        label: "󰲋 Projects",
     },
     StatusBarMenuItem::Custom {
         id: TAGS_MENU_ID,
-        label: "Tags",
+        label: " Tags",
     },
     StatusBarMenuItem::Theme,
     StatusBarMenuItem::WeatherForecast,
@@ -995,6 +996,7 @@ type TaskPane = ResponsiveSplit<TaskTable, TaskDetail>;
 type TaskWorkspaceLayout = Split<Flex<AppMsg>, TaskPane>;
 type TaskViewChange = Rc<RefCell<Option<TaskView>>>;
 type ActiveTaskView = Rc<RefCell<TaskView>>;
+type ActiveLabelFilter = Rc<RefCell<Vec<String>>>;
 type VisibleTaskSelection = Rc<RefCell<Option<String>>>;
 type PatchSink = Rc<RefCell<Vec<TaskPatch>>>;
 
@@ -1129,12 +1131,8 @@ impl TaskView {
     }
 }
 
-const TASK_VIEW_MENU_TRIGGER: &str = "trigger";
-const TASK_VIEW_MENU_PANEL: &str = "menu";
-
 struct TaskViewMenu {
-    trigger: Button<AppMsg>,
-    menu: Menu<TaskView>,
+    menu_button: MenuButton<TaskView, AppMsg>,
     pending_view: TaskViewChange,
     active_view: ActiveTaskView,
 }
@@ -1143,27 +1141,26 @@ impl TaskViewMenu {
     fn new(pending_view: TaskViewChange, active_view: ActiveTaskView) -> Self {
         let selected = *active_view.borrow();
         let hotkey = keys::TASK_VIEW_MENU.hotkey();
-        let trigger = Button::new(selected.menu_label())
-            .hotkey(hotkey.clone())
-            .hotkey_label_mode(HotkeyLabelMode::Inline);
-        let menu = Menu::new(TaskView::OPTIONS.map(|view| MenuItem::new(view, view.menu_label())))
-            .search_mode(MenuSearchMode::Fuzzy)
-            .visible_items(TaskView::OPTIONS.len() as u16)
-            .min_popup_width(20)
-            .trigger_hotkey(hotkey);
+        let menu_button = MenuButton::new(
+            selected.menu_label(),
+            TaskView::OPTIONS.map(|view| MenuItem::new(view, view.menu_label())),
+        )
+        .visible_items(TaskView::OPTIONS.len() as u16)
+        .min_popup_width(20)
+        .hotkey(hotkey)
+        .hotkey_label_mode(HotkeyLabelMode::Inline);
         Self {
-            trigger,
-            menu,
+            menu_button,
             pending_view,
             active_view,
         }
     }
 
     fn sync_activated(&mut self, ctx: &mut EventCtx<AppMsg>) {
-        let Some(view) = self.menu.take_activated().into_iter().last() else {
+        let Some(view) = self.menu_button.take_activated().into_iter().last() else {
             return;
         };
-        self.trigger.set_label(view.menu_label());
+        self.menu_button.set_label(view.menu_label());
         *self.active_view.borrow_mut() = view;
         *self.pending_view.borrow_mut() = Some(view);
         ctx.request_layout();
@@ -1173,33 +1170,21 @@ impl TaskViewMenu {
 
 impl TuiNode<AppMsg> for TaskViewMenu {
     fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
-        self.trigger.measure(proposal)
+        self.menu_button.measure(proposal)
     }
 
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
-        self.trigger
+        self.menu_button
             .set_label(self.active_view.borrow().menu_label());
-        ctx.push_slot(ChildKey::new(TASK_VIEW_MENU_TRIGGER), area, |ctx| {
-            self.trigger.layout(area, ctx);
-        });
-        ctx.push_slot(ChildKey::new(TASK_VIEW_MENU_PANEL), area, |ctx| {
-            <Menu<TaskView> as TuiNode<AppMsg>>::layout(&mut self.menu, area, ctx);
-        });
-        LayoutResult::new(area)
+        self.menu_button.layout(area, ctx)
     }
 
     fn render<'a>(&'a self, frame: &mut Frame, area: Rect, ctx: &mut RenderCtx<'a>) {
-        self.trigger.render(frame, area);
-        self.menu.render(frame, area, ctx);
+        self.menu_button.render(frame, area, ctx);
     }
 
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<AppMsg>) -> EventOutcome {
-        if !self.menu.is_open() && keys::TASK_VIEW_MENU.matches(event) {
-            self.menu.open_with_context(ctx);
-            ctx.stop_propagation();
-            return EventOutcome::Handled;
-        }
-        let outcome = self.menu.event(event, ctx);
+        let outcome = self.menu_button.event(event, ctx);
         self.sync_activated(ctx);
         outcome
     }
@@ -1210,70 +1195,33 @@ impl TuiNode<AppMsg> for TaskViewMenu {
         event: &TuiEvent,
         ctx: &mut EventCtx<AppMsg>,
     ) -> EventOutcome {
-        if route.path.is_empty() {
-            return self.event(event, ctx);
-        }
-        let trigger_key = ChildKey::new(TASK_VIEW_MENU_TRIGGER);
-        if let Some(route) = route
-            .path
-            .without_first_if(&trigger_key)
-            .map(EventRoute::new)
-        {
-            let outcome = self.trigger.dispatch_event(&route, event, ctx);
-            if outcome.handled() {
-                self.menu.toggle_with_context(ctx);
-            }
-            return outcome;
-        }
-        let panel_key = ChildKey::new(TASK_VIEW_MENU_PANEL);
-        let Some(route) = route.path.without_first_if(&panel_key).map(EventRoute::new) else {
-            return EventOutcome::Ignored;
-        };
-        let outcome = self.menu.dispatch_event(&route, event, ctx);
+        let outcome = self.menu_button.dispatch_event(route, event, ctx);
         self.sync_activated(ctx);
         outcome
     }
 
     fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<AppMsg>) {
-        let trigger_key = ChildKey::new(TASK_VIEW_MENU_TRIGGER);
-        if let Some(target) = target.for_child(&trigger_key) {
-            self.trigger.dispatch_focus(&target, focused, ctx);
-            return;
-        }
-        let panel_key = ChildKey::new(TASK_VIEW_MENU_PANEL);
-        if let Some(target) = target.for_child(&panel_key) {
-            self.menu.dispatch_focus(&target, focused, ctx);
-        }
+        self.menu_button.dispatch_focus(target, focused, ctx);
     }
 
     fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
-        self.trigger
-            .tick(dt, settings)
-            .merge(<Menu<TaskView> as TuiNode<AppMsg>>::tick(
-                &mut self.menu,
-                dt,
-                settings,
-            ))
+        self.menu_button.tick(dt, settings)
     }
 
     fn init(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
-        self.trigger.init(ctx);
-        self.menu.init(ctx);
+        self.menu_button.init(ctx);
     }
 
     fn mount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
-        self.trigger.mount(ctx);
-        self.menu.mount(ctx);
+        self.menu_button.mount(ctx);
     }
 
     fn unmount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
-        self.menu.unmount(ctx);
-        self.trigger.unmount(ctx);
+        self.menu_button.unmount(ctx);
     }
 
     fn destroy(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
-        self.menu.destroy(ctx);
-        self.trigger.destroy(ctx);
+        self.menu_button.destroy(ctx);
     }
 }
 
@@ -1283,7 +1231,10 @@ struct TaskWorkspace {
     task_view: TaskView,
     pending_task_view: TaskViewChange,
     active_task_view: ActiveTaskView,
+    label_filter: Vec<String>,
+    active_label_filter: ActiveLabelFilter,
     known_task_ids: Vec<String>,
+    known_tags: Vec<(String, String)>,
     visible_task_ids: Vec<String>,
     visible_selection: VisibleTaskSelection,
     table_focused: bool,
@@ -1302,7 +1253,8 @@ impl TaskWorkspace {
     fn new(context: AppContext) -> Self {
         let task_view = TaskView::Active;
         let state = context.store.borrow().state().clone();
-        let rows = task_rows_for_view(&state.tasks, task_view);
+        let label_filter = Vec::new();
+        let rows = task_rows_for_view(&state.tasks, task_view, &label_filter);
         let selected_task_id = rows.first().map(|task| task.id.clone());
         let visible_task_ids = rows.iter().map(|task| task.id.clone()).collect();
         if let Some(task_id) = selected_task_id.as_ref()
@@ -1316,9 +1268,15 @@ impl TaskWorkspace {
 
         let pending_task_view = Rc::new(RefCell::new(None));
         let active_task_view = Rc::new(RefCell::new(task_view));
+        let active_label_filter = Rc::new(RefCell::new(label_filter.clone()));
         let visible_selection = Rc::new(RefCell::new(selected_task_id.clone()));
-        let toolbar = task_toolbar(Rc::clone(&pending_task_view), Rc::clone(&active_task_view));
-        let pane = task_split(&context.store, task_view);
+        let toolbar = task_toolbar(
+            Rc::clone(&pending_task_view),
+            Rc::clone(&active_task_view),
+            &state.tags,
+            Rc::clone(&active_label_filter),
+        );
+        let pane = task_split(&context.store, task_view, &label_filter);
         let layout =
             Split::vertical(toolbar, pane).constraints(Constraint::Length(1), Constraint::Min(1));
         let observed_version = context.store.borrow().state().version;
@@ -1329,7 +1287,14 @@ impl TaskWorkspace {
             task_view,
             pending_task_view,
             active_task_view,
+            label_filter,
+            active_label_filter,
             known_task_ids: state.tasks.iter().map(|task| task.id.clone()).collect(),
+            known_tags: state
+                .tags
+                .iter()
+                .map(|tag| (tag.id.clone(), tag.label.clone()))
+                .collect(),
             visible_task_ids,
             visible_selection,
             table_focused: false,
@@ -1410,7 +1375,8 @@ impl TaskWorkspace {
                     .position(|visible_id| visible_id == id)
             })
         });
-        let rows = task_rows_for_view(&state.tasks, self.task_view);
+        self.sync_label_filter_tags(&state.tags);
+        let rows = task_rows_for_view(&state.tasks, self.task_view, &self.label_filter);
         let contains_id = |id: &str| rows.iter().any(|task| task.id == id);
         let selected_task_id = if select_first {
             rows.first().map(|task| task.id.clone())
@@ -1429,13 +1395,6 @@ impl TaskWorkspace {
                 })
                 .or_else(|| rows.first().map(|task| task.id.clone()))
         };
-        let selected_task = selected_task_id
-            .as_deref()
-            .and_then(|id| state.tasks.iter().find(|task| task.id == id));
-        let save_error = selected_task
-            .and_then(|task| state.task_status_error(&task.id))
-            .map(str::to_string);
-
         self.visible_task_ids = rows.iter().map(|task| task.id.clone()).collect();
         self.table_mut().set_rows(rows);
         if let Some(task_id) = selected_task_id.as_ref() {
@@ -1443,7 +1402,17 @@ impl TaskWorkspace {
             self.table_mut().select_id(task_id.clone());
         }
         self.table_mut().take_events();
+        let selected_task_id = self.table().highlighted_id();
+        let selected_task = selected_task_id
+            .as_deref()
+            .and_then(|id| state.tasks.iter().find(|task| task.id == id));
+        let save_error = selected_task
+            .and_then(|task| state.task_status_error(&task.id))
+            .map(str::to_string);
         *self.visible_selection.borrow_mut() = selected_task_id.clone();
+        self.layout
+            .second_mut()
+            .set_second_visible(selected_task_id.is_some());
 
         if let Some(task_id) = selected_task_id.as_ref()
             && state.selected_task_id.as_ref() != Some(task_id)
@@ -1491,6 +1460,43 @@ impl TaskWorkspace {
         true
     }
 
+    fn sync_label_filter_change(&mut self) -> bool {
+        let next_filter = self.active_label_filter.borrow().clone();
+        if next_filter == self.label_filter {
+            return false;
+        }
+        self.table_mut().clear_search();
+        self.label_filter = next_filter;
+        let state = self.context.store.borrow().state().clone();
+        self.refresh_from_state(&state, true, false, false);
+        true
+    }
+
+    fn sync_label_filter_tags(&mut self, tags: &[Tag]) {
+        let known_tags = tags
+            .iter()
+            .map(|tag| (tag.id.clone(), tag.label.clone()))
+            .collect::<Vec<_>>();
+        if known_tags == self.known_tags {
+            return;
+        }
+        let tag_ids = tags.iter().map(|tag| tag.id.clone()).collect::<Vec<_>>();
+        self.label_filter.retain(|id| tag_ids.contains(id));
+        self.active_label_filter
+            .borrow_mut()
+            .retain(|id| tag_ids.contains(id));
+        self.layout
+            .first_mut()
+            .replace(
+                "labels",
+                label_filter_dropdown(tags, Rc::clone(&self.active_label_filter)),
+                FlexItem::content(),
+                &mut EventCtx::default(),
+            )
+            .expect("task toolbar should contain label filter");
+        self.known_tags = known_tags;
+    }
+
     fn sync_table_events(&mut self, ctx: &mut EventCtx<AppMsg>) {
         let list_events = self.task_list_mut().take_events();
         for event in list_events {
@@ -1530,7 +1536,7 @@ impl TaskWorkspace {
                     }
                 }
                 DataViewTypedEvent::HighlightChanged { row_id: None } => {
-                    *self.visible_selection.borrow_mut() = None;
+                    selected_changed |= self.clear_task_detail(ctx);
                 }
                 DataViewTypedEvent::SelectionChanged { .. }
                 | DataViewTypedEvent::TransformChanged { .. } => {}
@@ -1566,7 +1572,17 @@ impl TaskWorkspace {
             save_error,
             ctx,
         );
-        outcome.changed
+        let visibility_changed = self.layout.second_mut().set_second_visible(true);
+        outcome.changed || visibility_changed
+    }
+
+    fn clear_task_detail(&mut self, ctx: &mut EventCtx<AppMsg>) -> bool {
+        *self.visible_selection.borrow_mut() = None;
+        let state = self.context.store.borrow().state().clone();
+        self.detail_mut()
+            .set_task(None, &state.people, &state.projects, &state.tags, None, ctx);
+        self.detail_draft_protected = false;
+        self.layout.second_mut().set_second_visible(false)
     }
 
     fn drain_detail_patches(&mut self) -> bool {
@@ -1801,12 +1817,13 @@ impl TuiNode<AppMsg> for TaskWorkspace {
         }
         let outcome = self.layout.event(event, ctx);
         let view_changed = self.sync_task_view_change();
+        let label_filter_changed = self.sync_label_filter_change();
         let detail_sync = self.sync_detail_changes();
-        if view_changed || detail_sync.changed {
+        if view_changed || label_filter_changed || detail_sync.changed {
             ctx.request_layout();
             ctx.request_redraw();
         }
-        if view_changed || detail_sync.selected_task_changed {
+        if view_changed || label_filter_changed || detail_sync.selected_task_changed {
             ctx.focus(initial_task_table_focus_request());
         }
         self.sync_table_events(ctx);
@@ -1830,12 +1847,13 @@ impl TuiNode<AppMsg> for TaskWorkspace {
         }
         let outcome = self.layout.dispatch_event(route, event, ctx);
         let view_changed = self.sync_task_view_change();
+        let label_filter_changed = self.sync_label_filter_change();
         let detail_sync = self.sync_detail_changes();
-        if view_changed || detail_sync.changed {
+        if view_changed || label_filter_changed || detail_sync.changed {
             ctx.request_layout();
             ctx.request_redraw();
         }
-        if view_changed || detail_sync.selected_task_changed {
+        if view_changed || label_filter_changed || detail_sync.selected_task_changed {
             ctx.focus(initial_task_table_focus_request());
         }
         self.sync_table_events(ctx);
