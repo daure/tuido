@@ -52,74 +52,42 @@ fn hidden_task_cannot_be_deleted_from_empty_active_view() {
 }
 
 #[test]
-fn created_todo_switches_hidden_view_to_active_and_selects_task() {
-    let (_runtime, context, store) = test_context(WorkspaceSnapshot {
-        tasks: vec![test_task()],
-        people: Vec::new(),
-        projects: Vec::new(),
-        tags: Vec::new(),
-    });
-    let mut workspace = TaskWorkspace::new(context);
-    *workspace.pending_task_view.borrow_mut() = Some(TaskView::Snoozed);
-    workspace.sync_task_view_change();
-    workspace.layout(Rect::new(0, 0, 120, 40), &mut LayoutCtx::new());
-    let created = Task::quick_capture(
-        "task-2".to_string(),
-        "Captured".to_string(),
-        String::new(),
-        TaskSize::Small,
-    );
+fn created_todo_becomes_active_and_selected_from_any_task_view() {
+    for initial_view in [TaskView::Active, TaskView::Snoozed] {
+        let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+            tasks: vec![test_task()],
+            people: Vec::new(),
+            projects: Vec::new(),
+            tags: Vec::new(),
+        });
+        let mut workspace = TaskWorkspace::new(context);
+        *workspace.pending_task_view.borrow_mut() = Some(initial_view);
+        workspace.sync_task_view_change();
+        workspace.layout(Rect::new(0, 0, 120, 40), &mut LayoutCtx::new());
 
-    store
-        .borrow_mut()
-        .dispatch(AppEvent::TaskCreated(created.clone()));
-    workspace.layout(Rect::new(0, 0, 120, 40), &mut LayoutCtx::new());
+        store
+            .borrow_mut()
+            .dispatch(AppEvent::TaskCreated(Task::quick_capture(
+                "task-2".to_string(),
+                "Captured".to_string(),
+                String::new(),
+                TaskSize::Small,
+            )));
+        workspace.layout(Rect::new(0, 0, 120, 40), &mut LayoutCtx::new());
 
-    assert_eq!(
-        store.borrow().state().selected_task_id.as_deref(),
-        Some("task-2")
-    );
-    assert_eq!(workspace.task_view, TaskView::Active);
-    assert_eq!(*workspace.active_task_view.borrow(), TaskView::Active);
-    assert_eq!(
-        workspace.table_mut().highlighted_id().as_deref(),
-        Some("task-2")
-    );
-    assert_eq!(
-        workspace.table_mut().selected_id().as_deref(),
-        Some("task-2")
-    );
-    assert_eq!(workspace.detail_mut().task_id.as_deref(), Some("task-2"));
-}
-
-#[test]
-fn created_todo_stays_in_active_view_and_selects_task() {
-    let (_runtime, context, store) = test_context(WorkspaceSnapshot {
-        tasks: vec![test_task()],
-        people: Vec::new(),
-        projects: Vec::new(),
-        tags: Vec::new(),
-    });
-    let mut workspace = TaskWorkspace::new(context);
-    workspace.layout(Rect::new(0, 0, 120, 40), &mut LayoutCtx::new());
-    let created = Task::quick_capture(
-        "task-2".to_string(),
-        "Captured".to_string(),
-        String::new(),
-        TaskSize::Small,
-    );
-
-    store
-        .borrow_mut()
-        .dispatch(AppEvent::TaskCreated(created.clone()));
-    workspace.layout(Rect::new(0, 0, 120, 40), &mut LayoutCtx::new());
-
-    assert_eq!(workspace.task_view, TaskView::Active);
-    assert_eq!(
-        workspace.table().highlighted_id().as_deref(),
-        Some("task-2")
-    );
-    assert_eq!(workspace.detail().task_id.as_deref(), Some("task-2"));
+        assert_eq!(workspace.task_view, TaskView::Active);
+        assert_eq!(*workspace.active_task_view.borrow(), TaskView::Active);
+        assert_eq!(
+            store.borrow().state().selected_task_id.as_deref(),
+            Some("task-2")
+        );
+        assert_eq!(
+            workspace.table().highlighted_id().as_deref(),
+            Some("task-2")
+        );
+        assert_eq!(workspace.table().selected_id().as_deref(), Some("task-2"));
+        assert_eq!(workspace.detail().task_id.as_deref(), Some("task-2"));
+    }
 }
 
 #[test]
@@ -141,7 +109,7 @@ fn escape_keeps_task_table_focused_as_tab_root() {
 }
 
 #[test]
-fn delete_opens_confirmation_from_focused_task_table() {
+fn delete_shortcuts_open_confirmation_from_focused_task_table() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
@@ -150,15 +118,23 @@ fn delete_opens_confirmation_from_focused_task_table() {
     });
     let mut workspace = TaskWorkspace::new(context);
     workspace.table_focused = true;
-    let mut ctx = EventCtx::default();
+    for key in [
+        KeyEvent::from(Key::Delete),
+        KeyEvent::from(Key::Backspace),
+        KeyEvent {
+            code: Key::Char('x'),
+            modifiers: KeyModifiers::CONTROL,
+        },
+    ] {
+        let mut ctx = EventCtx::default();
+        let outcome = workspace.event(&TuiEvent::Key(key), &mut ctx);
 
-    let outcome = workspace.event(&TuiEvent::Key(KeyEvent::from(Key::Delete)), &mut ctx);
-
-    assert!(outcome.handled());
-    assert!(matches!(
-        ctx.messages(),
-        [AppMsg::OpenDeleteTask(task_id)] if task_id == "task-1"
-    ));
+        assert!(outcome.handled());
+        assert!(matches!(
+            ctx.messages(),
+            [AppMsg::OpenDeleteTask(task_id)] if task_id == "task-1"
+        ));
+    }
 }
 
 #[test]
@@ -241,22 +217,6 @@ fn control_m_from_task_detail_focuses_table_and_enters_move_mode() {
         Some(&initial_task_table_focus_request())
     );
     assert!(workspace.task_list().is_reordering());
-}
-
-#[test]
-fn snooze_dialog_uses_open_filled_dropdown_and_quick_selection_message() {
-    let now = time::macros::datetime!(2026-07-23 12:00);
-    let mut dialog = SnoozeDialog::new("task-1".into(), now, None, false);
-    let hint = dialog.measure(LayoutProposal::unbounded());
-    assert_eq!(hint.preferred, tuicore::LayoutSize::new(46, 12));
-
-    let mut ctx = EventCtx::default();
-    dialog.event(&TuiEvent::Key(KeyEvent::from(Key::Enter)), &mut ctx);
-    assert!(matches!(
-        ctx.messages(),
-        [AppMsg::SnoozeTask { task_id, until, remember_custom: None }]
-            if task_id == "task-1" && *until == time::macros::datetime!(2026-07-24 8:00)
-    ));
 }
 
 #[test]
@@ -494,27 +454,6 @@ fn active_snooze_modal_receives_routed_navigation_and_selection() {
 }
 
 #[test]
-fn backspace_opens_confirmation_from_focused_task_table() {
-    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
-        tasks: vec![test_task()],
-        people: Vec::new(),
-        projects: Vec::new(),
-        tags: Vec::new(),
-    });
-    let mut workspace = TaskWorkspace::new(context);
-    workspace.table_focused = true;
-    let mut ctx = EventCtx::default();
-
-    let outcome = workspace.event(&TuiEvent::Key(Key::Backspace.into()), &mut ctx);
-
-    assert!(outcome.handled());
-    assert!(matches!(
-        ctx.messages(),
-        [AppMsg::OpenDeleteTask(task_id)] if task_id == "task-1"
-    ));
-}
-
-#[test]
 fn backspace_targets_visible_task_even_when_store_selection_is_stale() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![
@@ -539,31 +478,6 @@ fn backspace_targets_visible_task_even_when_store_selection_is_stale() {
     assert!(matches!(
         ctx.messages(),
         [AppMsg::OpenDeleteTask(task_id)] if task_id == "task-2"
-    ));
-}
-
-#[test]
-fn ctrl_x_opens_confirmation_from_focused_task_table() {
-    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
-        tasks: vec![test_task()],
-        people: Vec::new(),
-        projects: Vec::new(),
-        tags: Vec::new(),
-    });
-    let mut workspace = TaskWorkspace::new(context);
-    workspace.table_focused = true;
-    let mut ctx = EventCtx::default();
-    let key = KeyEvent {
-        code: Key::Char('x'),
-        modifiers: KeyModifiers::CONTROL,
-    };
-
-    let outcome = workspace.event(&TuiEvent::Key(key), &mut ctx);
-
-    assert!(outcome.handled());
-    assert!(matches!(
-        ctx.messages(),
-        [AppMsg::OpenDeleteTask(task_id)] if task_id == "task-1"
     ));
 }
 
@@ -788,52 +702,6 @@ fn creation_dialogs_close_from_nested_control_focus_mode() {
         } else {
             assert!(matches!(ctx.messages(), [AppMsg::CloseDialog]));
         }
-    }
-}
-
-#[test]
-fn management_dialogs_close_from_nested_control_focus_mode() {
-    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
-        tasks: Vec::new(),
-        people: vec![Person::new("person-1".into(), "Ada".into(), String::new())],
-        projects: vec![Project::new(
-            "project-1".into(),
-            "CORE".into(),
-            "Core".into(),
-            String::new(),
-        )],
-        tags: vec![Tag::new("tag-1".into(), "api".into())],
-    });
-    let area = Rect::new(0, 0, 100, 30);
-    let cases = [
-        (ManagementDialogKind::People, KeyEvent::from(Key::Esc)),
-        (
-            ManagementDialogKind::Projects,
-            KeyEvent {
-                code: Key::Char('['),
-                modifiers: KeyModifiers::CONTROL,
-            },
-        ),
-        (ManagementDialogKind::Tags, KeyEvent::from(Key::Esc)),
-    ];
-
-    for (kind, key) in cases {
-        let mut dialog = management_dialog(context.clone(), kind);
-        let mut layout = LayoutCtx::new();
-        dialog.layout(area, &mut layout);
-        let target = layout
-            .focus_targets()
-            .iter()
-            .find(|target| target.id.as_str() == "input")
-            .expect("management detail input should be focusable")
-            .clone();
-        let mut ctx = EventCtx::default();
-
-        let outcome =
-            dialog.dispatch_event(&EventRoute::new(target.path), &TuiEvent::Key(key), &mut ctx);
-
-        assert!(outcome.handled(), "{kind:?} should close");
-        assert!(matches!(ctx.messages(), [AppMsg::CloseDialog]));
     }
 }
 

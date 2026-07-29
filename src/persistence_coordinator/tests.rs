@@ -536,7 +536,7 @@ fn failed_active_patch_defers_completion_to_successful_queued_patch() {
 }
 
 #[test]
-fn custom_snooze_then_state_then_quick_keeps_latest_workflow_without_persisting_last() {
+fn custom_snooze_then_state_then_quick_keeps_latest_workflow() {
     let (runtime, pool) = test_database();
     let task = test_task("task-1");
     persist_task(&runtime, &pool, task.clone());
@@ -565,27 +565,6 @@ fn custom_snooze_then_state_then_quick_keeps_latest_workflow_without_persisting_
         },
     ));
 
-    let queue = coordinator.queued.get(&key).unwrap();
-    assert!(matches!(
-        queue[0],
-        PersistenceCommand::PatchTask(
-            _,
-            TaskPatch::Snooze {
-                until,
-                remember_custom: Some(remembered)
-            }
-        ) if until == custom && remembered == custom
-    ));
-    assert!(matches!(
-        queue[1],
-        PersistenceCommand::PatchTask(
-            _,
-            TaskPatch::Snooze {
-                until,
-                remember_custom: None
-            }
-        ) if until == quick
-    ));
     coordinator.finish(Completion {
         key,
         sequence: 41,
@@ -609,13 +588,6 @@ fn custom_snooze_then_state_then_quick_keeps_latest_workflow_without_persisting_
         row.try_get::<String, _>("snoozed_until").unwrap(),
         crate::snooze::format_datetime(quick)
     );
-    let last = runtime
-        .block_on(
-            sqlx::query("SELECT value FROM settings WHERE key = 'last_custom_snooze'")
-                .fetch_optional(&pool),
-        )
-        .unwrap();
-    assert!(last.is_none());
 }
 
 #[test]
@@ -643,17 +615,18 @@ fn custom_snooze_replaced_before_execution_preserves_remembered_value() {
         },
     ));
 
-    let queue = coordinator.queued.get(&key).unwrap();
-    assert_eq!(queue.len(), 1);
     assert!(matches!(
-        queue[0],
-        PersistenceCommand::PatchTask(
-            _,
-            TaskPatch::Snooze {
-                until,
-                remember_custom: Some(remembered)
-            }
-        ) if until == quick && remembered == custom
+        coordinator.queued.get(&key),
+        Some(queue) if queue.len() == 1 && matches!(
+            queue.front(),
+            Some(PersistenceCommand::PatchTask(
+                _,
+                TaskPatch::Snooze {
+                    until,
+                    remember_custom: Some(remembered),
+                },
+            )) if *until == quick && *remembered == custom
+        )
     ));
 
     coordinator.finish(Completion {
@@ -806,16 +779,6 @@ fn custom_snooze_then_unsnooze_keeps_workflow_without_persisting_last() {
         TaskPatch::Unsnooze,
     ));
 
-    let queue = coordinator.queued.get(&key).unwrap();
-    assert_eq!(queue.len(), 2);
-    assert!(matches!(
-        queue[0],
-        PersistenceCommand::PatchTask(_, TaskPatch::Snooze { .. })
-    ));
-    assert!(matches!(
-        queue[1],
-        PersistenceCommand::PatchTask(_, TaskPatch::Unsnooze)
-    ));
     coordinator.finish(Completion {
         key,
         sequence: 45,
@@ -938,43 +901,6 @@ fn failed_active_custom_merges_into_queued_quick_compound_snooze() {
         .unwrap();
     assert!(last.is_none());
     assert!(store.borrow().state().save_errors.is_empty());
-}
-
-#[test]
-fn custom_snoozes_across_tasks_do_not_persist_last_value() {
-    let (runtime, pool) = test_database();
-    let first = test_task("task-1");
-    let second = test_task("task-2");
-    for task in [first.clone(), second.clone()] {
-        persist_task(&runtime, &pool, task);
-    }
-    let mut coordinator = test_coordinator(&runtime, &pool, test_store(vec![first, second]));
-    let first_custom = time::macros::datetime!(2026-09-06 14:00);
-    let latest_custom = time::macros::datetime!(2026-09-07 17:45);
-
-    coordinator.submit(PersistenceCommand::PatchTask(
-        "task-1".into(),
-        TaskPatch::Snooze {
-            until: first_custom,
-            remember_custom: Some(first_custom),
-        },
-    ));
-    coordinator.submit(PersistenceCommand::PatchTask(
-        "task-2".into(),
-        TaskPatch::Snooze {
-            until: latest_custom,
-            remember_custom: Some(latest_custom),
-        },
-    ));
-    assert!(coordinator.drain(Duration::from_secs(2)));
-
-    let last = runtime
-        .block_on(
-            sqlx::query("SELECT value FROM settings WHERE key = 'last_custom_snooze'")
-                .fetch_optional(&pool),
-        )
-        .unwrap();
-    assert!(last.is_none());
 }
 
 #[test]

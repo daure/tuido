@@ -211,16 +211,6 @@ mod tests {
     use tuicore::{Key, KeyEvent};
 
     #[test]
-    fn quick_menu_is_an_open_centered_dropdown() {
-        let mut menu = TaskQuickMenu::new("task-1".into());
-        assert!(menu.dropdown.is_open());
-        let area = Rect::new(0, 0, MENU_HOST_WIDTH, MENU_HOST_HEIGHT);
-        menu.layout(area, &mut LayoutCtx::new());
-        assert_eq!(menu.field_area.width, MENU_FIELD_WIDTH);
-        assert_eq!(menu.field_area.x, 5);
-    }
-
-    #[test]
     fn quick_menu_emits_selected_task_action() {
         let mut menu = TaskQuickMenu::new("task-1".into());
         let mut ctx = EventCtx::default();

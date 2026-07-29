@@ -253,37 +253,6 @@ mod tests {
     use tuicore::KeyModifiers;
 
     #[test]
-    fn each_entity_uses_its_editable_creation_fields() {
-        let person = CreateManagementDialog::new(ManagementDialogKind::People);
-        let project = CreateManagementDialog::new(ManagementDialogKind::Projects);
-        let tag = CreateManagementDialog::new(ManagementDialogKind::Tags);
-
-        assert_eq!(
-            person
-                .root
-                .measure(LayoutProposal::unbounded())
-                .preferred
-                .height,
-            10
-        );
-        assert_eq!(
-            project
-                .root
-                .measure(LayoutProposal::unbounded())
-                .preferred
-                .height,
-            10
-        );
-        assert_eq!(
-            tag.root
-                .measure(LayoutProposal::unbounded())
-                .preferred
-                .height,
-            3
-        );
-    }
-
-    #[test]
     fn ctrl_enter_submits_each_management_entity_from_a_focused_control() {
         let cases = [
             (

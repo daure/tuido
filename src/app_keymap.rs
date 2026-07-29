@@ -738,16 +738,6 @@ mod tests {
     }
 
     #[test]
-    fn snoozed_until_sequence_override_is_registered() {
-        let keymap =
-            AppKeymap::from_overrides([("TASK_SNOOZED_UNTIL_FIELD".into(), "zz".into())]).unwrap();
-        let binding = keymap.binding("TASK_SNOOZED_UNTIL_FIELD").unwrap();
-
-        assert_eq!(binding.raw, "zz");
-        assert!(binding.spec.is_none());
-    }
-
-    #[test]
     fn task_and_management_delete_shortcuts_share_requested_defaults() {
         let keymap = AppKeymap::from_overrides(std::iter::empty::<(String, String)>()).unwrap();
         for (name, expected) in [

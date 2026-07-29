@@ -70,16 +70,6 @@ impl<F, S> ManagementPane<F, S> {
         ctx.stop_propagation();
         true
     }
-
-    #[cfg(test)]
-    pub(super) fn child_areas(&self) -> (Rect, Rect) {
-        self.split.child_areas()
-    }
-
-    #[cfg(test)]
-    pub(super) fn create_area(&self) -> Rect {
-        self.create_area
-    }
 }
 
 impl<F, S> TuiNode<AppMsg> for ManagementPane<F, S>

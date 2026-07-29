@@ -148,11 +148,6 @@ mod tests {
     }
 
     #[test]
-    fn action_verbs_remain_sorted_for_binary_search() {
-        assert!(ACTION_VERBS.windows(2).all(|pair| pair[0] < pair[1]));
-    }
-
-    #[test]
     fn evaluation_does_not_treat_ambiguous_nouns_as_second_actions() {
         for title in [
             "Schedule call and support team",

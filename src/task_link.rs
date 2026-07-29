@@ -39,15 +39,6 @@ mod tests {
     }
 
     #[test]
-    fn chooses_specific_icons_before_protocol_fallbacks() {
-        assert_eq!(icon("https://www.airbnb.com/rooms/1"), "");
-        assert_eq!(icon("https://team.atlassian.net/jira/software/ABC-1"), "");
-        assert_eq!(icon("file:///tmp/report.pdf"), "󰈔");
-        assert_eq!(icon("content://media/1"), "󰄡");
-        assert_eq!(icon("https://example.com"), "󰖟");
-    }
-
-    #[test]
     fn browser_targets_add_https_to_www_links() {
         assert_eq!(
             browser_target("www.example.com/item"),

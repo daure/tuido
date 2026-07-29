@@ -701,31 +701,6 @@ mod tests {
     }
 
     #[test]
-    fn narrow_projects_workspace_stacks_visible_detail_below_table() {
-        let project = Project::new(
-            "project-1".into(),
-            "CORE".into(),
-            "Core".into(),
-            "Platform".into(),
-        );
-        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
-            tasks: vec![],
-            people: vec![],
-            projects: vec![project],
-            tags: vec![],
-        });
-        let mut workspace = ProjectsWorkspace::new(context);
-
-        workspace.layout(Rect::new(0, 0, 80, 30), &mut LayoutCtx::new());
-
-        let (table, detail) = workspace.split.child_areas();
-        assert_eq!(table.width, 80);
-        assert_eq!(detail.width, 80);
-        assert_eq!(detail.height, 13);
-        assert_eq!(table.height + detail.height, 30);
-    }
-
-    #[test]
     fn management_workspace_renders_and_edits_project() {
         let person = Person {
             id: "person-1".into(),

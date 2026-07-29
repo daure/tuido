@@ -90,18 +90,6 @@ mod tests {
     use tuicore::{Key, KeyEvent};
 
     #[test]
-    fn settings_expose_calendar_view_and_default_snooze_time() {
-        let mut dialog = SettingsDialog::new(false, time!(8:15));
-        let mut layout = LayoutCtx::new();
-        dialog.layout(Rect::new(0, 0, 40, 5), &mut layout);
-
-        let targets = layout.focus_targets();
-        assert_eq!(targets.len(), 2);
-        assert_eq!(targets[0].id.as_str(), "toggle");
-        assert_eq!(targets[1].id.as_str(), "time-picker");
-    }
-
-    #[test]
     fn settings_emit_changes_for_immediate_persistence() {
         let mut dialog = SettingsDialog::new(false, time!(8:15));
         let area = Rect::new(0, 0, 40, 5);

@@ -457,10 +457,15 @@ mod tests {
                     .await
                     .unwrap();
 
-                assert!(snapshot.tasks.is_empty());
-                assert!(snapshot.people.is_empty());
-                assert!(snapshot.projects.is_empty());
-                assert!(snapshot.tags.is_empty());
+                assert_eq!(
+                    (
+                        snapshot.tasks.len(),
+                        snapshot.people.len(),
+                        snapshot.projects.len(),
+                        snapshot.tags.len(),
+                    ),
+                    (0, 0, 0, 0)
+                );
             });
     }
 

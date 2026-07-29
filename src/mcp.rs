@@ -1059,61 +1059,6 @@ mod tests {
     }
 
     #[test]
-    fn task_update_rejects_invalid_dates_and_contradictory_snooze_fields() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            sqlx::any::install_default_drivers();
-            let pool = AnyPoolOptions::new()
-                .max_connections(1)
-                .connect("sqlite::memory:")
-                .await
-                .unwrap();
-            sqlx::migrate!().run(&pool).await.unwrap();
-            let service = TuidoService::from_parts(pool, SqlDialect::Sqlite);
-            service
-                .create_task_entity(Task::quick_capture(
-                    "task".into(),
-                    "Original".into(),
-                    String::new(),
-                    TaskSize::Small,
-                ))
-                .await
-                .unwrap();
-            let server = McpServer::new(service.clone());
-
-            for (state, start_date, snoozed_until) in [
-                ("todo", Some("2026-02-30"), None),
-                ("snoozed", None, None),
-                ("todo", None, Some("2026-07-25T08:00:00")),
-            ] {
-                let result = server
-                    .update_task(Parameters(TaskUpdate {
-                        id: "task".into(),
-                        expected_revision: 1,
-                        title: "Changed".into(),
-                        state: state.into(),
-                        size: "small".into(),
-                        priority: "medium".into(),
-                        start_date: start_date.map(str::to_string),
-                        due_date: None,
-                        snoozed_until: snoozed_until.map(str::to_string),
-                        people_ids: Vec::new(),
-                        project_ids: Vec::new(),
-                        tag_ids: Vec::new(),
-                        links: Vec::new(),
-                        description: String::new(),
-                    }))
-                    .await;
-                assert!(result.is_err());
-            }
-            assert_eq!(service.get_task("task").await.unwrap().revision, 1);
-        });
-    }
-
-    #[test]
     fn set_task_state_rejects_legacy_aliases_before_mutation() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()

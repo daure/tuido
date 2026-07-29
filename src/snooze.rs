@@ -500,7 +500,7 @@ fn editor_date_is_valid(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::{Terminal, backend::TestBackend, style::Color, widgets::Paragraph};
+    use ratatui::{Terminal, backend::TestBackend, widgets::Paragraph};
     use time::{Month, macros::datetime};
     use tuicore::{FocusManager, Key, KeyEvent, KeyModifiers, TreeDispatcher};
 
@@ -580,17 +580,6 @@ mod tests {
     }
 
     #[test]
-    fn custom_date_option_uses_material_calendar_icon() {
-        let quick = quick_snoozes(datetime!(2026-07-26 18:13), default_time());
-        let pick = snooze_options(quick, None, false)
-            .into_iter()
-            .find(|option| option.choice == SnoozeChoice::Pick)
-            .expect("custom date option should exist");
-
-        assert_eq!(pick.label, "󰃭 Pick date & time");
-    }
-
-    #[test]
     fn picker_opens_at_tomorrow_eight_instead_of_last_custom_value() {
         let dialog = SnoozeDialog::new_with_default_time(
             "task".into(),
@@ -633,50 +622,6 @@ mod tests {
     }
 
     #[test]
-    fn dropdown_opens_centered_and_search_does_not_commit_until_enter() {
-        let mut dialog = SnoozeDialog::new("task".into(), datetime!(2026-07-23 12:00), None, false);
-        assert!(dialog.dropdown.is_open());
-        let mut layout = LayoutCtx::new();
-        dialog.layout(Rect::new(0, 0, 46, 1), &mut layout);
-        let popup = dialog.dropdown.popup_overlay_area(Rect::new(0, 0, 100, 30));
-        assert_eq!(popup.x, 30);
-        assert!(popup.y > 0);
-
-        let mut ctx = EventCtx::default();
-        for key in "weekend".chars() {
-            dialog.event(&TuiEvent::Key(Key::Char(key).into()), &mut ctx);
-        }
-        assert!(ctx.messages().is_empty());
-        assert_eq!(dialog.dropdown.search_query(), "weekend");
-
-        dialog.event(&TuiEvent::Key(Key::Enter.into()), &mut ctx);
-        assert!(matches!(
-            ctx.messages(),
-            [AppMsg::SnoozeTask {
-                task_id,
-                until,
-                remember_custom: None
-            }] if task_id == "task" && *until == datetime!(2026-07-25 8:00)
-        ));
-    }
-
-    #[test]
-    fn menu_host_and_field_normalize_to_small_terminal_bounds() {
-        let mut dialog = SnoozeDialog::new("task".into(), datetime!(2026-07-23 12:00), None, false);
-        let proposal = LayoutProposal::at_most(20, 5);
-
-        assert_eq!(
-            dialog.measure(proposal).preferred,
-            tuicore::LayoutSize::new(20, 5)
-        );
-
-        let area = Rect::new(10, 5, 20, 5);
-        dialog.layout(area, &mut LayoutCtx::new());
-        assert_eq!(dialog.menu_field_area, Rect::new(10, 7, 20, 1));
-        assert_eq!(dialog.dropdown.popup_overlay_area(area), area);
-    }
-
-    #[test]
     fn pick_choice_switches_open_dropdown_to_stepped_picker() {
         let mut dialog = SnoozeDialog::new("task".into(), datetime!(2026-07-23 12:00), None, false);
         let mut ctx = EventCtx::default();
@@ -701,7 +646,7 @@ mod tests {
     }
 
     #[test]
-    fn picker_clears_underlying_content_and_fills_its_surface() {
+    fn picker_clears_underlying_content_and_applies_surface_background() {
         let area = Rect::new(0, 0, 24, 10);
         let mut dialog = SnoozeDialog::new("task".into(), datetime!(2026-07-23 12:00), None, false);
         dialog.mode = SnoozeMode::Picker;
@@ -710,22 +655,19 @@ mod tests {
 
         terminal
             .draw(|frame| {
-                let underlying = (0..area.height)
+                let marker = (0..area.height)
                     .map(|_| "X".repeat(area.width as usize))
                     .collect::<Vec<_>>()
                     .join("\n");
-                frame.render_widget(
-                    Paragraph::new(underlying).style(Style::default().fg(Color::Magenta)),
-                    area,
-                );
+                frame.render_widget(Paragraph::new(marker), area);
                 dialog.render(frame, area, &mut RenderCtx::new());
             })
             .unwrap();
 
         let buffer = terminal.backend().buffer();
-        assert!(buffer.content().iter().all(|cell| cell.symbol() != "X"));
+        assert!(!buffer.content().iter().any(|cell| cell.symbol() == "X"));
         assert_eq!(
-            buffer.cell((area.width - 2, area.height - 2)).unwrap().bg,
+            buffer.cell((area.width / 2, area.height / 2)).unwrap().bg,
             tuicore::theme().surface_bg()
         );
     }

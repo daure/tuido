@@ -105,46 +105,43 @@ mod tests {
     }
 
     #[test]
-    fn legacy_config_precedes_native_config_when_configured_or_present() {
-        let native = Some(PathBuf::from("/home/test/.config/tuido"));
-
-        assert_eq!(
-            select_ui_config_source(None, true, false, native.clone()),
-            UiConfigSource::Legacy
-        );
-        assert_eq!(
-            select_ui_config_source(None, false, true, native),
-            UiConfigSource::Legacy
-        );
-    }
-
-    #[test]
-    fn clean_install_uses_native_config_or_defaults() {
-        assert_eq!(
-            select_ui_config_source(
+    fn config_source_precedence() {
+        let native = PathBuf::from("/home/test/.config/tuido");
+        for (explicit, legacy_configured, legacy_present, native, expected) in [
+            (
+                None,
+                true,
+                false,
+                Some(native.clone()),
+                UiConfigSource::Legacy,
+            ),
+            (
+                None,
+                false,
+                true,
+                Some(native.clone()),
+                UiConfigSource::Legacy,
+            ),
+            (
                 None,
                 false,
                 false,
-                Some(PathBuf::from("/home/test/.config/tuido"))
+                Some(native.clone()),
+                UiConfigSource::Directory(native),
             ),
-            UiConfigSource::Directory(PathBuf::from("/home/test/.config/tuido"))
-        );
-        assert_eq!(
-            select_ui_config_source(None, false, false, None),
-            UiConfigSource::Defaults
-        );
-    }
-
-    #[test]
-    fn explicit_tuido_config_precedes_legacy_config() {
-        assert_eq!(
-            select_ui_config_source(
+            (None, false, false, None, UiConfigSource::Defaults),
+            (
                 Some(PathBuf::from("/etc/tuido")),
                 true,
                 true,
-                Some(PathBuf::from("/home/test/.config/tuido"))
+                None,
+                UiConfigSource::Directory(PathBuf::from("/etc/tuido")),
             ),
-            UiConfigSource::Directory(PathBuf::from("/etc/tuido"))
-        );
+        ] {
+            assert_eq!(
+                select_ui_config_source(explicit, legacy_configured, legacy_present, native),
+                expected
+            );
+        }
     }
 }

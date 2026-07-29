@@ -309,13 +309,10 @@ mod tests {
     }
 
     #[test]
-    fn missing_calendar_preference_defaults_to_showing_weekends() {
-        assert_eq!(parse_show_weekends_setting(None), Ok(true));
-    }
-
-    #[test]
-    fn calendar_preference_rejects_invalid_values() {
-        assert!(parse_show_weekends_setting(Some("weekdays")).is_err());
+    fn calendar_preference_defaults_and_rejects_invalid_values() {
+        for (value, expected) in [(None, Ok(true)), (Some("weekdays"), Err(()))] {
+            assert_eq!(parse_show_weekends_setting(value).map_err(|_| ()), expected);
+        }
     }
 
     #[test]

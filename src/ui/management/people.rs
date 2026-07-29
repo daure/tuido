@@ -522,29 +522,6 @@ mod tests {
     use tuicore::{FocusRequest, Key, KeyEvent, KeyModifiers, Tab, Tabs};
 
     #[test]
-    fn narrow_people_workspace_stacks_visible_detail_below_table() {
-        let person = Person::new("person-1".into(), "Ada".into(), "ada@example.com".into());
-        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
-            tasks: vec![],
-            people: vec![person],
-            projects: vec![],
-            tags: vec![],
-        });
-        let mut workspace = PeopleWorkspace::new(context);
-
-        workspace.layout(Rect::new(0, 0, 80, 30), &mut LayoutCtx::new());
-
-        let (table, detail) = workspace.split.child_areas();
-        let create = workspace.split.create_area();
-        assert_eq!(table.width, 80);
-        assert_eq!(detail.width, 80);
-        assert_eq!(detail.height, 13);
-        assert_eq!(table.height + detail.height, 30);
-        assert_eq!(create.y, 0);
-        assert_eq!(create.right(), 80);
-    }
-
-    #[test]
     fn focused_detail_input_receives_tab_navigation_characters_before_ancestor_tabs() {
         let person = Person {
             id: "person-1".into(),

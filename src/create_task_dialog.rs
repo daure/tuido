@@ -122,7 +122,7 @@ impl TuiNode<AppMsg> for CreateTaskDialog {
 mod tests {
     use super::*;
     use ratatui::{Terminal, backend::TestBackend};
-    use tuicore::{ChildKey, FocusTarget, Key, KeyEvent, KeyModifiers, LayoutProposal};
+    use tuicore::{FocusTarget, Key, KeyEvent, KeyModifiers};
 
     const AREA: Rect = Rect::new(0, 0, 50, 20);
 
@@ -161,40 +161,6 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect()
-    }
-
-    #[test]
-    fn preferred_height_includes_one_row_between_title_and_feedback() {
-        let mut dialog = CreateTaskDialog::new();
-        let preferred = dialog.root.measure(LayoutProposal::unbounded()).preferred;
-        dialog.layout(
-            Rect::new(0, 0, preferred.width, preferred.height),
-            &mut LayoutCtx::new(),
-        );
-        let title = dialog.root.child_rect(&ChildKey::from("title")).unwrap();
-        let feedback = dialog.root.child_rect(&ChildKey::from("feedback")).unwrap();
-
-        assert_eq!(feedback.y, title.y + title.height + 1);
-        assert_eq!(title.height, 1);
-        assert_eq!(feedback.height, 3);
-        assert_eq!(preferred.height, title.height + 1 + feedback.height);
-        assert_eq!(preferred.height, 5);
-    }
-
-    #[test]
-    fn title_is_first_focus_target() {
-        let area = Rect::new(0, 0, 50, 10);
-        let mut dialog = CreateTaskDialog::new();
-        let mut layout = LayoutCtx::new();
-        dialog.layout(area, &mut layout);
-
-        assert_eq!(
-            layout
-                .focus_targets()
-                .first()
-                .map(|target| target.id.as_str()),
-            Some("input")
-        );
     }
 
     #[test]

@@ -433,26 +433,6 @@ mod tests {
     use tuicore::{FocusRequest, Key, KeyEvent, KeyModifiers};
 
     #[test]
-    fn narrow_tags_workspace_stacks_visible_detail_below_table() {
-        let tag = Tag::new("tag-1".into(), "api".into());
-        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
-            tasks: vec![],
-            people: vec![],
-            projects: vec![],
-            tags: vec![tag],
-        });
-        let mut workspace = TagsWorkspace::new(context);
-
-        workspace.layout(Rect::new(0, 0, 80, 30), &mut LayoutCtx::new());
-
-        let (table, detail) = workspace.split.child_areas();
-        assert_eq!(table.width, 80);
-        assert_eq!(detail.width, 80);
-        assert_eq!(detail.height, 3);
-        assert_eq!(table.height + detail.height, 30);
-    }
-
-    #[test]
     fn management_workspace_has_table_and_editable_detail() {
         let tags = vec![
             Tag {

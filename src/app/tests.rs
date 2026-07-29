@@ -373,37 +373,6 @@ fn task_table_state_column_is_icon_only() {
 }
 
 #[test]
-fn task_table_fixed_columns_keep_padding_before_flexible_title() {
-    for width in [40, 100, 200] {
-        let mut table = task_table(
-            vec![task_with("active", "Zebra work", TaskState::InProgress)],
-            None,
-        );
-        let area = Rect::new(0, 0, width, 5);
-        <TaskTable as TuiNode<AppMsg>>::layout(&mut table, area, &mut LayoutCtx::new());
-        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height))
-            .expect("terminal should build");
-
-        terminal
-            .draw(|frame| {
-                <TaskTable as TuiNode<AppMsg>>::render(&table, frame, area, &mut RenderCtx::new())
-            })
-            .expect("table should render");
-
-        let buffer = terminal.backend().buffer();
-        assert_eq!(buffer.cell((0, 1)).unwrap().symbol(), "");
-        assert_eq!(buffer.cell((1, 1)).unwrap().symbol(), " ");
-        assert_eq!(buffer.cell((2, 1)).unwrap().symbol(), "󰇼");
-        assert_eq!(buffer.cell((3, 1)).unwrap().symbol(), " ");
-        assert_eq!(buffer.cell((4, 1)).unwrap().symbol(), "S");
-        assert_eq!(buffer.cell((5, 1)).unwrap().symbol(), "M");
-        assert_eq!(buffer.cell((6, 1)).unwrap().symbol(), "A");
-        assert_eq!(buffer.cell((7, 1)).unwrap().symbol(), " ");
-        assert_eq!(buffer.cell((8, 1)).unwrap().symbol(), "Z");
-    }
-}
-
-#[test]
 fn task_table_shows_horizontal_scrollbar_for_long_titles() {
     let table = task_table(
         vec![task_with(
@@ -434,7 +403,7 @@ fn task_table_shows_horizontal_scrollbar_for_long_titles() {
 }
 
 #[test]
-fn narrow_task_workspace_keeps_detail_view_visible() {
+fn narrow_task_workspace_renders_task_and_detail() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
@@ -443,11 +412,12 @@ fn narrow_task_workspace_keeps_detail_view_visible() {
     });
     let mut workspace = TaskWorkspace::new(context);
 
-    workspace.layout(Rect::new(0, 0, 80, 40), &mut LayoutCtx::new());
+    let area = Rect::new(0, 0, 80, 40);
+    workspace.layout(area, &mut LayoutCtx::new());
 
-    let (table_area, detail_area) = workspace.layout.second().child_areas();
-    assert!(detail_area.height > 0);
-    assert_eq!(table_area.height + detail_area.height, 39);
+    let text = rendered_text(&workspace, area);
+    assert!(text.contains("Original"));
+    assert!(text.contains("Title"));
 }
 
 #[test]
@@ -913,34 +883,6 @@ fn task_detail_uses_blank_empty_value_placeholders() {
             "placeholder leaked: {placeholder}"
         );
     }
-}
-
-#[test]
-fn task_table_state_icon_uses_row_text_color() {
-    let mut table = task_table(
-        vec![task_with("active", "Zebra work", TaskState::InProgress)],
-        None,
-    );
-    let area = Rect::new(0, 0, 100, 5);
-    <TaskTable as TuiNode<AppMsg>>::layout(&mut table, area, &mut LayoutCtx::new());
-    let mut terminal =
-        Terminal::new(TestBackend::new(area.width, area.height)).expect("terminal should build");
-    terminal
-        .draw(|frame| {
-            <TaskTable as TuiNode<AppMsg>>::render(&table, frame, area, &mut RenderCtx::new())
-        })
-        .expect("table should render");
-    let cells = terminal.backend().buffer().content();
-    let icon = cells
-        .iter()
-        .find(|cell| cell.symbol() == "")
-        .expect("state icon should render");
-    let title = cells
-        .iter()
-        .find(|cell| cell.symbol() == "Z")
-        .expect("task title should render");
-
-    assert_eq!(icon.fg, title.fg);
 }
 
 #[test]

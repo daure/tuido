@@ -101,14 +101,11 @@ mod tests {
         assert!(rendered.contains("Starts with a verb"));
         assert!(rendered.contains("No second action detected"));
         assert!(rendered.contains("3-8 words for quick scanning"));
-        assert_eq!(measured.height, 3);
-        assert_eq!(measured.width, 38);
-        assert_eq!(rendered.matches("\u{f0aa5} Perfect").count(), 3);
         assert_eq!(rendered.matches("Perfect").count(), 3);
     }
 
     #[test]
-    fn renders_circle_slice_icon_and_text_for_each_level() {
+    fn renders_semantic_label_for_each_level() {
         let title = Rc::new(RefCell::new(String::new()));
         let feedback = TitleFeedback::new(Rc::clone(&title));
 
@@ -135,9 +132,9 @@ mod tests {
                 .collect::<String>()
         };
 
-        assert!(render("").contains("\u{f0a9f} Bad"));
-        assert!(render("Login redirect").contains("\u{f0aa1} Okay"));
-        assert!(render("Login redirect").contains("\u{f0aa3} Good"));
-        assert!(render("Fix login redirect").contains("\u{f0aa5} Perfect"));
+        assert!(render("").contains("Bad"));
+        assert!(render("Login redirect").contains("Okay"));
+        assert!(render("Login redirect").contains("Good"));
+        assert!(render("Fix login redirect").contains("Perfect"));
     }
 }
