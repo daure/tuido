@@ -71,6 +71,7 @@ impl TaskLinksInput {
         .headers(false)
         .title("Links")
         .hotkey(keys::TASK_LINKS_FIELD.hotkey())
+        .empty_message("No links added")
         .keybindings(ListControlKeyBindings::default().remove([keys::TASK_LINK_DELETE.key_spec()]))
         .max_rows(usize::MAX);
         Self {

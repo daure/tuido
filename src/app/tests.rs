@@ -20,6 +20,7 @@ fn test_task() -> Task {
         people_ids: Vec::new(),
         project_ids: Vec::new(),
         tag_ids: Vec::new(),
+        checklist: Vec::new(),
         links: Vec::new(),
         description: "Existing detail".to_string(),
     }
@@ -278,6 +279,33 @@ fn external_refresh_repopulates_selected_task_detail_once_draft_is_safe() {
         workspace.table().highlighted_id().as_deref(),
         Some("task-1")
     );
+}
+
+#[test]
+fn identical_workspace_refresh_does_not_rebuild_selected_task_detail() {
+    let task = test_task();
+    let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+        tasks: vec![task.clone()],
+        people: vec![],
+        projects: vec![],
+        tags: vec![],
+    });
+    let mut workspace = TaskWorkspace::new(context);
+    let original_patches = Rc::clone(&workspace.detail().patches);
+    store.borrow_mut().dispatch(AppEvent::WorkspaceRefreshed {
+        snapshot: WorkspaceSnapshot {
+            tasks: vec![task],
+            people: vec![],
+            projects: vec![],
+            tags: vec![],
+        },
+        revision: 1,
+        entity_revisions: std::collections::HashMap::new(),
+    });
+
+    workspace.layout(Rect::new(0, 0, 100, 30), &mut LayoutCtx::new());
+
+    assert!(Rc::ptr_eq(&original_patches, &workspace.detail().patches));
 }
 
 fn rendered_area_has_focus_style(node: &impl TuiNode<AppMsg>, canvas: Rect, area: Rect) -> bool {
@@ -782,7 +810,7 @@ fn app_startup_selects_and_focuses_first_ranked_task() {
                     .path
                     .keys()
                     .iter()
-                    .any(|part| part.as_str() == "links")
+                    .any(|part| matches!(part.as_str(), "checklist" | "links"))
         })
         .expect("task table should be focusable")
         .clone();
@@ -830,6 +858,7 @@ fn task_detail_hotkeys_are_registered_while_task_table_is_focused() {
     for hotkey in [
         keys::TASK_TITLE_FIELD.hotkey(),
         keys::TASK_TAGS_FIELD.hotkey(),
+        keys::TASK_CHECKLIST_FIELD.hotkey(),
         keys::TASK_LINKS_FIELD.hotkey(),
     ] {
         assert_eq!(
@@ -842,6 +871,26 @@ fn task_detail_hotkeys_are_registered_while_task_table_is_focused() {
             "{hotkey} should be registered exactly once"
         );
     }
+}
+
+#[test]
+fn reselecting_current_task_does_not_rebuild_detail_controls() {
+    let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+        tasks: vec![test_task()],
+        people: Vec::new(),
+        projects: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut workspace = TaskWorkspace::new(context);
+    let original_patches = Rc::clone(&workspace.detail().patches);
+
+    workspace.select_task("task-1", &mut EventCtx::default());
+
+    assert!(Rc::ptr_eq(&original_patches, &workspace.detail().patches));
+    assert_eq!(
+        store.borrow().state().selected_task_id.as_deref(),
+        Some("task-1")
+    );
 }
 
 #[test]

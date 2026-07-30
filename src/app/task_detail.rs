@@ -10,6 +10,10 @@ pub(super) struct TaskDetailForm {
     pub(super) root: Flex<AppMsg>,
     pub(super) task_id: Option<String>,
     pub(super) task_state: Option<TaskState>,
+    pub(super) task_snapshot: Option<Task>,
+    pub(super) people_snapshot: Vec<Person>,
+    pub(super) projects_snapshot: Vec<Project>,
+    pub(super) tags_snapshot: Vec<Tag>,
     pub(super) patches: PatchSink,
     pub(super) save_status: SaveStatusLine,
 }
@@ -39,6 +43,10 @@ impl TaskDetailForm {
             ),
             task_id: task.map(|task| task.id.clone()),
             task_state: task.map(|task| task.state),
+            task_snapshot: task.cloned(),
+            people_snapshot: people.to_vec(),
+            projects_snapshot: projects.to_vec(),
+            tags_snapshot: tags.to_vec(),
             patches,
             save_status,
         }
@@ -68,6 +76,10 @@ impl TaskDetailForm {
         self.patches = Rc::new(RefCell::new(Vec::new()));
         self.task_id = task.map(|task| task.id.clone());
         self.task_state = task.map(|task| task.state);
+        self.task_snapshot = task.cloned();
+        self.people_snapshot = people.to_vec();
+        self.projects_snapshot = projects.to_vec();
+        self.tags_snapshot = tags.to_vec();
         self.save_status = SaveStatusLine::new(save_error);
         self.root
             .replace(
@@ -354,7 +366,7 @@ impl TaskTagsInput {
             |tag| tag.label.clone(),
         )
         .selected_existing(task.tag_ids.iter().cloned())
-        .placeholder("Add tags")
+        .placeholder("No tags added")
         .panel("Tags")
         .hotkey(keys::TASK_TAGS_FIELD.hotkey());
         Self {
@@ -600,18 +612,7 @@ pub(super) fn detail_form(
         .child("save-status", save_status, FlexItem::content())
         .child(
             "title",
-            TextInput::<AppMsg>::new()
-                .value(task.title.clone())
-                .placeholder("Task title")
-                .panel("Title")
-                .hotkey(keys::TASK_TITLE_FIELD.hotkey())
-                .on_edit_end({
-                    let patch_sink = Rc::clone(&patch_sink);
-                    move |value| {
-                        patch_sink.borrow_mut().push(TaskPatch::Title(value));
-                        AppMsg::Noop
-                    }
-                }),
+            TaskTitleInput::new(&task.title, Rc::clone(&patch_sink)),
             FlexItem::fixed(3),
         )
         .child(
@@ -654,6 +655,11 @@ pub(super) fn detail_form(
         .child(
             "tags",
             TaskTagsInput::new(task, tags, Rc::clone(&patch_sink)),
+            FlexItem::content(),
+        )
+        .child(
+            "checklist",
+            TaskChecklistInput::new(task, Rc::clone(&patch_sink)),
             FlexItem::content(),
         )
         .child(

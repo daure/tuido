@@ -11,8 +11,8 @@ use uuid::Uuid;
 
 use crate::{
     domain::{
-        Person, PersonPatch, Project, ProjectPatch, Tag, TagPatch, Task, TaskPatch, TaskRank,
-        WorkspaceSnapshot,
+        ChecklistItem, Person, PersonPatch, Project, ProjectPatch, Tag, TagPatch, Task, TaskPatch,
+        TaskRank, WorkspaceSnapshot,
     },
     storage::{self, SqlDialect, Storage},
 };
@@ -21,7 +21,7 @@ mod settings;
 mod validation;
 
 use validation::{
-    task_matches_workspace_filter, validate_required, validate_task_patch,
+    task_matches_workspace_filter, validate_required, validate_task_checklist, validate_task_patch,
     validate_task_temporal_fields, validate_task_update, validate_workspace_filter,
 };
 
@@ -144,9 +144,30 @@ pub struct TaskView {
     pub people_ids: Vec<String>,
     pub project_ids: Vec<String>,
     pub tag_ids: Vec<String>,
+    /// Ordered checklist tree. Children are ordered as shown in the task detail view.
+    pub checklist: Vec<ChecklistItemView>,
     /// Task URLs, deduplicated and sorted lexicographically.
     pub links: Vec<String>,
     pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
+pub struct ChecklistItemView {
+    pub id: String,
+    pub text: String,
+    pub checked: bool,
+    pub children: Vec<ChecklistItemView>,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct ChecklistItemInput {
+    /// Existing item ID to preserve, or omit to generate a new ID.
+    pub id: Option<String>,
+    pub text: String,
+    #[serde(default)]
+    pub checked: bool,
+    #[serde(default)]
+    pub children: Vec<ChecklistItemInput>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -507,7 +528,9 @@ impl TuidoService {
             task.snoozed_until.is_some(),
         )?;
         normalize_task_links(&mut task.links);
+        normalize_task_checklist(&mut task.checklist);
         validation::validate_task_links(&task.links)?;
+        validate_task_checklist(&task.checklist)?;
         let sql = format!(
             "INSERT INTO tasks (id, rank, title, state, workflow_state, rejected, size, priority, start_date, due_date, snoozed_until, description, created_at, updated_at) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
             self.dialect.placeholder(1),
@@ -571,6 +594,8 @@ impl TuidoService {
             .await?;
         self.replace_task_links(&mut tx, &task.id, &task.links)
             .await?;
+        self.replace_task_checklist(&mut tx, &task.id, &task.checklist)
+            .await?;
         tx.commit().await.map_err(storage_error)?;
         Ok(Versioned {
             revision: 1,
@@ -604,6 +629,7 @@ impl TuidoService {
             people_ids: input.people_ids,
             project_ids: input.project_ids,
             tag_ids: input.tag_ids,
+            checklist: Vec::new(),
             links: input.links,
             description: input.description,
         })
@@ -688,6 +714,9 @@ impl TuidoService {
         if let TaskPatch::Links(links) = &mut patch {
             normalize_task_links(links);
         }
+        if let TaskPatch::Checklist(items) = &mut patch {
+            normalize_task_checklist(items);
+        }
         validate_task_patch(&patch)?;
         let mut tx = self.pool.begin().await.map_err(storage_error)?;
         self.claim(&mut tx, "tasks", "task", &id, expected).await?;
@@ -736,6 +765,9 @@ impl TuidoService {
                     .await?;
             }
             TaskPatch::Links(links) => self.replace_task_links(&mut tx, &id, &links).await?,
+            TaskPatch::Checklist(items) => {
+                self.replace_task_checklist(&mut tx, &id, &items).await?
+            }
             patch => apply_task_patch(&mut tx, self.dialect, &id, patch).await?,
         }
         let touch = format!(
@@ -764,6 +796,19 @@ impl TuidoService {
         links: Vec<String>,
     ) -> ServiceResult<Versioned<TaskView>> {
         self.patch_task(id.clone(), expected_revision, TaskPatch::Links(links))
+            .await?;
+        self.get_task(&id).await
+    }
+
+    pub async fn set_task_checklist(
+        &self,
+        id: String,
+        expected_revision: u64,
+        checklist: Vec<ChecklistItemInput>,
+    ) -> ServiceResult<Versioned<TaskView>> {
+        let mut items = Vec::new();
+        flatten_checklist_inputs(checklist, None, &mut items);
+        self.patch_task(id.clone(), expected_revision, TaskPatch::Checklist(items))
             .await?;
         self.get_task(&id).await
     }
@@ -1279,6 +1324,57 @@ impl TuidoService {
         }
         Ok(())
     }
+    async fn replace_task_checklist(
+        &self,
+        tx: &mut Transaction<'_, Any>,
+        task_id: &str,
+        items: &[ChecklistItem],
+    ) -> ServiceResult<()> {
+        let delete = format!(
+            "DELETE FROM task_checklist_items WHERE task_id = {}",
+            self.dialect.placeholder(1)
+        );
+        sqlx::query(AssertSqlSafe(delete.as_str()))
+            .bind(task_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(storage_error)?;
+        let insert = format!(
+            "INSERT INTO task_checklist_items (id, task_id, parent_id, position, text, checked) VALUES ({}, {}, NULL, {}, {}, {})",
+            self.dialect.placeholder(1),
+            self.dialect.placeholder(2),
+            self.dialect.placeholder(3),
+            self.dialect.placeholder(4),
+            self.dialect.placeholder(5)
+        );
+        for (position, item) in items.iter().enumerate() {
+            sqlx::query(AssertSqlSafe(insert.as_str()))
+                .bind(&item.id)
+                .bind(task_id)
+                .bind(position as i64)
+                .bind(&item.text)
+                .bind(item.checked)
+                .execute(&mut **tx)
+                .await
+                .map_err(storage_error)?;
+        }
+        let update_parent = format!(
+            "UPDATE task_checklist_items SET parent_id = {} WHERE id = {} AND task_id = {}",
+            self.dialect.placeholder(1),
+            self.dialect.placeholder(2),
+            self.dialect.placeholder(3)
+        );
+        for item in items.iter().filter(|item| item.parent_id.is_some()) {
+            sqlx::query(AssertSqlSafe(update_parent.as_str()))
+                .bind(&item.parent_id)
+                .bind(&item.id)
+                .bind(task_id)
+                .execute(&mut **tx)
+                .await
+                .map_err(storage_error)?;
+        }
+        Ok(())
+    }
     async fn delete(
         &self,
         table: &'static str,
@@ -1419,6 +1515,7 @@ fn versioned<T>(
         .ok_or(ServiceError::NotFound { entity, id })
 }
 fn task_view(v: Task) -> TaskView {
+    let checklist = checklist_views(&v.checklist, None);
     TaskView {
         id: v.id,
         title: v.title,
@@ -1431,14 +1528,52 @@ fn task_view(v: Task) -> TaskView {
         people_ids: v.people_ids,
         project_ids: v.project_ids,
         tag_ids: v.tag_ids,
+        checklist,
         links: v.links,
         description: v.description,
+    }
+}
+
+fn checklist_views(items: &[ChecklistItem], parent_id: Option<&str>) -> Vec<ChecklistItemView> {
+    items
+        .iter()
+        .filter(|item| item.parent_id.as_deref() == parent_id)
+        .map(|item| ChecklistItemView {
+            id: item.id.clone(),
+            text: item.text.clone(),
+            checked: item.checked,
+            children: checklist_views(items, Some(&item.id)),
+        })
+        .collect()
+}
+
+fn flatten_checklist_inputs(
+    inputs: Vec<ChecklistItemInput>,
+    parent_id: Option<String>,
+    output: &mut Vec<ChecklistItem>,
+) {
+    for input in inputs {
+        let id = input.id.unwrap_or_else(|| Uuid::new_v4().to_string());
+        let children = input.children;
+        output.push(ChecklistItem {
+            id: id.clone(),
+            parent_id: parent_id.clone(),
+            text: input.text,
+            checked: input.checked,
+        });
+        flatten_checklist_inputs(children, Some(id), output);
     }
 }
 
 fn normalize_task_links(links: &mut Vec<String>) {
     links.sort();
     links.dedup();
+}
+
+fn normalize_task_checklist(items: &mut [ChecklistItem]) {
+    for item in items {
+        item.text = item.text.trim().to_string();
+    }
 }
 
 fn storage_workflow_state(v: &str) -> &str {
@@ -1525,6 +1660,7 @@ async fn apply_task_patch(
         TaskPatch::People(_)
         | TaskPatch::Projects(_)
         | TaskPatch::Tags(_)
+        | TaskPatch::Checklist(_)
         | TaskPatch::Links(_) => {
             return Err(ServiceError::Invalid(
                 "relation patch requires full task update".into(),

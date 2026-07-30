@@ -1988,6 +1988,7 @@ fn title_blur_during_description_hotkey_preserves_description_focus() {
                 people_ids: Vec::new(),
                 project_ids: Vec::new(),
                 tag_ids: Vec::new(),
+                checklist: Vec::new(),
                 links: Vec::new(),
                 description: "Existing detail".to_string(),
             }],

@@ -38,16 +38,20 @@ use tuicore::{
     LayoutSizeHint, LifecycleCtx, ListControl, ListControlEvent, ListControlField,
     ListControlKeyBindings, MenuButton, MenuItem, Paragraph, Propagation, RenderCtx,
     SeasonalEmptyState, SelectedTag, SelectionMode, SelectionTrigger, Split, StatusBar,
-    StatusBarMenuItem, Store, Tab, Tabs, TabsVariant, TagInput, TagInputEvent, TextInput,
-    TextareaInput, TickResult, TreeApp, TreePath, TuiEvent, TuiNode, WeatherProviderConfig,
+    StatusBarMenuItem, Store, Tab, Tabs, TabsVariant, TagInput, TagInputEvent, TextareaInput,
+    TickResult, TreeApp, TreePath, TuiEvent, TuiNode, WeatherProviderConfig,
 };
 use uuid::Uuid;
 
+mod task_checklist_input;
 mod task_copy;
 mod task_links_input;
+mod task_title_input;
 
+use task_checklist_input::TaskChecklistInput;
 use task_copy::TaskCopyContext;
 use task_links_input::TaskLinksInput;
+use task_title_input::TaskTitleInput;
 
 const PEOPLE_MENU_ID: &str = "people";
 const PROJECTS_MENU_ID: &str = "projects";
@@ -1566,9 +1570,14 @@ impl TaskWorkspace {
                 .dispatch(AppEvent::SelectTask(task_id.clone()));
         }
 
-        let detail_needs_refresh = self.detail().task_id.as_deref() != selected_task_id.as_deref()
+        let detail_identity_changed = self.detail().task_id.as_deref()
+            != selected_task_id.as_deref()
             || self.detail().task_state != selected_task.map(|task| task.state);
-        if detail_needs_refresh || refresh_detail {
+        let detail_content_changed = self.detail().task_snapshot.as_ref() != selected_task
+            || self.detail().people_snapshot != state.people
+            || self.detail().projects_snapshot != state.projects
+            || self.detail().tags_snapshot != state.tags;
+        if detail_identity_changed || (refresh_detail && detail_content_changed) {
             self.detail_mut().set_task(
                 selected_task,
                 &state.people,
@@ -1579,6 +1588,13 @@ impl TaskWorkspace {
             );
         } else {
             self.detail_mut().task_state = selected_task.map(|task| task.state);
+            if !external_refresh {
+                let detail = self.detail_mut();
+                detail.task_snapshot = selected_task.cloned();
+                detail.people_snapshot = state.people.clone();
+                detail.projects_snapshot = state.projects.clone();
+                detail.tags_snapshot = state.tags.clone();
+            }
         }
         self.detail_mut().set_save_error(save_error.as_deref());
         self.known_task_ids = state.tasks.iter().map(|task| task.id.clone()).collect();
@@ -1714,14 +1730,16 @@ impl TaskWorkspace {
         let state = self.context.store.borrow().state().clone();
         let selected_task = state.tasks.iter().find(|task| task.id == id);
         let save_error = selected_task.and_then(|task| state.task_status_error(&task.id));
-        self.detail_mut().set_task(
-            selected_task,
-            &state.people,
-            &state.projects,
-            &state.tags,
-            save_error,
-            ctx,
-        );
+        if self.detail().task_id.as_deref() != Some(id) {
+            self.detail_mut().set_task(
+                selected_task,
+                &state.people,
+                &state.projects,
+                &state.tags,
+                save_error,
+                ctx,
+            );
+        }
         let visibility_changed = self.layout.second_mut().set_second_visible(true);
         outcome.changed || visibility_changed
     }
@@ -1891,10 +1909,12 @@ impl TaskWorkspace {
         let detail_route = route_keys.first() == Some(&ChildKey::second())
             && route_keys.get(1) == Some(&ChildKey::second());
         let links_route = route_keys.iter().any(|key| key.as_str() == "links");
+        let checklist_route = route_keys.iter().any(|key| key.as_str() == "checklist");
         if child_outcome.handled()
             || ctx.propagation() != Propagation::Continue
             || !detail_route
             || links_route
+            || checklist_route
             || !keys::TASK_DELETE_CTRL_X.matches(event)
         {
             return None;

@@ -267,6 +267,7 @@ mod tests {
             people_ids: Vec::new(),
             project_ids: Vec::new(),
             tag_ids: Vec::new(),
+            checklist: Vec::new(),
             links: Vec::new(),
             description: String::new(),
         }

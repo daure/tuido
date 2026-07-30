@@ -8,7 +8,7 @@ use sqlx::{
 };
 
 use crate::domain::{
-    Person, Project, Tag, Task, TaskPriority, TaskSize, TaskState, WorkspaceSnapshot,
+    ChecklistItem, Person, Project, Tag, Task, TaskPriority, TaskSize, TaskState, WorkspaceSnapshot,
 };
 use crate::snooze::parse_datetime;
 
@@ -183,6 +183,7 @@ async fn load_workspace(
         let people_ids = load_task_people(pool, dialect, &id).await?;
         let project_ids = load_task_projects(pool, dialect, &id).await?;
         let tag_ids = load_task_tags(pool, dialect, &id).await?;
+        let checklist = load_task_checklist(pool, dialect, &id).await?;
         let links = load_task_links(pool, dialect, &id).await?;
 
         let task = Task {
@@ -208,6 +209,7 @@ async fn load_workspace(
             people_ids,
             project_ids,
             tag_ids,
+            checklist,
             links,
             description: row.try_get("description")?,
         };
@@ -220,6 +222,31 @@ async fn load_workspace(
         projects,
         tags,
     })
+}
+
+async fn load_task_checklist(
+    pool: &AnyPool,
+    dialect: SqlDialect,
+    task_id: &str,
+) -> Result<Vec<ChecklistItem>, Box<dyn std::error::Error>> {
+    let query = format!(
+        "SELECT id, parent_id, text, CAST(CASE WHEN checked THEN 1 ELSE 0 END AS BIGINT) AS checked FROM task_checklist_items WHERE task_id = {} ORDER BY position, id",
+        dialect.placeholder(1)
+    );
+    sqlx::query(AssertSqlSafe(query.as_str()))
+        .bind(task_id)
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .map(|row| {
+            Ok(ChecklistItem {
+                id: row.try_get("id")?,
+                parent_id: row.try_get("parent_id")?,
+                text: row.try_get("text")?,
+                checked: row.try_get::<i64, _>("checked")? != 0,
+            })
+        })
+        .collect()
 }
 
 pub(crate) async fn load_workspace_for_service(

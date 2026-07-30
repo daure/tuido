@@ -703,7 +703,7 @@ fn retained_selection<T>(
         .or_else(|| values.first().map(id).cloned())
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Task {
     pub id: String,
     pub rank: i64,
@@ -717,6 +717,7 @@ pub struct Task {
     pub people_ids: Vec<String>,
     pub project_ids: Vec<String>,
     pub tag_ids: Vec<String>,
+    pub checklist: Vec<ChecklistItem>,
     pub links: Vec<String>,
     pub description: String,
 }
@@ -736,10 +737,19 @@ impl Task {
             people_ids: Vec::new(),
             project_ids: Vec::new(),
             tag_ids: Vec::new(),
+            checklist: Vec::new(),
             links: Vec::new(),
             description,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChecklistItem {
+    pub id: String,
+    pub parent_id: Option<String>,
+    pub text: String,
+    pub checked: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -748,7 +758,7 @@ pub struct TaskRank {
     pub rank: i64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Person {
     pub id: String,
     pub name: String,
@@ -782,7 +792,7 @@ pub struct PersonDeletion {
     pub lead_project_ids: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Project {
     pub id: String,
     pub key: String,
@@ -846,6 +856,7 @@ pub enum TaskField {
     People,
     Projects,
     Tags,
+    Checklist,
     Links,
     Snooze,
 }
@@ -883,6 +894,7 @@ pub enum TaskPatch {
     People(Vec<String>),
     Projects(Vec<String>),
     Tags(Vec<Tag>),
+    Checklist(Vec<ChecklistItem>),
     Links(Vec<String>),
     Snooze {
         until: PrimitiveDateTime,
@@ -904,6 +916,7 @@ impl TaskPatch {
             Self::People(_) => TaskField::People,
             Self::Projects(_) => TaskField::Projects,
             Self::Tags(_) => TaskField::Tags,
+            Self::Checklist(_) => TaskField::Checklist,
             Self::Links(_) => TaskField::Links,
             Self::Snooze { .. } | Self::Unsnooze => TaskField::Snooze,
         }
@@ -1164,6 +1177,10 @@ fn apply_task_patch(task: &mut Task, available_tags: &mut Vec<Tag>, patch: &Task
                 task.tag_ids = next_tag_ids;
                 true
             }
+        }
+        TaskPatch::Checklist(checklist) if task.checklist != *checklist => {
+            task.checklist = checklist.clone();
+            true
         }
         TaskPatch::Links(links) => {
             let mut links = links.clone();

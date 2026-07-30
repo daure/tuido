@@ -13,12 +13,13 @@ use serde::{Deserialize, Serialize};
 use crate::{
     domain::{TaskPatch, TaskState},
     service::{
-        PersonInput, PersonView, ProjectInput, ProjectView, ServiceError, TagInput, TagView,
-        TaskCreate, TaskUpdate, TaskView, TuidoService, Versioned, WorkspaceFilter, WorkspaceView,
+        ChecklistItemInput, PersonInput, PersonView, ProjectInput, ProjectView, ServiceError,
+        TagInput, TagView, TaskCreate, TaskUpdate, TaskView, TuidoService, Versioned,
+        WorkspaceFilter, WorkspaceView,
     },
 };
 
-const MCP_INSTRUCTIONS: &str = "Read and mutate Tuido tasks, people, projects, and tags. Treat task state as user-facing Status, not Type or Workflow. Task people are people involved besides the workspace owner; never describe them as assignees or owners. Revisions are internal optimistic-concurrency tokens: use the latest entity revision as expected_revision for mutations, but omit revisions from user-facing task tables and summaries unless the user asks for them.";
+const MCP_INSTRUCTIONS: &str = "Read and mutate Tuido tasks, task checklists, people, projects, and tags. Replace checklists as complete ordered trees rather than issuing granular item actions. Treat task state as user-facing Status, not Type or Workflow. Task people are people involved besides the workspace owner; never describe them as assignees or owners. Revisions are internal optimistic-concurrency tokens: use the latest entity revision as expected_revision for mutations, but omit revisions from user-facing task tables and summaries unless the user asks for them.";
 
 #[derive(Clone)]
 struct McpServer {
@@ -67,6 +68,14 @@ struct TaskLinksUpdate {
     expected_revision: u64,
     /// Complete set of task URLs. Replaces existing links; use an empty list to remove all links.
     links: Vec<String>,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+struct TaskChecklistUpdate {
+    id: String,
+    #[schemars(schema_with = "crate::service::revision_schema")]
+    expected_revision: u64,
+    /// Complete ordered checklist tree. Replaces every existing item; use [] to clear it.
+    checklist: Vec<ChecklistItemInput>,
 }
 #[derive(Debug, Deserialize, JsonSchema)]
 struct TaskTagsUpdate {
@@ -191,6 +200,20 @@ impl McpServer {
         preflight_task_expirations(&self.service).await?;
         self.service
             .set_task_links(v.id, v.expected_revision, v.links)
+            .await
+            .map(Json)
+            .map_err(mcp_error)
+    }
+    #[tool(
+        description = "Replace a task's complete ordered checklist tree. Get the task first, submit the full desired tree, and use the latest expected_revision. Existing item IDs may be preserved; omitted IDs are generated. Items absent from the submitted tree are deleted. Pass [] to clear the checklist."
+    )]
+    async fn set_task_checklist(
+        &self,
+        Parameters(v): Parameters<TaskChecklistUpdate>,
+    ) -> Result<Json<Versioned<TaskView>>, String> {
+        preflight_task_expirations(&self.service).await?;
+        self.service
+            .set_task_checklist(v.id, v.expected_revision, v.checklist)
             .await
             .map(Json)
             .map_err(mcp_error)
@@ -661,6 +684,8 @@ mod tests {
         assert!(tools.contains("should normally be omitted from user-facing summaries"));
         assert!(tools.contains("set_task_links"));
         assert!(tools.contains("complete link set"));
+        assert!(tools.contains("set_task_checklist"));
+        assert!(tools.contains("complete ordered checklist tree"));
     }
 
     #[test]
@@ -1063,6 +1088,71 @@ mod tests {
                 .0;
             assert_eq!(cleared.revision, 3);
             assert!(cleared.value.links.is_empty());
+        });
+    }
+
+    #[test]
+    fn agents_replace_complete_ordered_checklist_trees() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let service = TuidoService::connect_url("sqlite::memory:").await.unwrap();
+            let server = McpServer::new(service);
+            let task = server
+                .create_task(Parameters(TaskCreate {
+                    title: "Release".into(),
+                    description: String::new(),
+                    size: "small".into(),
+                    state: "todo".into(),
+                    priority: "medium".into(),
+                    start_date: None,
+                    due_date: None,
+                    snoozed_until: None,
+                    people_ids: Vec::new(),
+                    project_ids: Vec::new(),
+                    tag_ids: Vec::new(),
+                    links: Vec::new(),
+                }))
+                .await
+                .unwrap()
+                .0;
+
+            let updated = server
+                .set_task_checklist(Parameters(TaskChecklistUpdate {
+                    id: task.value.id,
+                    expected_revision: task.revision,
+                    checklist: vec![ChecklistItemInput {
+                        id: None,
+                        text: "Publish".into(),
+                        checked: false,
+                        children: vec![ChecklistItemInput {
+                            id: None,
+                            text: "Tag release".into(),
+                            checked: true,
+                            children: Vec::new(),
+                        }],
+                    }],
+                }))
+                .await
+                .unwrap()
+                .0;
+            assert_eq!(updated.revision, 2);
+            assert_eq!(updated.value.checklist[0].text, "Publish");
+            assert_eq!(updated.value.checklist[0].children[0].text, "Tag release");
+            assert!(updated.value.checklist[0].children[0].checked);
+
+            let cleared = server
+                .set_task_checklist(Parameters(TaskChecklistUpdate {
+                    id: updated.value.id,
+                    expected_revision: updated.revision,
+                    checklist: Vec::new(),
+                }))
+                .await
+                .unwrap()
+                .0;
+            assert!(cleared.value.checklist.is_empty());
         });
     }
 

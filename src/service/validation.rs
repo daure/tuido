@@ -219,8 +219,47 @@ pub(super) fn validate_task_patch(patch: &TaskPatch) -> ServiceResult<()> {
             "use snooze action to set snoozed state and snoozed_until together".into(),
         )),
         TaskPatch::Links(links) => validate_task_links(links),
+        TaskPatch::Checklist(items) => validate_task_checklist(items),
         _ => Ok(()),
     }
+}
+
+pub(super) fn validate_task_checklist(items: &[crate::domain::ChecklistItem]) -> ServiceResult<()> {
+    let mut ids = std::collections::HashSet::new();
+    for item in items {
+        validate_required("checklist item text", &item.text)?;
+        if item.id.trim().is_empty() || !ids.insert(item.id.as_str()) {
+            return Err(ServiceError::Invalid(
+                "checklist item IDs must be non-empty and unique".into(),
+            ));
+        }
+    }
+    for item in items {
+        if item
+            .parent_id
+            .as_ref()
+            .is_some_and(|parent_id| parent_id == &item.id || !ids.contains(parent_id.as_str()))
+        {
+            return Err(ServiceError::Invalid(format!(
+                "checklist item {} has an invalid parent",
+                item.id
+            )));
+        }
+        let mut parent_id = item.parent_id.as_deref();
+        let mut visited = std::collections::HashSet::new();
+        while let Some(parent) = parent_id {
+            if !visited.insert(parent) {
+                return Err(ServiceError::Invalid(
+                    "checklist must not contain cycles".into(),
+                ));
+            }
+            parent_id = items
+                .iter()
+                .find(|candidate| candidate.id == parent)
+                .and_then(|candidate| candidate.parent_id.as_deref());
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn validate_task_links(links: &[String]) -> ServiceResult<()> {
