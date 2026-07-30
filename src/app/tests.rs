@@ -65,11 +65,17 @@ fn task_move_mode_uses_configured_control_m_and_emits_completed_order() {
     table.event(&TuiEvent::Key(KeyEvent::from(Key::Down)), &mut ctx);
     table.event(&TuiEvent::Key(KeyEvent::from(Key::Enter)), &mut ctx);
 
-    assert!(matches!(
-        table.take_events().as_slice(),
-        [ListControlEvent::Reordered { row_ids }]
-            if row_ids == &["second".to_string(), "first".to_string()]
-    ));
+    let reordered = table
+        .take_events()
+        .into_iter()
+        .find_map(|event| match event {
+            ListControlEvent::Reordered { row_ids } => Some(row_ids),
+            _ => None,
+        });
+    assert_eq!(
+        reordered,
+        Some(vec!["second".to_string(), "first".to_string()])
+    );
 }
 
 #[test]
@@ -922,35 +928,6 @@ fn ctrl_x_removes_highlighted_task_link() {
 
     assert!(effects.outcome.handled());
     assert!(matches!(patches.borrow().as_slice(), [TaskPatch::Links(links)] if links.is_empty()));
-}
-
-#[test]
-fn task_detail_uses_blank_empty_value_placeholders() {
-    let mut task = test_task();
-    task.start_date = None;
-    task.due_date = None;
-    task.people_ids.clear();
-    task.project_ids.clear();
-    task.tag_ids.clear();
-    let mut form = detail_form(
-        Some(&task),
-        &[],
-        &[],
-        &[],
-        Rc::new(RefCell::new(Vec::new())),
-        SaveStatusLine::new(None),
-    );
-
-    let area = Rect::new(0, 0, 100, 30);
-    form.layout(area, &mut LayoutCtx::new());
-    let text = rendered_text(&form, area);
-
-    for placeholder in ["Select...", "Select date", "add tags"] {
-        assert!(
-            !text.contains(placeholder),
-            "placeholder leaked: {placeholder}"
-        );
-    }
 }
 
 #[test]

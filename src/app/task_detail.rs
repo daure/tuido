@@ -3,6 +3,9 @@ use super::*;
 #[cfg(test)]
 use tuicore::SeasonalGlyphs;
 
+const DATE_PLACEHOLDER: &str = "YYYY-MM-DD";
+const DATE_TIME_PLACEHOLDER: &str = "YYYY-MM-DD HH:MM";
+
 pub(super) struct TaskDetailForm {
     pub(super) root: Flex<AppMsg>,
     pub(super) task_id: Option<String>,
@@ -351,7 +354,7 @@ impl TaskTagsInput {
             |tag| tag.label.clone(),
         )
         .selected_existing(task.tag_ids.iter().cloned())
-        .placeholder("")
+        .placeholder("Add tags")
         .panel("Tags")
         .hotkey(keys::TASK_TAGS_FIELD.hotkey());
         Self {
@@ -488,7 +491,7 @@ pub(super) fn detail_form(
         .gap(1)
         .child(
             "state",
-            dropdown_single("State", state_choices(), task.state.id(), {
+            dropdown_single("State", "Select state", state_choices(), task.state.id(), {
                 let patch_sink = Rc::clone(&patch_sink);
                 move |id| {
                     if let Some(value) = TaskState::parse(&id) {
@@ -501,20 +504,26 @@ pub(super) fn detail_form(
         )
         .child(
             "priority",
-            dropdown_single("Priority", priority_choices(), task.priority.id(), {
-                let patch_sink = Rc::clone(&patch_sink);
-                move |id| {
-                    if let Some(value) = TaskPriority::parse(&id) {
-                        patch_sink.borrow_mut().push(TaskPatch::Priority(value));
+            dropdown_single(
+                "Priority",
+                "Select priority",
+                priority_choices(),
+                task.priority.id(),
+                {
+                    let patch_sink = Rc::clone(&patch_sink);
+                    move |id| {
+                        if let Some(value) = TaskPriority::parse(&id) {
+                            patch_sink.borrow_mut().push(TaskPatch::Priority(value));
+                        }
                     }
-                }
-            })
+                },
+            )
             .hotkey(keys::TASK_PRIORITY_FIELD.hotkey()),
             FlexItem::fill(1),
         )
         .child(
             "size",
-            dropdown_single("Size", size_choices(), task.size.id(), {
+            dropdown_single("Size", "Select size", size_choices(), task.size.id(), {
                 let patch_sink = Rc::clone(&patch_sink);
                 move |id| {
                     if let Some(value) = TaskSize::parse(&id) {
@@ -532,7 +541,7 @@ pub(super) fn detail_form(
             "snoozed-until",
             DateTimePickerDropdown::<AppMsg>::new()
                 .value(task.snoozed_until)
-                .placeholder("")
+                .placeholder(DATE_TIME_PLACEHOLDER)
                 .panel("Snoozed until")
                 .hotkey(keys::TASK_SNOOZED_UNTIL_FIELD.hotkey())
                 .on_select({
@@ -553,7 +562,7 @@ pub(super) fn detail_form(
             "start-date",
             DatePickerDropdown::<AppMsg>::new()
                 .value(parse_date(task.start_date.as_deref()))
-                .placeholder("")
+                .placeholder(DATE_PLACEHOLDER)
                 .panel("Start date")
                 .hotkey(keys::TASK_START_DATE_FIELD.hotkey())
                 .on_select({
@@ -571,7 +580,7 @@ pub(super) fn detail_form(
             "end-date",
             DatePickerDropdown::<AppMsg>::new()
                 .value(parse_date(task.due_date.as_deref()))
-                .placeholder("")
+                .placeholder(DATE_PLACEHOLDER)
                 .panel("End date")
                 .hotkey(keys::TASK_END_DATE_FIELD.hotkey())
                 .on_select({
@@ -593,6 +602,7 @@ pub(super) fn detail_form(
             "title",
             TextInput::<AppMsg>::new()
                 .value(task.title.clone())
+                .placeholder("Task title")
                 .panel("Title")
                 .hotkey(keys::TASK_TITLE_FIELD.hotkey())
                 .on_edit_end({
@@ -608,6 +618,7 @@ pub(super) fn detail_form(
             "description",
             TextareaInput::<AppMsg>::new()
                 .value(task.description.clone())
+                .placeholder("Task description")
                 .panel("Description")
                 .hotkey(keys::TASK_DESCRIPTION_FIELD.hotkey())
                 .editor_hotkey(keys::TASK_DESCRIPTION_EDITOR.hotkey())
@@ -731,13 +742,14 @@ pub(super) fn focus_task_table(ctx: &mut EventCtx<AppMsg>) {
 
 pub(super) fn dropdown_single(
     label: &'static str,
+    placeholder: &'static str,
     rows: Vec<Choice>,
     selected: &str,
     on_select: impl Fn(String) + 'static,
 ) -> Dropdown<Choice, String> {
     Dropdown::single(rows, |row| row.id.clone(), |row| row.label.clone())
         .label(label)
-        .placeholder("")
+        .placeholder(placeholder)
         .selected_one(selected.to_string())
         .search_mode(DropdownSearchMode::Contains)
         .commit_mode(DropdownCommitMode::Explicit)
@@ -750,13 +762,14 @@ pub(super) fn dropdown_single(
 
 pub(super) fn dropdown_multi(
     label: &'static str,
+    placeholder: &'static str,
     rows: Vec<Choice>,
     selected: &[String],
     on_select: impl Fn(Vec<String>) + 'static,
 ) -> Dropdown<Choice, String> {
     Dropdown::multi(rows, |row| row.id.clone(), |row| row.label.clone())
         .label(label)
-        .placeholder("")
+        .placeholder(placeholder)
         .selected(selected.iter().cloned())
         .search_mode(DropdownSearchMode::Contains)
         .on_select(on_select)
@@ -769,6 +782,7 @@ pub(super) fn task_people_dropdown(
 ) -> Dropdown<Choice, String> {
     dropdown_multi(
         "People",
+        "Select people",
         person_choices(people),
         &task.people_ids,
         move |ids| patch_sink.borrow_mut().push(TaskPatch::People(ids)),
@@ -783,6 +797,7 @@ pub(super) fn task_projects_dropdown(
 ) -> Dropdown<Choice, String> {
     dropdown_multi(
         "Projects",
+        "Select projects",
         project_choices(projects),
         &task.project_ids,
         move |ids| patch_sink.borrow_mut().push(TaskPatch::Projects(ids)),

@@ -432,6 +432,7 @@ fn tag_detail_form(
             "label",
             TextInput::new()
                 .value(tag.label.clone())
+                .placeholder("Tag label")
                 .panel("Label")
                 .hotkey(keys::TAG_LABEL_FIELD.hotkey())
                 .on_edit_end(move |value| {

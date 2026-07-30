@@ -44,6 +44,7 @@ impl CreateManagementDialog {
         let secondary = Rc::new(RefCell::new(String::new()));
         let description = Rc::new(RefCell::new(String::new()));
         let mut first = TextInput::new()
+            .placeholder(primary_placeholder(kind))
             .panel(primary_label(kind))
             .focused(true)
             .on_change({
@@ -72,13 +73,16 @@ impl CreateManagementDialog {
         if kind != ManagementDialogKind::Tags {
             root = root.child(
                 "secondary",
-                TextInput::new().panel(secondary_label(kind)).on_change({
-                    let secondary = Rc::clone(&secondary);
-                    move |value| {
-                        *secondary.borrow_mut() = value;
-                        AppMsg::Noop
-                    }
-                }),
+                TextInput::new()
+                    .placeholder(secondary_placeholder(kind))
+                    .panel(secondary_label(kind))
+                    .on_change({
+                        let secondary = Rc::clone(&secondary);
+                        move |value| {
+                            *secondary.borrow_mut() = value;
+                            AppMsg::Noop
+                        }
+                    }),
                 FlexItem::fixed(3),
             );
         }
@@ -89,6 +93,7 @@ impl CreateManagementDialog {
             root = root.child(
                 "description",
                 TextareaInput::new()
+                    .placeholder(description_placeholder(kind))
                     .panel(if kind == ManagementDialogKind::People {
                         "About"
                     } else {
@@ -186,6 +191,30 @@ fn secondary_label(kind: ManagementDialogKind) -> &'static str {
     match kind {
         ManagementDialogKind::People => "Email",
         ManagementDialogKind::Projects => "Name",
+        ManagementDialogKind::Tags => "",
+    }
+}
+
+fn primary_placeholder(kind: ManagementDialogKind) -> &'static str {
+    match kind {
+        ManagementDialogKind::People => "Person name",
+        ManagementDialogKind::Projects => "Project key",
+        ManagementDialogKind::Tags => "Tag label",
+    }
+}
+
+fn secondary_placeholder(kind: ManagementDialogKind) -> &'static str {
+    match kind {
+        ManagementDialogKind::People => "Email address",
+        ManagementDialogKind::Projects => "Project name",
+        ManagementDialogKind::Tags => "",
+    }
+}
+
+fn description_placeholder(kind: ManagementDialogKind) -> &'static str {
+    match kind {
+        ManagementDialogKind::People => "About this person",
+        ManagementDialogKind::Projects => "Project description",
         ManagementDialogKind::Tags => "",
     }
 }

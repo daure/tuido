@@ -203,12 +203,14 @@ pub(super) struct Choice {
 
 pub(super) fn dropdown_single(
     label: &'static str,
+    placeholder: &'static str,
     rows: Vec<Choice>,
     selected: &str,
     on_select: impl Fn(String) + 'static,
 ) -> Dropdown<Choice, String> {
     Dropdown::single(rows, |row| row.id.clone(), |row| row.label.clone())
         .label(label)
+        .placeholder(placeholder)
         .selected_one(selected.to_string())
         .search_mode(DropdownSearchMode::Contains)
         .commit_mode(DropdownCommitMode::Explicit)
@@ -221,6 +223,7 @@ pub(super) fn dropdown_single(
 
 pub(super) fn dropdown_single_optional(
     label: &'static str,
+    placeholder: &'static str,
     mut rows: Vec<Choice>,
     selected: Option<&str>,
     on_select: impl Fn(Option<String>) + 'static,
@@ -234,6 +237,7 @@ pub(super) fn dropdown_single_optional(
     );
     Dropdown::single(rows, |row| row.id.clone(), |row| row.label.clone())
         .label(label)
+        .placeholder(placeholder)
         .selected_one(selected.unwrap_or_default().to_string())
         .search_mode(DropdownSearchMode::Contains)
         .commit_mode(DropdownCommitMode::Explicit)

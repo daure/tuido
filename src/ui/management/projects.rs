@@ -618,6 +618,7 @@ fn project_detail_form(
             ProjectKeyInput::new(
                 TextInput::new()
                     .value(project.key.clone())
+                    .placeholder("Project key")
                     .panel("Key")
                     .hotkey(keys::PROJECT_KEY_FIELD.hotkey()),
             )
@@ -635,6 +636,7 @@ fn project_detail_form(
             "name",
             TextInput::new()
                 .value(project.name.clone())
+                .placeholder("Project name")
                 .panel("Name")
                 .hotkey(keys::PROJECT_NAME_FIELD.hotkey())
                 .on_edit_end({
@@ -650,6 +652,7 @@ fn project_detail_form(
             "description",
             TextareaInput::new()
                 .value(project.description.clone())
+                .placeholder("Project description")
                 .panel("Description")
                 .hotkey(keys::PROJECT_DESCRIPTION_FIELD.hotkey())
                 .editor_hotkey(keys::PROJECT_DESCRIPTION_EDITOR.hotkey())
@@ -668,6 +671,7 @@ fn project_detail_form(
             "lead",
             dropdown_single_optional(
                 "Lead",
+                "Select project lead",
                 person_choices(people),
                 project.lead_person_id.as_deref(),
                 move |id| patches.borrow_mut().push(ProjectPatch::LeadPerson(id)),

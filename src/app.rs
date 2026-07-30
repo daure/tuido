@@ -1662,10 +1662,13 @@ impl TaskWorkspace {
                     ));
                 }
                 ListControlEvent::Added { .. }
+                | ListControlEvent::AddedChild { .. }
                 | ListControlEvent::Removed { .. }
                 | ListControlEvent::Edited { .. }
                 | ListControlEvent::AddCancelled
                 | ListControlEvent::EditCancelled { .. }
+                | ListControlEvent::TreeMoved { .. }
+                | ListControlEvent::CheckedChanged { .. }
                 | ListControlEvent::ReorderCancelled { .. } => {}
             }
         }

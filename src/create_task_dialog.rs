@@ -25,7 +25,7 @@ impl CreateTaskDialog {
     pub(crate) fn new() -> Self {
         let title = Rc::new(RefCell::new(String::new()));
         let mut input = TextInput::new()
-            .placeholder("Title")
+            .placeholder("Task title")
             .focused(true)
             .on_change({
                 let title = Rc::clone(&title);

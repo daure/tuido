@@ -474,6 +474,7 @@ fn person_detail_form(
             "name",
             TextInput::new()
                 .value(person.name.clone())
+                .placeholder("Person name")
                 .panel("Name")
                 .hotkey(keys::PERSON_NAME_FIELD.hotkey())
                 .on_edit_end({
@@ -489,6 +490,7 @@ fn person_detail_form(
             "email",
             TextInput::new()
                 .value(person.email.clone())
+                .placeholder("Email address")
                 .panel("Email")
                 .hotkey(keys::PERSON_EMAIL_FIELD.hotkey())
                 .on_edit_end({
@@ -504,6 +506,7 @@ fn person_detail_form(
             "about",
             TextareaInput::new()
                 .value(person.about.clone())
+                .placeholder("About this person")
                 .panel("About")
                 .hotkey(keys::PERSON_ABOUT_FIELD.hotkey())
                 .editor_hotkey(keys::PERSON_ABOUT_EDITOR.hotkey())
@@ -522,6 +525,7 @@ fn person_detail_form(
             "active",
             dropdown_single(
                 "Active",
+                "Select active status",
                 active_choices(),
                 if person.active { "true" } else { "false" },
                 move |id| patches.borrow_mut().push(PersonPatch::Active(id == "true")),

@@ -557,7 +557,8 @@ async fn run_http_inner(
         move || Ok(McpServer::new(service.clone())),
         Default::default(),
         StreamableHttpServerConfig {
-            stateful_mode: true,
+            // Tools hold no session state; stateless requests survive HTTP server restarts.
+            stateful_mode: false,
             sse_keep_alive: None,
             ..Default::default()
         },
