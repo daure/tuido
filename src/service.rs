@@ -112,8 +112,8 @@ pub struct WorkspaceView {
 pub struct WorkspaceFilter {
     /// Include done and rejected tasks, which are excluded by default.
     pub include_resolved: bool,
-    /// Match user-facing task statuses such as todo, in_progress, snoozed, done, or rejected.
-    #[schemars(extend("items" = {"type": "string", "enum": ["todo", "in_progress", "snoozed", "done", "rejected"]}))]
+    /// Match user-facing task statuses such as backlog, todo, in_progress, snoozed, done, or rejected.
+    #[schemars(extend("items" = {"type": "string", "enum": ["backlog", "todo", "in_progress", "snoozed", "done", "rejected"]}))]
     pub states: Vec<String>,
     #[schemars(extend("items" = {"type": "string", "enum": ["low", "medium", "high"]}))]
     pub priorities: Vec<String>,
@@ -132,7 +132,7 @@ pub struct WorkspaceFilter {
 pub struct TaskView {
     pub id: String,
     pub title: String,
-    /// User-facing task status: todo, in_progress, snoozed, done, or rejected.
+    /// User-facing task status: backlog, todo, in_progress, snoozed, done, or rejected.
     pub state: String,
     pub size: String,
     pub priority: String,
@@ -180,8 +180,8 @@ pub struct TaskCreate {
     #[schemars(extend("enum" = ["small", "medium", "big"]))]
     pub size: String,
     #[serde(default = "default_state")]
-    /// User-facing task status: todo, in_progress, snoozed, done, or rejected.
-    #[schemars(extend("enum" = ["todo", "in_progress", "snoozed", "done", "rejected"]))]
+    /// User-facing task status: backlog, todo, in_progress, snoozed, done, or rejected.
+    #[schemars(extend("enum" = ["backlog", "todo", "in_progress", "snoozed", "done", "rejected"]))]
     pub state: String,
     #[serde(default = "default_priority")]
     #[schemars(extend("enum" = ["low", "medium", "high"]))]
@@ -204,7 +204,7 @@ fn default_size() -> String {
     "medium".into()
 }
 fn default_state() -> String {
-    "todo".into()
+    "backlog".into()
 }
 fn default_priority() -> String {
     "medium".into()
@@ -216,8 +216,8 @@ pub struct TaskUpdate {
     #[schemars(schema_with = "revision_schema")]
     pub expected_revision: u64,
     pub title: String,
-    /// User-facing task status: todo, in_progress, snoozed, done, or rejected.
-    #[schemars(extend("enum" = ["todo", "in_progress", "snoozed", "done", "rejected"]))]
+    /// User-facing task status: backlog, todo, in_progress, snoozed, done, or rejected.
+    #[schemars(extend("enum" = ["backlog", "todo", "in_progress", "snoozed", "done", "rejected"]))]
     pub state: String,
     #[schemars(extend("enum" = ["small", "medium", "big"]))]
     pub size: String,

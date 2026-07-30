@@ -12,8 +12,8 @@ use crate::persistence_coordinator::{AppStore, PersistenceCommand, PersistenceCo
 use crate::service::TuidoService;
 use crate::settings_dialog::SettingsDialog;
 use crate::snooze::{
-    DEFAULT_SNOOZE_TIME_SETTING, SnoozeDialog, format_default_snooze_time, local_now,
-    parse_default_snooze_time,
+    DEFAULT_SNOOZE_TIME_SETTING, SnoozeDialog, format_datetime, format_default_snooze_time,
+    local_now, parse_default_snooze_time,
 };
 use crate::storage::Storage;
 use crate::task_quick_menu::TaskQuickMenu;
@@ -38,9 +38,8 @@ use tuicore::{
     LayoutSizeHint, LifecycleCtx, ListControl, ListControlEvent, ListControlField,
     ListControlKeyBindings, MenuButton, MenuItem, Paragraph, Propagation, RenderCtx,
     SeasonalEmptyState, SelectedTag, SelectionMode, SelectionTrigger, Split, StatusBar,
-    StatusBarMenuItem, Store, Tab, Tabs, TabsVariant, TagInput, TagInputEvent,
-    TextInput, TextareaInput, TickResult, TreeApp, TreePath, TuiEvent, TuiNode,
-    WeatherProviderConfig,
+    StatusBarMenuItem, Store, Tab, Tabs, TabsVariant, TagInput, TagInputEvent, TextInput,
+    TextareaInput, TickResult, TreeApp, TreePath, TuiEvent, TuiNode, WeatherProviderConfig,
 };
 use uuid::Uuid;
 
@@ -132,6 +131,7 @@ pub(crate) enum AppMsg {
         task_id: String,
         state: TaskState,
     },
+    ToggleTaskProgress(String),
     SnoozeTask {
         task_id: String,
         until: PrimitiveDateTime,
@@ -251,6 +251,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             return_focus,
         } => app.open_complete_task_dialog(&task_id, return_focus, ctx),
         AppMsg::CompleteTask { task_id, state } => app.complete_task(task_id, state, ctx),
+        AppMsg::ToggleTaskProgress(task_id) => app.toggle_task_progress(task_id, ctx),
         AppMsg::CloseManagementOverlay => app.close_management_overlay(ctx),
         AppMsg::CloseSnoozeDialog => app.close_snooze_dialog(ctx),
         AppMsg::CloseDeleteTaskDialog => app.close_delete_task_dialog(ctx),
@@ -282,6 +283,17 @@ struct CompleteReturnFocus {
     task_id: String,
     task_state: TaskState,
     path: TreePath,
+}
+
+fn toggled_task_progress_state(state: TaskState) -> TaskState {
+    match state {
+        TaskState::Todo => TaskState::InProgress,
+        TaskState::Backlog
+        | TaskState::InProgress
+        | TaskState::Done
+        | TaskState::Snoozed
+        | TaskState::Rejected => TaskState::Todo,
+    }
 }
 
 impl App {
@@ -441,6 +453,7 @@ impl App {
                     return;
                 }
                 let person = Person::with_about(Uuid::new_v4().to_string(), name, email, about);
+                let person_name = person.name.clone();
                 self.context
                     .store
                     .borrow_mut()
@@ -449,6 +462,10 @@ impl App {
                     .coordinator
                     .borrow_mut()
                     .submit(PersistenceCommand::CreatePerson(person));
+                ctx.notify(tuicore::Notification::success(
+                    "Person created",
+                    format!("“{person_name}” was created."),
+                ));
             }
             ManagementEntityDraft::Project {
                 key,
@@ -464,6 +481,7 @@ impl App {
                     return;
                 }
                 let project = Project::new(Uuid::new_v4().to_string(), key, name, description);
+                let project_name = project.name.clone();
                 self.context
                     .store
                     .borrow_mut()
@@ -472,6 +490,10 @@ impl App {
                     .coordinator
                     .borrow_mut()
                     .submit(PersistenceCommand::CreateProject(project));
+                ctx.notify(tuicore::Notification::success(
+                    "Project created",
+                    format!("“{project_name}” was created."),
+                ));
             }
             ManagementEntityDraft::Tag { label } => {
                 if label.trim().is_empty() {
@@ -483,6 +505,7 @@ impl App {
                     return;
                 }
                 let tag = Tag::new(Uuid::new_v4().to_string(), label);
+                let tag_label = tag.label.clone();
                 self.context
                     .store
                     .borrow_mut()
@@ -491,6 +514,10 @@ impl App {
                     .coordinator
                     .borrow_mut()
                     .submit(PersistenceCommand::CreateTag(tag));
+                ctx.notify(tuicore::Notification::success(
+                    "Tag created",
+                    format!("“{tag_label}” was created."),
+                ));
             }
         }
         self.close_management_overlay(ctx);
@@ -549,6 +576,7 @@ impl App {
                     .state()
                     .person_deletion(entity_id);
                 let Some(deletion) = deletion else { return };
+                let person_name = deletion.person.name.clone();
                 self.context
                     .store
                     .borrow_mut()
@@ -557,6 +585,10 @@ impl App {
                     .coordinator
                     .borrow_mut()
                     .submit(PersistenceCommand::DeletePerson(deletion));
+                ctx.notify(tuicore::Notification::success(
+                    "Person deleted",
+                    format!("“{person_name}” was deleted."),
+                ));
             }
             ManagementDialogKind::Projects => {
                 let deletion = self
@@ -566,6 +598,7 @@ impl App {
                     .state()
                     .project_deletion(entity_id);
                 let Some(deletion) = deletion else { return };
+                let project_name = deletion.project.name.clone();
                 self.context
                     .store
                     .borrow_mut()
@@ -574,10 +607,15 @@ impl App {
                     .coordinator
                     .borrow_mut()
                     .submit(PersistenceCommand::DeleteProject(deletion));
+                ctx.notify(tuicore::Notification::success(
+                    "Project deleted",
+                    format!("“{project_name}” was deleted."),
+                ));
             }
             ManagementDialogKind::Tags => {
                 let deletion = self.context.store.borrow().state().tag_deletion(entity_id);
                 let Some(deletion) = deletion else { return };
+                let tag_label = deletion.tag.label.clone();
                 self.context
                     .store
                     .borrow_mut()
@@ -586,6 +624,10 @@ impl App {
                     .coordinator
                     .borrow_mut()
                     .submit(PersistenceCommand::DeleteTag(deletion));
+                ctx.notify(tuicore::Notification::success(
+                    "Tag deleted",
+                    format!("“{tag_label}” was deleted."),
+                ));
             }
         }
         self.close_management_overlay(ctx);
@@ -616,6 +658,7 @@ impl App {
             String::new(),
             TaskSize::Small,
         );
+        let task_title = task.title.clone();
         task.rank = self
             .context
             .store
@@ -635,6 +678,10 @@ impl App {
             .coordinator
             .borrow_mut()
             .submit(PersistenceCommand::CreateTask(task));
+        ctx.notify(tuicore::Notification::success(
+            "Task created",
+            format!("“{task_title}” was added to backlog."),
+        ));
         self.close_dialog(ctx);
     }
 
@@ -682,13 +729,20 @@ impl App {
         let Some(index) = ordered.iter().position(|id| id == task_id) else {
             return;
         };
+        let task_title = state.tasks[index].title.clone();
         let task_id = ordered.remove(index);
         if to_top {
             ordered.insert(0, task_id);
         } else {
             ordered.push(task_id);
         }
-        persist_task_order(&self.context, &state, &ordered);
+        if persist_task_order(&self.context, &state, &ordered) {
+            let edge = if to_top { "top" } else { "bottom" };
+            ctx.notify(tuicore::Notification::success(
+                "Task moved",
+                format!("“{task_title}” moved to the {edge}."),
+            ));
+        }
         self.close_dialog(ctx);
         focus_task_table(ctx);
     }
@@ -704,6 +758,7 @@ impl App {
             self.close_dialog(ctx);
             return;
         };
+        let task_title = task.title.clone();
         self.context
             .store
             .borrow_mut()
@@ -712,6 +767,10 @@ impl App {
             .coordinator
             .borrow_mut()
             .submit(PersistenceCommand::DeleteTask(task));
+        ctx.notify(tuicore::Notification::success(
+            "Task deleted",
+            format!("“{task_title}” was deleted."),
+        ));
         self.close_dialog(ctx);
     }
 
@@ -789,6 +848,7 @@ impl App {
     }
 
     fn complete_task(&mut self, task_id: String, state: TaskState, ctx: &mut EventCtx<AppMsg>) {
+        let task_title = self.task(&task_id).map(|task| task.title);
         let patch = TaskPatch::State(state);
         let outcome = self
             .context
@@ -803,10 +863,57 @@ impl App {
                 .coordinator
                 .borrow_mut()
                 .submit(PersistenceCommand::PatchTask(task_id, patch));
+            if let Some(task_title) = task_title {
+                let (title, body) = match state {
+                    TaskState::Done => ("Task completed", format!("“{task_title}” moved to done.")),
+                    TaskState::Rejected => (
+                        "Task rejected",
+                        format!("“{task_title}” moved to rejected."),
+                    ),
+                    _ => (
+                        "Task updated",
+                        format!("“{task_title}” moved to {}.", state.id()),
+                    ),
+                };
+                ctx.notify(tuicore::Notification::success(title, body));
+            }
         }
         self.complete_return_focus = None;
         self.close_dialog(ctx);
         focus_task_table(ctx);
+    }
+
+    fn toggle_task_progress(&mut self, task_id: String, ctx: &mut EventCtx<AppMsg>) {
+        let Some(task) = self.task(&task_id) else {
+            return;
+        };
+        let state = toggled_task_progress_state(task.state);
+        let patch = TaskPatch::State(state);
+        let outcome = self
+            .context
+            .store
+            .borrow_mut()
+            .dispatch(AppEvent::PatchTask {
+                task_id: task_id.clone(),
+                patch: patch.clone(),
+            });
+        if !outcome.changed {
+            return;
+        }
+        self.context
+            .coordinator
+            .borrow_mut()
+            .submit(PersistenceCommand::PatchTask(task_id, patch));
+        let state_label = match state {
+            TaskState::Todo => "todo",
+            TaskState::InProgress => "in-progress",
+            _ => unreachable!("task progress shortcut only targets active states"),
+        };
+        ctx.notify(tuicore::Notification::success(
+            "Task moved",
+            format!("“{}” moved to {state_label}.", task.title),
+        ));
+        ctx.request_layout();
     }
 
     fn snooze_task(
@@ -816,6 +923,7 @@ impl App {
         remember_custom: Option<PrimitiveDateTime>,
         ctx: &mut EventCtx<AppMsg>,
     ) {
+        let task_title = self.task(&task_id).map(|task| task.title);
         let patch = TaskPatch::Snooze {
             until,
             remember_custom,
@@ -833,6 +941,12 @@ impl App {
                 .coordinator
                 .borrow_mut()
                 .submit(PersistenceCommand::PatchTask(task_id, patch));
+            if let Some(task_title) = task_title {
+                ctx.notify(tuicore::Notification::success(
+                    "Task snoozed",
+                    format!("“{task_title}” snoozed until {}.", format_datetime(until)),
+                ));
+            }
         }
         self.snooze_return_focus = None;
         self.close_dialog(ctx);
@@ -840,6 +954,7 @@ impl App {
     }
 
     fn unsnooze_task(&mut self, task_id: String, ctx: &mut EventCtx<AppMsg>) {
+        let task_title = self.task(&task_id).map(|task| task.title);
         let patch = TaskPatch::Unsnooze;
         let outcome = self
             .context
@@ -854,6 +969,12 @@ impl App {
                 .coordinator
                 .borrow_mut()
                 .submit(PersistenceCommand::PatchTask(task_id, patch));
+            if let Some(task_title) = task_title {
+                ctx.notify(tuicore::Notification::success(
+                    "Task unsnoozed",
+                    format!("“{task_title}” moved to todo."),
+                ));
+            }
         }
         self.snooze_return_focus = None;
         self.close_dialog(ctx);
@@ -1129,6 +1250,25 @@ impl TaskView {
             Self::All => !matches!(task.state, TaskState::Done | TaskState::Rejected),
         }
     }
+
+    fn empty_message(self) -> &'static str {
+        match self {
+            Self::Active => "No active tasks",
+            Self::Backlog => "No tasks in backlog",
+            Self::Snoozed => "No snoozed tasks",
+            Self::Archived => "No archived tasks",
+            Self::All => "No open tasks",
+        }
+    }
+}
+
+fn task_empty_state(tasks: &[Task], task_view: TaskView) -> SeasonalEmptyState {
+    let message = if tasks.iter().any(|task| task_view.contains(task)) {
+        "No tasks match your filters"
+    } else {
+        task_view.empty_message()
+    };
+    SeasonalEmptyState::new(message)
 }
 
 struct TaskViewMenu {
@@ -1333,16 +1473,17 @@ impl TaskWorkspace {
         let external_refresh =
             self.observed_external_refresh_version != state.external_refresh_version;
         if self.observed_version != state.version || external_refresh {
-            let selected_new_active = state
+            let selected_new_backlog = state
                 .selected_task_id
                 .as_deref()
                 .filter(|id| !self.known_task_ids.iter().any(|known| known == *id))
                 .and_then(|id| state.tasks.iter().find(|task| task.id == id))
-                .is_some_and(|task| task.state == TaskState::Todo);
-            if selected_new_active && !matches!(self.task_view, TaskView::All | TaskView::Active) {
+                .is_some_and(|task| task.state == TaskState::Backlog);
+            if selected_new_backlog && !matches!(self.task_view, TaskView::All | TaskView::Backlog)
+            {
                 self.table_mut().clear_search();
-                self.task_view = TaskView::Active;
-                *self.active_task_view.borrow_mut() = TaskView::Active;
+                self.task_view = TaskView::Backlog;
+                *self.active_task_view.borrow_mut() = TaskView::Backlog;
             }
             let protect_detail = external_refresh
                 && (self.detail_draft_protected || self.context.coordinator.borrow().has_pending());
@@ -1352,7 +1493,7 @@ impl TaskWorkspace {
                 !external_refresh,
                 external_refresh && !protect_detail,
             );
-            if selected_new_active {
+            if selected_new_backlog {
                 self.table_mut().reveal_highlighted();
             }
         }
@@ -1377,6 +1518,7 @@ impl TaskWorkspace {
         });
         self.sync_label_filter_tags(&state.tags);
         let rows = task_rows_for_view(&state.tasks, self.task_view, &self.label_filter);
+        let empty_state = task_empty_state(&state.tasks, self.task_view);
         let contains_id = |id: &str| rows.iter().any(|task| task.id == id);
         let selected_task_id = if select_first {
             rows.first().map(|task| task.id.clone())
@@ -1397,6 +1539,7 @@ impl TaskWorkspace {
         };
         self.visible_task_ids = rows.iter().map(|task| task.id.clone()).collect();
         self.table_mut().set_rows(rows);
+        self.task_list_mut().set_empty_state(empty_state);
         if let Some(task_id) = selected_task_id.as_ref() {
             self.table_mut().highlight_id(task_id);
             self.table_mut().select_id(task_id.clone());
@@ -1504,6 +1647,10 @@ impl TaskWorkspace {
                 ListControlEvent::Reordered { row_ids } => {
                     let state = self.context.store.borrow().state().clone();
                     if persist_task_order(&self.context, &state, &row_ids) {
+                        ctx.notify(tuicore::Notification::success(
+                            "Tasks reordered",
+                            "Task order was updated.",
+                        ));
                         ctx.request_layout();
                         ctx.request_redraw();
                     }
@@ -1629,6 +1776,16 @@ impl TaskWorkspace {
         true
     }
 
+    fn can_toggle_task_progress(&self, task_id: &str) -> bool {
+        self.context
+            .store
+            .borrow()
+            .state()
+            .tasks
+            .iter()
+            .any(|task| task.id == task_id)
+    }
+
     fn handle_workspace_event(
         &self,
         outcome: EventOutcome,
@@ -1649,6 +1806,13 @@ impl TaskWorkspace {
                 task_id,
                 return_focus: None,
             })
+        } else if self.table_focused
+            && keys::TASK_TOGGLE_PROGRESS.matches(event)
+            && visible_task_id
+                .as_deref()
+                .is_some_and(|task_id| self.can_toggle_task_progress(task_id))
+        {
+            visible_task_id.map(AppMsg::ToggleTaskProgress)
         } else if self.table_focused
             && visible_task_id.is_some()
             && app_keymap::matches_any(

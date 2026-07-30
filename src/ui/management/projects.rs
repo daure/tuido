@@ -8,12 +8,14 @@ use tuicore::{
     ActivationMode, AnimationSettings, ChildKey, Column, DataView, DataViewTypedEvent, Dialog,
     DialogHost, EventCtx, EventOutcome, EventRoute, Flex, FlexItem, FocusCtx, FocusTarget, Key,
     KeyEvent, KeyModifiers, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx,
-    RenderCtx, SeasonalEmptyState, SelectionMode, SelectionTrigger, TextInput, TextareaInput,
-    TickResult, TuiEvent, TuiNode,
+    RenderCtx, SelectionMode, SelectionTrigger, TextInput, TextareaInput, TickResult, TuiEvent,
+    TuiNode,
 };
 
 use super::ManagementDialogKind;
-use super::common::{ManagementPane, dropdown_single_optional, person_choices};
+use super::common::{
+    ManagementPane, dropdown_single_optional, management_empty_state, person_choices,
+};
 use crate::{
     app::{AppContext, AppMsg},
     app_keymap::{self, keys},
@@ -21,8 +23,6 @@ use crate::{
     persistence_coordinator::PersistenceCommand,
     ui::save_status::SaveStatusLine,
 };
-
-const EMPTY_MESSAGE: &str = "No projects for this filter";
 
 type ProjectTable = DataView<Project, String>;
 type ProjectPatchSink = Rc<RefCell<Vec<ProjectPatch>>>;
@@ -83,6 +83,7 @@ impl ProjectsWorkspace {
             && (self.detail_draft_protected || self.context.coordinator.borrow().has_pending());
         let external_refresh_version = state.external_refresh_version;
         let rows = state.projects.clone();
+        let has_projects = !rows.is_empty();
         let people = state.people.clone();
         let selected_id = state.selected_project_id.clone();
         drop(store);
@@ -90,8 +91,7 @@ impl ProjectsWorkspace {
             let transform_mode = self.split.first().transform_mode();
             let transform = self.split.first().transform_state().clone();
             let highlighted_id = self.split.first().highlighted_id();
-            let mut table = project_table(rows, &people, selected_id.as_deref())
-                .empty_state(SeasonalEmptyState::new(EMPTY_MESSAGE));
+            let mut table = project_table(rows, &people, selected_id.as_deref());
             table.set_transform_mode(transform_mode);
             table.set_search_query(transform.search);
             for filter in transform.filters {
@@ -105,6 +105,12 @@ impl ProjectsWorkspace {
         } else {
             self.split.first_mut().set_rows(rows);
         }
+        self.split
+            .first_mut()
+            .set_empty_state(management_empty_state(
+                ManagementDialogKind::Projects,
+                has_projects,
+            ));
         if let Some(id) = selected_id.as_ref() {
             self.split.first_mut().highlight_id(id);
             self.split.first_mut().select_id(id.clone());
@@ -452,8 +458,7 @@ fn project_split(context: &AppContext) -> ManagementPane<ProjectTable, ProjectDe
         project.and_then(|project| state.project_save_error(&project.id)),
     );
     ManagementPane::new(
-        project_table(state.projects.clone(), &state.people, selected)
-            .empty_state(SeasonalEmptyState::new(EMPTY_MESSAGE)),
+        project_table(state.projects.clone(), &state.people, selected),
         detail,
         ManagementDialogKind::Projects,
     )
@@ -461,12 +466,17 @@ fn project_split(context: &AppContext) -> ManagementPane<ProjectTable, ProjectDe
 }
 
 fn project_table(rows: Vec<Project>, people: &[Person], selected: Option<&str>) -> ProjectTable {
+    let has_projects = !rows.is_empty();
     let names: HashMap<String, String> = people
         .iter()
         .map(|person| (person.id.clone(), person.name.clone()))
         .collect();
     let filter_names = names.clone();
     let mut table = DataView::new(rows, |row: &Project| row.id.clone())
+        .empty_state(management_empty_state(
+            ManagementDialogKind::Projects,
+            has_projects,
+        ))
         .headers(true)
         .action_bar(true)
         .filter_controls(false)
@@ -885,6 +895,9 @@ mod tests {
         workspace.table_focused = true;
         workspace.split.first_mut().set_search_query("App");
         workspace.sync_table_events(&mut EventCtx::default());
+        let area = Rect::new(0, 0, 100, 30);
+        workspace.layout(area, &mut LayoutCtx::new());
+        assert!(rendered_text(&workspace, area).contains("No projects match your search"));
         let mut ctx = EventCtx::default();
 
         let outcome = workspace.handle_workspace_event(

@@ -191,7 +191,8 @@ pub(super) fn task_split(
         .as_deref()
         .filter(|id| rows.iter().any(|task| task.id == **id));
     let copy_context = TaskCopyContext::new(&state.people, &state.projects, &state.tags);
-    let table = task_table_with_copy_context(rows, selected, copy_context);
+    let table = task_table_with_copy_context(rows, selected, copy_context)
+        .empty_state(task_empty_state(&state.tasks, task_view));
     let selected_task = selected.and_then(|id| state.tasks.iter().find(|task| task.id == id));
     let save_error = selected_task.and_then(|task| state.task_status_error(&task.id));
     let detail = TaskDetailForm::new(
@@ -237,7 +238,7 @@ pub(super) fn task_table_with_copy_context(
         rows,
         selected_id,
         copy_context,
-        SeasonalEmptyState::new("No tasks for this filter"),
+        SeasonalEmptyState::new("No tasks match your filters"),
     )
 }
 
@@ -252,7 +253,7 @@ pub(super) fn task_table_with_copy_context_on(
         rows,
         selected_id,
         copy_context,
-        SeasonalEmptyState::new("No tasks for this filter")
+        SeasonalEmptyState::new("No tasks match your filters")
             .date(date)
             .glyphs(SeasonalGlyphs::NerdFont),
     )

@@ -35,6 +35,16 @@ fn task_create(title: &str) -> TaskCreate {
 }
 
 #[test]
+fn omitted_task_state_defaults_to_backlog() {
+    let input: TaskCreate = serde_json::from_value(serde_json::json!({
+        "title": "Captured"
+    }))
+    .unwrap();
+
+    assert_eq!(input.state, "backlog");
+}
+
+#[test]
 fn new_tasks_append_and_reordering_updates_ranks_atomically() {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()

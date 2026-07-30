@@ -50,7 +50,7 @@ struct TaskStateInput {
     id: String,
     #[schemars(schema_with = "crate::service::revision_schema")]
     expected_revision: u64,
-    /// User-facing task status: todo, in_progress, done, or rejected.
+    /// User-facing task status: backlog, todo, in_progress, done, or rejected.
     state: String,
 }
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -212,7 +212,7 @@ impl McpServer {
             .map(|_| Json(result))
             .map_err(mcp_error)
     }
-    #[tool(description = "Set task status (todo, in_progress, done, rejected)")]
+    #[tool(description = "Set task status (backlog, todo, in_progress, done, rejected)")]
     async fn set_task_state(
         &self,
         Parameters(v): Parameters<TaskStateInput>,
@@ -683,7 +683,14 @@ mod tests {
         );
         assert_eq!(
             properties["state"]["enum"],
-            serde_json::json!(["todo", "in_progress", "snoozed", "done", "rejected"])
+            serde_json::json!([
+                "backlog",
+                "todo",
+                "in_progress",
+                "snoozed",
+                "done",
+                "rejected"
+            ])
         );
     }
 

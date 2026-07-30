@@ -265,7 +265,10 @@ fn invalid_snoozed_state_patch_reloads_authoritative_task() {
     settle(&mut coordinator);
 
     let state = store.borrow();
-    assert_eq!(state.state().tasks[0].state, crate::domain::TaskState::Todo);
+    assert_eq!(
+        state.state().tasks[0].state,
+        crate::domain::TaskState::Backlog
+    );
     assert!(state.state().task_save_error("task-1").is_some());
 }
 

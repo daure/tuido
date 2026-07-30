@@ -727,7 +727,7 @@ impl Task {
             id,
             rank: 0,
             title: title.trim().to_string(),
-            state: TaskState::Todo,
+            state: TaskState::Backlog,
             size,
             priority: TaskPriority::Medium,
             start_date: None,

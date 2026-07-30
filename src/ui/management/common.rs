@@ -4,8 +4,8 @@ use ratatui::{Frame, layout::Rect};
 use tuicore::{
     AnimationSettings, Button, ChildKey, Dropdown, DropdownCommitMode, DropdownSearchMode,
     EventCtx, EventOutcome, EventRoute, FocusCtx, FocusRequest, FocusTarget, LayoutCtx,
-    LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, RenderCtx, TickResult, TreePath,
-    TuiEvent, TuiNode,
+    LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, RenderCtx, SeasonalEmptyState,
+    TickResult, TreePath, TuiEvent, TuiNode,
 };
 
 use crate::{
@@ -16,6 +16,21 @@ use crate::{
 };
 
 const CREATE_BUTTON: &str = "new";
+
+pub(super) fn management_empty_state(
+    kind: ManagementDialogKind,
+    has_entities: bool,
+) -> SeasonalEmptyState {
+    let message = match (kind, has_entities) {
+        (ManagementDialogKind::People, false) => "No people yet",
+        (ManagementDialogKind::People, true) => "No people match your search",
+        (ManagementDialogKind::Projects, false) => "No projects yet",
+        (ManagementDialogKind::Projects, true) => "No projects match your search",
+        (ManagementDialogKind::Tags, false) => "No tags yet",
+        (ManagementDialogKind::Tags, true) => "No tags match your search",
+    };
+    SeasonalEmptyState::new(message)
+}
 
 pub(super) struct ManagementPane<F, S> {
     split: ResponsiveSplit<F, S>,

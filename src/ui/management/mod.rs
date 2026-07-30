@@ -90,17 +90,17 @@ mod tests {
         let cases: Vec<(Box<dyn TuiNode<AppMsg>>, &str, &[&str])> = vec![
             (
                 Box::new(people::dialog(context.clone())),
-                "No people for this filter",
+                "No people yet",
                 &["No person selected.", "About"],
             ),
             (
                 Box::new(projects::dialog(context.clone())),
-                "No projects for this filter",
+                "No projects yet",
                 &["No project selected.", "Description"],
             ),
             (
                 Box::new(tags::dialog(context)),
-                "No tags for this filter",
+                "No tags yet",
                 &["No tag selected.", "Label"],
             ),
         ];

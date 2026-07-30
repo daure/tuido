@@ -8,11 +8,11 @@ use tuicore::{
     ActivationMode, AnimationSettings, ChildKey, Column, DataView, DataViewTypedEvent, Dialog,
     DialogHost, EventCtx, EventOutcome, EventRoute, Flex, FlexItem, FocusCtx, FocusTarget,
     LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, RenderCtx,
-    SeasonalEmptyState, SelectionMode, SelectionTrigger, TextInput, TickResult, TuiEvent, TuiNode,
+    SelectionMode, SelectionTrigger, TextInput, TickResult, TuiEvent, TuiNode,
 };
 
 use super::ManagementDialogKind;
-use super::common::ManagementPane;
+use super::common::{ManagementPane, management_empty_state};
 use crate::{
     app::{AppContext, AppMsg},
     app_keymap::{self, keys},
@@ -20,8 +20,6 @@ use crate::{
     persistence_coordinator::PersistenceCommand,
     ui::save_status::SaveStatusLine,
 };
-
-const EMPTY_MESSAGE: &str = "No tags for this filter";
 
 type TagTable = DataView<Tag, String>;
 type TagPatchSink = Rc<RefCell<Vec<TagPatch>>>;
@@ -71,9 +69,13 @@ impl TagsWorkspace {
             && (self.detail_draft_protected || self.context.coordinator.borrow().has_pending());
         let external_refresh_version = state.external_refresh_version;
         let rows = state.tags.clone();
+        let has_tags = !rows.is_empty();
         let selected_id = state.selected_tag_id.clone();
         drop(store);
         self.split.first_mut().set_rows(rows);
+        self.split
+            .first_mut()
+            .set_empty_state(management_empty_state(ManagementDialogKind::Tags, has_tags));
         if let Some(id) = selected_id.as_ref() {
             self.split.first_mut().highlight_id(id);
             self.split.first_mut().select_id(id.clone());
@@ -387,14 +389,16 @@ fn tag_split(context: &AppContext) -> ManagementPane<TagTable, TagDetailForm> {
     let tag = selected.and_then(|id| state.tags.iter().find(|tag| tag.id == id));
     let detail = TagDetailForm::new(tag, tag.and_then(|tag| state.tag_save_error(&tag.id)));
     ManagementPane::new(
-        tag_table(state.tags.clone(), selected).empty_state(SeasonalEmptyState::new(EMPTY_MESSAGE)),
+        tag_table(state.tags.clone(), selected),
         detail,
         ManagementDialogKind::Tags,
     )
     .detail_visible(tag.is_some())
 }
 fn tag_table(rows: Vec<Tag>, selected: Option<&str>) -> TagTable {
+    let has_tags = !rows.is_empty();
     let mut table = DataView::new(rows, |row: &Tag| row.id.clone())
+        .empty_state(management_empty_state(ManagementDialogKind::Tags, has_tags))
         .headers(true)
         .action_bar(true)
         .filter_controls(false)
@@ -527,6 +531,9 @@ mod tests {
         workspace.table_focused = true;
         workspace.split.first_mut().set_search_query("frontend");
         workspace.sync_table_events(&mut EventCtx::default());
+        let area = Rect::new(0, 0, 100, 30);
+        workspace.layout(area, &mut LayoutCtx::new());
+        assert!(rendered_text(&workspace, area).contains("No tags match your search"));
         let mut ctx = EventCtx::default();
 
         let outcome = workspace.handle_workspace_event(

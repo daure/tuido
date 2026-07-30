@@ -8,12 +8,11 @@ use tuicore::{
     ActivationMode, AnimationSettings, ChildKey, Column, DataView, DataViewTypedEvent, Dialog,
     DialogHost, EventCtx, EventOutcome, EventRoute, Flex, FlexItem, FocusCtx, FocusTarget,
     LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, RenderCtx,
-    SeasonalEmptyState, SelectionMode, SelectionTrigger, TextInput, TextareaInput, TickResult,
-    TuiEvent, TuiNode,
+    SelectionMode, SelectionTrigger, TextInput, TextareaInput, TickResult, TuiEvent, TuiNode,
 };
 
 use super::ManagementDialogKind;
-use super::common::{ManagementPane, active_choices, dropdown_single};
+use super::common::{ManagementPane, active_choices, dropdown_single, management_empty_state};
 use crate::{
     app::{AppContext, AppMsg},
     app_keymap::{self, keys},
@@ -21,8 +20,6 @@ use crate::{
     persistence_coordinator::PersistenceCommand,
     ui::save_status::SaveStatusLine,
 };
-
-const EMPTY_MESSAGE: &str = "No people for this filter";
 
 type PersonTable = DataView<Person, String>;
 type PersonPatchSink = Rc<RefCell<Vec<PersonPatch>>>;
@@ -74,9 +71,16 @@ impl PeopleWorkspace {
             && (self.detail_draft_protected || self.context.coordinator.borrow().has_pending());
         let external_refresh_version = state.external_refresh_version;
         let rows = state.people.clone();
+        let has_people = !rows.is_empty();
         let selected_id = state.selected_person_id.clone();
         drop(store);
         self.split.first_mut().set_rows(rows);
+        self.split
+            .first_mut()
+            .set_empty_state(management_empty_state(
+                ManagementDialogKind::People,
+                has_people,
+            ));
         if let Some(id) = selected_id.as_ref() {
             self.split.first_mut().highlight_id(id);
             self.split.first_mut().select_id(id.clone());
@@ -407,8 +411,7 @@ fn person_split(context: &AppContext) -> ManagementPane<PersonTable, PersonDetai
         person.and_then(|person| state.person_save_error(&person.id)),
     );
     ManagementPane::new(
-        person_table(state.people.clone(), selected)
-            .empty_state(SeasonalEmptyState::new(EMPTY_MESSAGE)),
+        person_table(state.people.clone(), selected),
         detail,
         ManagementDialogKind::People,
     )
@@ -416,7 +419,12 @@ fn person_split(context: &AppContext) -> ManagementPane<PersonTable, PersonDetai
 }
 
 fn person_table(rows: Vec<Person>, selected_id: Option<&str>) -> PersonTable {
+    let has_people = !rows.is_empty();
     let mut table = DataView::new(rows, |row: &Person| row.id.clone())
+        .empty_state(management_empty_state(
+            ManagementDialogKind::People,
+            has_people,
+        ))
         .headers(true)
         .action_bar(true)
         .filter_controls(false)
@@ -858,6 +866,9 @@ mod tests {
         assert_eq!(workspace.split.first().highlighted_id(), None);
         assert_eq!(workspace.split.second().person_id, None);
         assert!(!workspace.split.is_detail_visible());
+        let area = Rect::new(0, 0, 100, 30);
+        workspace.layout(area, &mut LayoutCtx::new());
+        assert!(rendered_text(&workspace, area).contains("No people match your search"));
 
         workspace.split.first_mut().clear_search();
         workspace.sync_table_events(&mut ctx);

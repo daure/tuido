@@ -54,7 +54,7 @@ fn empty_task_table_centers_seasonal_message_and_ornament() {
             .collect::<String>()
     };
 
-    assert_eq!(line(3), "        No tasks for this filter        ");
+    assert_eq!(line(3), "       No tasks match your filters      ");
     assert!(line(4).trim().is_empty());
     assert_eq!(line(5).trim(), "╶┄ ✧ ·  · ✧ ┄╴");
 }
@@ -75,8 +75,38 @@ fn empty_task_workspace_collapses_detail_and_gives_table_full_pane() {
     let (table_area, detail_area) = workspace.layout.second().child_areas();
     assert_eq!(table_area, Rect::new(0, 1, 120, 29));
     assert_eq!(detail_area, Rect::default());
-    assert!(text.contains("No tasks for this filter"));
+    assert!(text.contains("No active tasks"));
     assert!(!text.contains("No task selected."));
+}
+
+#[test]
+fn task_views_explain_when_their_state_bucket_is_empty() {
+    for (view, other_state, message) in [
+        (TaskView::Active, TaskState::Backlog, "No active tasks"),
+        (TaskView::Backlog, TaskState::Todo, "No tasks in backlog"),
+        (TaskView::Snoozed, TaskState::Todo, "No snoozed tasks"),
+        (TaskView::Archived, TaskState::Todo, "No archived tasks"),
+        (TaskView::All, TaskState::Done, "No open tasks"),
+    ] {
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks: vec![task_with("other", "Other task", other_state)],
+            people: Vec::new(),
+            projects: Vec::new(),
+            tags: Vec::new(),
+        });
+        let mut workspace = TaskWorkspace::new(context);
+        if view != TaskView::Active {
+            *workspace.pending_task_view.borrow_mut() = Some(view);
+            assert!(workspace.sync_task_view_change());
+        }
+        let area = Rect::new(0, 0, 100, 30);
+        workspace.layout(area, &mut LayoutCtx::new());
+
+        let text = rendered_text(&workspace, area);
+
+        assert!(text.contains(message), "missing {message}: {text}");
+        assert!(!text.contains("No tasks match your filters"));
+    }
 }
 
 #[test]
@@ -96,6 +126,10 @@ fn task_search_hides_detail_and_clearing_search_restores_it() {
     assert_eq!(workspace.visible_selection.borrow().as_deref(), None);
     assert_eq!(workspace.detail().task_id, None);
     assert!(!workspace.layout.second().is_second_visible());
+    workspace.layout(Rect::new(0, 0, 100, 30), &mut LayoutCtx::new());
+    assert!(
+        rendered_text(&workspace, Rect::new(0, 0, 100, 30)).contains("No tasks match your filters")
+    );
 
     workspace.table_mut().clear_search();
     workspace.sync_table_events(&mut ctx);
@@ -105,6 +139,29 @@ fn task_search_hides_detail_and_clearing_search_restores_it() {
     );
     assert_eq!(workspace.detail().task_id.as_deref(), Some("task-1"));
     assert!(workspace.layout.second().is_second_visible());
+}
+
+#[test]
+fn task_labels_with_no_matches_use_filtered_empty_message() {
+    let mut task = task_with("task-1", "API task", TaskState::Todo);
+    task.tag_ids = vec!["api".into()];
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![task],
+        people: Vec::new(),
+        projects: Vec::new(),
+        tags: vec![
+            Tag::new("api".into(), "API".into()),
+            Tag::new("urgent".into(), "Urgent".into()),
+        ],
+    });
+    let mut workspace = TaskWorkspace::new(context);
+    *workspace.active_label_filter.borrow_mut() = vec!["urgent".into()];
+
+    assert!(workspace.sync_label_filter_change());
+    let area = Rect::new(0, 0, 100, 30);
+    workspace.layout(area, &mut LayoutCtx::new());
+
+    assert!(rendered_text(&workspace, area).contains("No tasks match your filters"));
 }
 
 #[test]
@@ -126,7 +183,7 @@ fn hidden_task_cannot_be_deleted_from_empty_active_view() {
 }
 
 #[test]
-fn created_todo_becomes_active_and_selected_from_any_task_view() {
+fn created_backlog_task_becomes_visible_and_selected_from_any_task_view() {
     for initial_view in [TaskView::Active, TaskView::Snoozed] {
         let (_runtime, context, store) = test_context(WorkspaceSnapshot {
             tasks: vec![test_task()],
@@ -149,8 +206,8 @@ fn created_todo_becomes_active_and_selected_from_any_task_view() {
             )));
         workspace.layout(Rect::new(0, 0, 120, 40), &mut LayoutCtx::new());
 
-        assert_eq!(workspace.task_view, TaskView::Active);
-        assert_eq!(*workspace.active_task_view.borrow(), TaskView::Active);
+        assert_eq!(workspace.task_view, TaskView::Backlog);
+        assert_eq!(*workspace.active_task_view.borrow(), TaskView::Backlog);
         assert_eq!(
             store.borrow().state().selected_task_id.as_deref(),
             Some("task-2")
@@ -236,6 +293,109 @@ fn ctrl_c_opens_complete_dialog_from_focused_task_table() {
         ctx.messages(),
         [AppMsg::OpenCompleteTask { task_id, return_focus: None }] if task_id == "task-1"
     ));
+}
+
+#[test]
+fn ctrl_t_requests_direct_progress_transition_for_every_task_state() {
+    for (state, view) in [
+        (TaskState::Backlog, TaskView::Backlog),
+        (TaskState::Todo, TaskView::Active),
+        (TaskState::InProgress, TaskView::Active),
+        (TaskState::Done, TaskView::Archived),
+        (TaskState::Snoozed, TaskView::Snoozed),
+        (TaskState::Rejected, TaskView::Archived),
+    ] {
+        let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+            tasks: vec![task_with("task-1", "Shortcut task", state)],
+            people: Vec::new(),
+            projects: Vec::new(),
+            tags: Vec::new(),
+        });
+        let mut workspace = TaskWorkspace::new(context);
+        if view != TaskView::Active {
+            *workspace.pending_task_view.borrow_mut() = Some(view);
+            assert!(workspace.sync_task_view_change());
+        }
+        workspace.table_focused = true;
+        let mut ctx = EventCtx::default();
+
+        let outcome = workspace.event(
+            &TuiEvent::Key(KeyEvent {
+                code: Key::Char('t'),
+                modifiers: KeyModifiers::CONTROL,
+            }),
+            &mut ctx,
+        );
+
+        assert!(outcome.handled(), "{state:?} should transition");
+        assert!(matches!(
+            ctx.messages(),
+            [AppMsg::ToggleTaskProgress(task_id)] if task_id == "task-1"
+        ));
+        assert_eq!(store.borrow().state().tasks[0].state, state);
+        assert!(ctx.notifications().is_empty());
+    }
+}
+
+#[test]
+fn direct_progress_transition_updates_state_persists_and_notifies() {
+    for (from, to, label) in [
+        (TaskState::Backlog, TaskState::Todo, "todo"),
+        (TaskState::Todo, TaskState::InProgress, "in-progress"),
+        (TaskState::InProgress, TaskState::Todo, "todo"),
+        (TaskState::Done, TaskState::Todo, "todo"),
+        (TaskState::Snoozed, TaskState::Todo, "todo"),
+        (TaskState::Rejected, TaskState::Todo, "todo"),
+    ] {
+        let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+            tasks: vec![task_with("task-1", "Shortcut task", from)],
+            people: Vec::new(),
+            projects: Vec::new(),
+            tags: Vec::new(),
+        });
+        let coordinator = Rc::clone(&context.coordinator);
+        let mut app = App::new(context.store, context.coordinator);
+        let mut ctx = EventCtx::default();
+
+        app.toggle_task_progress("task-1".into(), &mut ctx);
+
+        assert_eq!(store.borrow().state().tasks[0].state, to);
+        assert!(coordinator.borrow().has_pending());
+        assert!(ctx.layout_requested());
+        assert_eq!(
+            ctx.notifications(),
+            &[tuicore::Notification::success(
+                "Task moved",
+                format!("“Shortcut task” moved to {label}.")
+            )]
+        );
+    }
+}
+
+#[test]
+fn ctrl_t_is_inert_without_a_highlighted_task() {
+    let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+        tasks: Vec::new(),
+        people: Vec::new(),
+        projects: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut workspace = TaskWorkspace::new(context);
+    workspace.table_focused = true;
+    let mut ctx = EventCtx::default();
+
+    let outcome = workspace.event(
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('t'),
+            modifiers: KeyModifiers::CONTROL,
+        }),
+        &mut ctx,
+    );
+
+    assert_eq!(outcome, EventOutcome::Ignored);
+    assert!(store.borrow().state().tasks.is_empty());
+    assert!(ctx.messages().is_empty());
+    assert!(ctx.notifications().is_empty());
 }
 
 #[test]
@@ -757,6 +917,65 @@ fn control_m_from_task_detail_focuses_table_and_enters_move_mode() {
 }
 
 #[test]
+fn task_reordering_and_move_to_edge_actions_notify() {
+    let tasks = vec![
+        task_with_rank("first", "First", TaskState::Todo, 1),
+        task_with_rank("second", "Second", TaskState::Todo, 2),
+    ];
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: tasks.clone(),
+        people: Vec::new(),
+        projects: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut workspace = TaskWorkspace::new(context);
+    workspace.table_mut().highlight_id(&"first".to_string());
+    let mut list_ctx = EventCtx::default();
+    for key in [
+        KeyEvent {
+            code: Key::Char('m'),
+            modifiers: KeyModifiers::CONTROL,
+        },
+        KeyEvent::from(Key::Down),
+        KeyEvent::from(Key::Enter),
+    ] {
+        workspace
+            .task_list_mut()
+            .event(&TuiEvent::Key(key), &mut list_ctx);
+    }
+    let mut reorder_ctx = EventCtx::default();
+
+    workspace.sync_table_events(&mut reorder_ctx);
+
+    assert_eq!(
+        reorder_ctx.notifications(),
+        &[tuicore::Notification::success(
+            "Tasks reordered",
+            "Task order was updated."
+        )]
+    );
+
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks,
+        people: Vec::new(),
+        projects: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(context.store, context.coordinator);
+    let mut move_ctx = EventCtx::default();
+
+    app.move_task_to_edge("second", true, &mut move_ctx);
+
+    assert_eq!(
+        move_ctx.notifications(),
+        &[tuicore::Notification::success(
+            "Task moved",
+            "“Second” moved to the top."
+        )]
+    );
+}
+
+#[test]
 fn successful_snooze_and_unsnooze_clear_return_focus_and_focus_task_table() {
     let (_runtime, context, store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
@@ -782,6 +1001,13 @@ fn successful_snooze_and_unsnooze_clear_return_focus_and_focus_task_table() {
         store.borrow().state().selected_task_id.as_deref(),
         Some("task-1")
     );
+    assert_eq!(
+        submit_ctx.notifications(),
+        &[tuicore::Notification::success(
+            "Task snoozed",
+            "“Original” snoozed until 2026-07-30T14:30:00."
+        )]
+    );
 
     app.snooze_return_focus = Some(detail_path);
     let mut unsnooze_ctx = EventCtx::default();
@@ -791,6 +1017,13 @@ fn successful_snooze_and_unsnooze_clear_return_focus_and_focus_task_table() {
     assert_eq!(
         unsnooze_ctx.focus_request(),
         Some(&initial_task_table_focus_request())
+    );
+    assert_eq!(
+        unsnooze_ctx.notifications(),
+        &[tuicore::Notification::success(
+            "Task unsnoozed",
+            "“Original” moved to todo."
+        )]
     );
 }
 
@@ -1109,7 +1342,7 @@ fn completed_task_moves_from_in_progress_to_archived_view() {
 
     let text = rendered_text(&workspace, area);
     assert!(!text.contains("Original"));
-    assert!(text.contains("No tasks for this filter"));
+    assert!(text.contains("No active tasks"));
 
     *workspace.pending_task_view.borrow_mut() = Some(TaskView::Archived);
     assert!(workspace.sync_task_view_change());
@@ -1130,11 +1363,19 @@ fn confirmed_delete_removes_task_from_state_immediately() {
     });
     let mut app = App::new(context.store, context.coordinator);
     app.delete_return_focus = Some(TreePath::from_keys([ChildKey::new("detail")]));
+    let mut ctx = EventCtx::default();
 
-    app.delete_task("task-1".to_string(), &mut EventCtx::default());
+    app.delete_task("task-1".to_string(), &mut ctx);
 
     assert!(app.context.store.borrow().state().tasks.is_empty());
     assert_eq!(app.delete_return_focus, None);
+    assert_eq!(
+        ctx.notifications(),
+        &[tuicore::Notification::success(
+            "Task deleted",
+            "“Original” was deleted."
+        )]
+    );
 }
 
 #[test]
@@ -1161,6 +1402,103 @@ fn management_create_dialog_layers_over_management_workspace() {
     assert!(!app.root.is_active());
     assert!(app.root.base().is_active());
     assert!(matches!(app.root.base().layer(), AppDialog::People(_)));
+}
+
+#[test]
+fn creating_management_entities_notifies_for_people_projects_and_tags() {
+    let cases = [
+        (
+            ManagementEntityDraft::Person {
+                name: "Ada".into(),
+                email: "ada@example.com".into(),
+                about: "Compiler expert".into(),
+            },
+            tuicore::Notification::success("Person created", "“Ada” was created."),
+        ),
+        (
+            ManagementEntityDraft::Project {
+                key: "CORE".into(),
+                name: "Core".into(),
+                description: "Platform".into(),
+            },
+            tuicore::Notification::success("Project created", "“Core” was created."),
+        ),
+        (
+            ManagementEntityDraft::Tag {
+                label: "backend".into(),
+            },
+            tuicore::Notification::success("Tag created", "“backend” was created."),
+        ),
+    ];
+
+    for (draft, expected) in cases {
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks: Vec::new(),
+            people: Vec::new(),
+            projects: Vec::new(),
+            tags: Vec::new(),
+        });
+        let mut app = App::new(context.store, context.coordinator);
+        let mut ctx = EventCtx::default();
+
+        app.submit_create_management(draft, &mut ctx);
+
+        assert_eq!(ctx.notifications(), &[expected]);
+    }
+}
+
+#[test]
+fn deleting_management_entities_notifies_for_people_projects_and_tags() {
+    let cases = [
+        (
+            ManagementDialogKind::People,
+            "person-1",
+            WorkspaceSnapshot {
+                tasks: Vec::new(),
+                people: vec![Person::new("person-1".into(), "Ada".into(), String::new())],
+                projects: Vec::new(),
+                tags: Vec::new(),
+            },
+            tuicore::Notification::success("Person deleted", "“Ada” was deleted."),
+        ),
+        (
+            ManagementDialogKind::Projects,
+            "project-1",
+            WorkspaceSnapshot {
+                tasks: Vec::new(),
+                people: Vec::new(),
+                projects: vec![Project::new(
+                    "project-1".into(),
+                    "CORE".into(),
+                    "Core".into(),
+                    String::new(),
+                )],
+                tags: Vec::new(),
+            },
+            tuicore::Notification::success("Project deleted", "“Core” was deleted."),
+        ),
+        (
+            ManagementDialogKind::Tags,
+            "tag-1",
+            WorkspaceSnapshot {
+                tasks: Vec::new(),
+                people: Vec::new(),
+                projects: Vec::new(),
+                tags: vec![Tag::new("tag-1".into(), "backend".into())],
+            },
+            tuicore::Notification::success("Tag deleted", "“backend” was deleted."),
+        ),
+    ];
+
+    for (kind, entity_id, snapshot, expected) in cases {
+        let (_runtime, context, _store) = test_context(snapshot);
+        let mut app = App::new(context.store, context.coordinator);
+        let mut ctx = EventCtx::default();
+
+        app.delete_management(kind, entity_id, &mut ctx);
+
+        assert_eq!(ctx.notifications(), &[expected]);
+    }
 }
 
 #[test]
@@ -1256,6 +1594,16 @@ fn complete_outcomes_patch_optimistically_persist_and_focus_task_table() {
             Some(&initial_task_table_focus_request())
         );
         assert!(!app.primary_dialog().is_active());
+        let expected = match state {
+            TaskState::Done => {
+                tuicore::Notification::success("Task completed", "“Original” moved to done.")
+            }
+            TaskState::Rejected => {
+                tuicore::Notification::success("Task rejected", "“Original” moved to rejected.")
+            }
+            _ => unreachable!(),
+        };
+        assert_eq!(ctx.notifications(), &[expected]);
         drop(store);
         workspace.layout(area, &mut LayoutCtx::new());
         assert_eq!(workspace.table().highlighted_id(), None);
@@ -1353,12 +1701,13 @@ fn create_task_submission_formats_title_and_uses_quick_capture_defaults() {
         tags: Vec::new(),
     });
     let mut app = App::new(context.store, context.coordinator);
+    let mut ctx = EventCtx::default();
 
     app.submit_create_task(
         CreateTaskDraft {
             title: "  fix   dont crash... ".to_string(),
         },
-        &mut EventCtx::default(),
+        &mut ctx,
     );
 
     let state = store.borrow();
@@ -1366,6 +1715,14 @@ fn create_task_submission_formats_title_and_uses_quick_capture_defaults() {
     assert_eq!(task.title, "Fix don't crash");
     assert_eq!(task.description, "");
     assert_eq!(task.size, TaskSize::Small);
+    assert_eq!(task.state, TaskState::Backlog);
+    assert_eq!(
+        ctx.notifications(),
+        &[tuicore::Notification::success(
+            "Task created",
+            "“Fix don't crash” was added to backlog."
+        )]
+    );
 }
 
 #[test]

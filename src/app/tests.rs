@@ -1481,7 +1481,7 @@ fn detail_state_change_with_no_remaining_tasks_clears_detail() {
     workspace.layout(area, &mut LayoutCtx::new());
 
     let text = rendered_text(&workspace, area);
-    assert!(text.contains("No tasks for this filter"));
+    assert!(text.contains("No active tasks"));
     assert!(!text.contains("No task selected."));
     assert_eq!(workspace.table().highlighted_id(), None);
     assert_eq!(workspace.detail().task_id, None);
