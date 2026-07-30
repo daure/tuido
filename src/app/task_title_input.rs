@@ -36,7 +36,7 @@ impl TaskTitleInput {
         Self { input, saved_title }
     }
 
-    fn revert_empty_after_enter(
+    fn revert_empty_after_edit_end(
         &mut self,
         event: &TuiEvent,
         was_editing: bool,
@@ -44,7 +44,8 @@ impl TaskTitleInput {
     ) {
         let plain_enter =
             matches!(event, TuiEvent::Key(key) if KeySpec::key(Key::Enter).matches(*key));
-        if plain_enter
+        let canceled = keys::DETAIL_CLOSE.matches(event) || keys::DETAIL_CLOSE_ALT.matches(event);
+        if (plain_enter || canceled)
             && was_editing
             && !self.input.insert_mode()
             && self.input.current_value().trim().is_empty()
@@ -71,7 +72,7 @@ impl TuiNode<AppMsg> for TaskTitleInput {
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<AppMsg>) -> EventOutcome {
         let was_editing = self.input.insert_mode();
         let outcome = self.input.event(event, ctx);
-        self.revert_empty_after_enter(event, was_editing, ctx);
+        self.revert_empty_after_edit_end(event, was_editing, ctx);
         outcome
     }
 
@@ -83,7 +84,7 @@ impl TuiNode<AppMsg> for TaskTitleInput {
     ) -> EventOutcome {
         let was_editing = self.input.insert_mode();
         let outcome = self.input.dispatch_event(route, event, ctx);
-        self.revert_empty_after_enter(event, was_editing, ctx);
+        self.revert_empty_after_edit_end(event, was_editing, ctx);
         outcome
     }
 
@@ -114,7 +115,7 @@ impl TuiNode<AppMsg> for TaskTitleInput {
 
 #[cfg(test)]
 mod tests {
-    use tuicore::KeyEvent;
+    use tuicore::{KeyEvent, KeyModifiers};
 
     use super::*;
 
@@ -150,5 +151,29 @@ mod tests {
             patches.borrow().as_slice(),
             [TaskPatch::Title(title)] if title == "Updated"
         ));
+    }
+
+    #[test]
+    fn canceling_empty_title_restores_last_accepted_value_without_patch() {
+        let close_keys = [
+            KeyEvent::from(Key::Esc),
+            KeyEvent {
+                code: Key::Char('['),
+                modifiers: KeyModifiers::CONTROL,
+            },
+        ];
+
+        for key in close_keys {
+            let patches = Rc::new(RefCell::new(Vec::new()));
+            let mut input = TaskTitleInput::new("Saved title", Rc::clone(&patches));
+            let mut ctx = EventCtx::default();
+            input.event(&TuiEvent::Key(KeyEvent::from(Key::Enter)), &mut ctx);
+            input.input.set_value("  ");
+
+            input.event(&TuiEvent::Key(key), &mut ctx);
+
+            assert_eq!(input.input.current_value(), "Saved title");
+            assert!(patches.borrow().is_empty());
+        }
     }
 }

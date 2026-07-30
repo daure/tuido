@@ -6,156 +6,6 @@ use tuicore::SeasonalGlyphs;
 const DATE_PLACEHOLDER: &str = "YYYY-MM-DD";
 const DATE_TIME_PLACEHOLDER: &str = "YYYY-MM-DD HH:MM";
 
-pub(super) struct TaskDetailForm {
-    pub(super) root: Flex<AppMsg>,
-    pub(super) task_id: Option<String>,
-    pub(super) task_state: Option<TaskState>,
-    pub(super) task_snapshot: Option<Task>,
-    pub(super) people_snapshot: Vec<Person>,
-    pub(super) projects_snapshot: Vec<Project>,
-    pub(super) tags_snapshot: Vec<Tag>,
-    pub(super) patches: PatchSink,
-    pub(super) save_status: SaveStatusLine,
-}
-
-impl TaskDetailForm {
-    pub(super) fn new(
-        task: Option<&TaskRow>,
-        people: &[Person],
-        projects: &[Project],
-        tags: &[Tag],
-        save_error: Option<&str>,
-    ) -> Self {
-        let patches = Rc::new(RefCell::new(Vec::new()));
-        let save_status = SaveStatusLine::new(save_error);
-        Self {
-            root: Flex::column().child(
-                "form",
-                detail_form(
-                    task,
-                    people,
-                    projects,
-                    tags,
-                    Rc::clone(&patches),
-                    save_status.clone(),
-                ),
-                FlexItem::content(),
-            ),
-            task_id: task.map(|task| task.id.clone()),
-            task_state: task.map(|task| task.state),
-            task_snapshot: task.cloned(),
-            people_snapshot: people.to_vec(),
-            projects_snapshot: projects.to_vec(),
-            tags_snapshot: tags.to_vec(),
-            patches,
-            save_status,
-        }
-    }
-
-    pub(super) fn take_patches(&mut self) -> Vec<(String, TaskPatch)> {
-        let Some(task_id) = self.task_id.clone() else {
-            self.patches.borrow_mut().clear();
-            return Vec::new();
-        };
-        self.patches
-            .borrow_mut()
-            .drain(..)
-            .map(|patch| (task_id.clone(), patch))
-            .collect()
-    }
-
-    pub(super) fn set_task(
-        &mut self,
-        task: Option<&TaskRow>,
-        people: &[Person],
-        projects: &[Project],
-        tags: &[Tag],
-        save_error: Option<&str>,
-        ctx: &mut EventCtx<AppMsg>,
-    ) {
-        self.patches = Rc::new(RefCell::new(Vec::new()));
-        self.task_id = task.map(|task| task.id.clone());
-        self.task_state = task.map(|task| task.state);
-        self.task_snapshot = task.cloned();
-        self.people_snapshot = people.to_vec();
-        self.projects_snapshot = projects.to_vec();
-        self.tags_snapshot = tags.to_vec();
-        self.save_status = SaveStatusLine::new(save_error);
-        self.root
-            .replace(
-                "form",
-                detail_form(
-                    task,
-                    people,
-                    projects,
-                    tags,
-                    Rc::clone(&self.patches),
-                    self.save_status.clone(),
-                ),
-                FlexItem::content(),
-                ctx,
-            )
-            .expect("detail form host should contain form child");
-    }
-
-    pub(super) fn set_save_error(&self, save_error: Option<&str>) {
-        self.save_status.set_error(save_error);
-    }
-}
-
-impl TuiNode<AppMsg> for TaskDetailForm {
-    fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
-        self.root.measure(proposal)
-    }
-
-    fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
-        self.root.layout(area, ctx)
-    }
-
-    fn render<'a>(&'a self, frame: &mut Frame, area: Rect, ctx: &mut RenderCtx<'a>) {
-        self.root.render(frame, area, ctx);
-    }
-
-    fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<AppMsg>) -> EventOutcome {
-        let outcome = self.root.event(event, ctx);
-        detail_outcome_or_escape(outcome, event, ctx)
-    }
-
-    fn dispatch_event(
-        &mut self,
-        route: &EventRoute,
-        event: &TuiEvent,
-        ctx: &mut EventCtx<AppMsg>,
-    ) -> EventOutcome {
-        let outcome = self.root.dispatch_event(route, event, ctx);
-        detail_outcome_or_escape(outcome, event, ctx)
-    }
-
-    fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<AppMsg>) {
-        self.root.dispatch_focus(target, focused, ctx);
-    }
-
-    fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
-        self.root.tick(dt, settings)
-    }
-
-    fn init(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
-        self.root.init(ctx);
-    }
-
-    fn mount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
-        self.root.mount(ctx);
-    }
-
-    fn unmount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
-        self.root.unmount(ctx);
-    }
-
-    fn destroy(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
-        self.root.destroy(ctx);
-    }
-}
-
 pub(super) fn task_toolbar(
     pending_view: TaskViewChange,
     active_view: ActiveTaskView,
@@ -487,7 +337,7 @@ impl TuiNode<AppMsg> for TaskTagsInput {
     }
 }
 
-pub(super) fn detail_form(
+pub(crate) fn detail_form(
     task: Option<&TaskRow>,
     people: &[Person],
     projects: &[Project],
@@ -726,18 +576,6 @@ pub(super) fn task_priority_icon(priority: TaskPriority) -> &'static str {
 
 pub(crate) fn detail_escape(event: &TuiEvent) -> bool {
     app_keymap::matches_any(event, &[keys::DETAIL_CLOSE, keys::DETAIL_CLOSE_ALT])
-}
-
-pub(super) fn detail_outcome_or_escape(
-    outcome: EventOutcome,
-    event: &TuiEvent,
-    ctx: &mut EventCtx<AppMsg>,
-) -> EventOutcome {
-    if detail_escape(event) {
-        focus_task_table(ctx);
-        return EventOutcome::Handled;
-    }
-    outcome
 }
 
 pub(super) fn focus_task_table(ctx: &mut EventCtx<AppMsg>) {

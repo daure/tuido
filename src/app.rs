@@ -21,6 +21,7 @@ use crate::task_title::format_title;
 use crate::ui::management::{ManagementDialogKind, people, projects, tags};
 use crate::ui::responsive_split::ResponsiveSplit;
 use crate::ui::save_status::SaveStatusLine;
+use crate::ui::task_detail::{PatchSink, TaskDetailForm};
 use ratatui::{
     Frame,
     layout::{Constraint, Rect},
@@ -286,6 +287,7 @@ struct App {
 struct CompleteReturnFocus {
     task_id: String,
     task_state: TaskState,
+    task_selected_on_open: bool,
     path: TreePath,
 }
 
@@ -313,13 +315,11 @@ impl App {
     ) -> Self {
         let context = AppContext { store, coordinator };
         let tabs = Tabs::new(vec![
-            Tab::new("Tasks", TaskWorkspace::new(context.clone()))
-                .hotkey(keys::APP_TASKS_TAB.hotkey()),
+            Tab::new("Tasks", TaskWorkspace::new(context.clone())),
             Tab::new(
                 "Calendar",
                 CalendarWorkspace::new(context.clone(), show_calendar_weekends),
-            )
-            .hotkey(keys::APP_CALENDAR_TAB.hotkey()),
+            ),
         ])
         .selected(0)
         .variant(TabsVariant::Underline)
@@ -844,9 +844,18 @@ impl App {
         primary.replace_layer(complete_task_dialog(&task), ctx);
         primary.set_fit_content(true);
         primary.set_active_with_context(true, ctx);
+        let task_selected_on_open = self
+            .context
+            .store
+            .borrow()
+            .state()
+            .selected_task_id
+            .as_deref()
+            == Some(task.id.as_str());
         self.complete_return_focus = return_focus.map(|path| CompleteReturnFocus {
             task_id: task.id,
             task_state: task.state,
+            task_selected_on_open,
             path,
         });
     }
@@ -1030,13 +1039,14 @@ impl App {
         let valid_return_path = return_focus.and_then(|origin| {
             let store = self.context.store.borrow();
             let state = store.state();
-            let task_is_selected = state.selected_task_id.as_deref() == Some(&origin.task_id);
+            let selection_is_valid = !origin.task_selected_on_open
+                || state.selected_task_id.as_deref() == Some(&origin.task_id);
             state
                 .tasks
                 .iter()
                 .any(|task| task.id == origin.task_id && task.state == origin.task_state)
                 .then_some(origin.path)
-                .filter(|_| task_is_selected)
+                .filter(|_| selection_is_valid)
         });
         if let Some(path) = valid_return_path {
             ctx.focus(FocusRequest::Path(path));
@@ -1123,7 +1133,6 @@ type TaskViewChange = Rc<RefCell<Option<TaskView>>>;
 type ActiveTaskView = Rc<RefCell<TaskView>>;
 type ActiveLabelFilter = Rc<RefCell<Vec<String>>>;
 type VisibleTaskSelection = Rc<RefCell<Option<String>>>;
-type PatchSink = Rc<RefCell<Vec<TaskPatch>>>;
 
 fn persist_task_order(context: &AppContext, state: &AppState, ordered_ids: &[String]) -> bool {
     let mut ranks = ordered_ids
@@ -1813,6 +1822,10 @@ impl TaskWorkspace {
         event: &TuiEvent,
         ctx: &mut EventCtx<AppMsg>,
     ) -> EventOutcome {
+        if detail_escape(event) {
+            focus_task_table(ctx);
+            return EventOutcome::Handled;
+        }
         if outcome.handled() {
             return outcome;
         }
@@ -1863,10 +1876,6 @@ impl TaskWorkspace {
         if let Some(message) = message {
             ctx.emit(message);
             ctx.stop_propagation();
-            return EventOutcome::Handled;
-        }
-        if detail_escape(event) {
-            focus_task_table(ctx);
             return EventOutcome::Handled;
         }
         outcome
@@ -2112,7 +2121,7 @@ impl TuiNode<AppMsg> for TaskWorkspace {
 mod dialogs;
 use dialogs::*;
 
-mod task_detail;
+pub(crate) mod task_detail;
 use task_detail::*;
 
 #[cfg(test)]

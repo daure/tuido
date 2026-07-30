@@ -394,7 +394,7 @@ pub mod keys {
         AppBinding::new_sequence("TASK_PROJECTS_FIELD", "pro");
     pub const TASK_TAGS_FIELD: AppBinding = AppBinding::new_sequence("TASK_TAGS_FIELD", "ta");
     pub const TASK_CHECKLIST_FIELD: AppBinding =
-        AppBinding::new_sequence("TASK_CHECKLIST_FIELD", "he");
+        AppBinding::new_sequence("TASK_CHECKLIST_FIELD", "ch");
     pub const TASK_LINKS_FIELD: AppBinding = AppBinding::new_sequence("TASK_LINKS_FIELD", "ur");
     pub const TASK_LINK_DELETE: AppBinding = AppBinding::new("TASK_LINK_DELETE", "ctrl+x");
     pub const TASK_START_DATE_FIELD: AppBinding =
@@ -760,7 +760,7 @@ mod tests {
             ("TASK_PEOPLE_FIELD", "pe"),
             ("TASK_PROJECTS_FIELD", "pro"),
             ("TASK_TAGS_FIELD", "ta"),
-            ("TASK_CHECKLIST_FIELD", "he"),
+            ("TASK_CHECKLIST_FIELD", "ch"),
             ("TASK_LINKS_FIELD", "ur"),
             ("TASK_SNOOZED_UNTIL_FIELD", "su"),
         ];

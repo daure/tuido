@@ -785,6 +785,61 @@ fn table_origin_dialog_cancel_focuses_task_table() {
 }
 
 #[test]
+fn calendar_origin_dialog_cancel_restores_calendar_focus() {
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![
+            test_task(),
+            task_with("task-2", "Calendar task", TaskState::Snoozed),
+        ],
+        people: Vec::new(),
+        projects: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(context.store, context.coordinator);
+    let calendar_path = TreePath::from_keys([
+        ChildKey::new("tabs"),
+        ChildKey::new("tab-1"),
+        ChildKey::first(),
+    ]);
+
+    app.open_task_snooze_dialog(
+        "task-2",
+        Some(calendar_path.clone()),
+        &mut EventCtx::default(),
+    );
+    let mut snooze_ctx = EventCtx::default();
+    app.close_snooze_dialog(&mut snooze_ctx);
+    assert_eq!(
+        snooze_ctx.focus_request(),
+        Some(&FocusRequest::Path(calendar_path.clone()))
+    );
+
+    app.open_delete_task_dialog(
+        "task-2",
+        Some(calendar_path.clone()),
+        &mut EventCtx::default(),
+    );
+    let mut delete_ctx = EventCtx::default();
+    app.close_delete_task_dialog(&mut delete_ctx);
+    assert_eq!(
+        delete_ctx.focus_request(),
+        Some(&FocusRequest::Path(calendar_path.clone()))
+    );
+
+    app.open_complete_task_dialog(
+        "task-2",
+        Some(calendar_path.clone()),
+        &mut EventCtx::default(),
+    );
+    let mut complete_ctx = EventCtx::default();
+    app.close_complete_task_dialog(&mut complete_ctx);
+    assert_eq!(
+        complete_ctx.focus_request(),
+        Some(&FocusRequest::Path(calendar_path))
+    );
+}
+
+#[test]
 fn missing_task_dialog_targets_clear_origin_and_focus_task_table() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
@@ -822,6 +877,7 @@ fn missing_task_dialog_targets_clear_origin_and_focus_task_table() {
     app.complete_return_focus = Some(CompleteReturnFocus {
         task_id: "task-1".into(),
         task_state: TaskState::InProgress,
+        task_selected_on_open: true,
         path: TreePath::from_keys([ChildKey::new("stale")]),
     });
     let mut complete_ctx = EventCtx::default();
@@ -1577,6 +1633,7 @@ fn complete_outcomes_patch_optimistically_persist_and_focus_task_table() {
         app.complete_return_focus = Some(CompleteReturnFocus {
             task_id: "task-1".into(),
             task_state: TaskState::InProgress,
+            task_selected_on_open: true,
             path: TreePath::from_keys([ChildKey::new("detail")]),
         });
         let mut ctx = EventCtx::default();
