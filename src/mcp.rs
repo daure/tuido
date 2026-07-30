@@ -1053,6 +1053,9 @@ mod tests {
                 .await
                 .unwrap()
                 .0;
+            assert!(!created.value.created_at.is_empty());
+            assert_eq!(created.value.updated_at, created.value.created_at);
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
             assert_eq!(
                 created.value.links,
                 ["https://a.example/item", "https://z.example/item"]
@@ -1072,6 +1075,8 @@ mod tests {
                 .unwrap()
                 .0;
             assert_eq!(updated.revision, 2);
+            assert_eq!(updated.value.created_at, created.value.created_at);
+            assert!(updated.value.updated_at > created.value.updated_at);
             assert_eq!(
                 updated.value.links,
                 ["https://b.example/added", "https://m.example/edited"]

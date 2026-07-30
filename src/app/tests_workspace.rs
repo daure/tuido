@@ -2035,6 +2035,8 @@ fn title_blur_during_description_hotkey_preserves_description_focus() {
             tasks: vec![Task {
                 id: "task-1".to_string(),
                 rank: 1,
+                created_at: String::new(),
+                updated_at: String::new(),
                 title: "Original".to_string(),
                 state: TaskState::InProgress,
                 size: TaskSize::Small,

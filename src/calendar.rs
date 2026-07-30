@@ -438,6 +438,8 @@ mod tests {
         Task {
             id: id.to_string(),
             rank: 1,
+            created_at: String::new(),
+            updated_at: String::new(),
             title: title.to_string(),
             state,
             size: TaskSize::Small,

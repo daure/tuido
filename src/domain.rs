@@ -707,6 +707,8 @@ fn retained_selection<T>(
 pub struct Task {
     pub id: String,
     pub rank: i64,
+    pub created_at: String,
+    pub updated_at: String,
     pub title: String,
     pub state: TaskState,
     pub size: TaskSize,
@@ -727,6 +729,8 @@ impl Task {
         Self {
             id,
             rank: 0,
+            created_at: String::new(),
+            updated_at: String::new(),
             title: title.trim().to_string(),
             state: TaskState::Backlog,
             size,

@@ -173,7 +173,7 @@ async fn load_workspace(
     let tags = load_tags(pool).await?;
     let mut tasks = Vec::new();
     let rows = sqlx::query(
-        "SELECT id, rank, title, state, workflow_state, CAST(CASE WHEN rejected THEN 1 ELSE 0 END AS BIGINT) AS rejected, size, priority, start_date, due_date, snoozed_until, description FROM tasks ORDER BY rank, id",
+        "SELECT id, rank, created_at, updated_at, title, state, workflow_state, CAST(CASE WHEN rejected THEN 1 ELSE 0 END AS BIGINT) AS rejected, size, priority, start_date, due_date, snoozed_until, description FROM tasks ORDER BY rank, id",
     )
     .fetch_all(pool)
     .await?;
@@ -189,6 +189,8 @@ async fn load_workspace(
         let task = Task {
             id,
             rank: row.try_get("rank")?,
+            created_at: row.try_get("created_at")?,
+            updated_at: row.try_get("updated_at")?,
             title: row.try_get("title")?,
             state: if row.try_get::<i64, _>("rejected")? != 0 {
                 TaskState::Rejected

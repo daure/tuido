@@ -131,6 +131,10 @@ pub struct WorkspaceFilter {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct TaskView {
     pub id: String,
+    /// Creation time as Unix epoch nanoseconds.
+    pub created_at: String,
+    /// Last update time as Unix epoch nanoseconds.
+    pub updated_at: String,
     pub title: String,
     /// User-facing task status: backlog, todo, in_progress, snoozed, done, or rejected.
     pub state: String,
@@ -549,6 +553,8 @@ impl TuidoService {
             self.dialect.placeholder(14)
         );
         let now = now_text();
+        task.created_at.clone_from(&now);
+        task.updated_at.clone_from(&now);
         let mut tx = self.pool.begin().await.map_err(storage_error)?;
         bump_workspace(&mut tx, self.dialect).await?;
         let row = sqlx::query("SELECT COALESCE(MAX(rank), 0) + 1 AS rank FROM tasks")
@@ -619,6 +625,8 @@ impl TuidoService {
         self.create_task_entity(Task {
             id: Uuid::new_v4().to_string(),
             rank: 0,
+            created_at: String::new(),
+            updated_at: String::new(),
             title: input.title.trim().into(),
             state,
             size,
@@ -1518,6 +1526,8 @@ fn task_view(v: Task) -> TaskView {
     let checklist = checklist_views(&v.checklist, None);
     TaskView {
         id: v.id,
+        created_at: v.created_at,
+        updated_at: v.updated_at,
         title: v.title,
         state: v.state.id().into(),
         size: v.size.id().into(),

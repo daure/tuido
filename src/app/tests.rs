@@ -10,6 +10,8 @@ fn test_task() -> Task {
     Task {
         id: "task-1".to_string(),
         rank: 1,
+        created_at: String::new(),
+        updated_at: String::new(),
         title: "Original".to_string(),
         state: TaskState::InProgress,
         size: TaskSize::Small,
