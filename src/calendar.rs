@@ -9,7 +9,9 @@ use tuicore::{
     LifecycleCtx, RenderCtx, TickResult, TuiEvent, TuiNode,
 };
 
-use crate::app::{AppContext, AppMsg, task_detail::detail_escape};
+use crate::app::{
+    AppContext, AppMsg, persist_task_order, task_detail::detail_escape, task_ids_at_snooze_time,
+};
 use crate::app_keymap::keys;
 use crate::domain::{Task, TaskState};
 use crate::persistence_coordinator::PersistenceCommand;
@@ -25,6 +27,7 @@ struct SnoozedTaskEntry {
     id: String,
     title: String,
     until: PrimitiveDateTime,
+    rank: i64,
 }
 
 type TaskCalendar = Calendar<SnoozedTaskEntry, String, AppMsg>;
@@ -36,6 +39,7 @@ pub(crate) struct CalendarWorkspace {
     observed_version: u64,
     setting_status: SaveStatusLine,
     today: Date,
+    reordering: bool,
 }
 
 impl CalendarWorkspace {
@@ -60,6 +64,7 @@ impl CalendarWorkspace {
             observed_version,
             setting_status: SaveStatusLine::new(None),
             today,
+            reordering: false,
         }
     }
 
@@ -210,7 +215,17 @@ impl CalendarWorkspace {
         let Some(task_id) = self.highlighted_task_id() else {
             return outcome;
         };
-        let message = if keys::TASK_SNOOZE.matches(event) {
+        let message = if keys::TASK_QUICK_MENU.matches(event) {
+            self.context
+                .store
+                .borrow()
+                .state()
+                .tasks
+                .iter()
+                .find(|task| task.id == task_id)
+                .and_then(|task| task.snoozed_until)
+                .map(|time| AppMsg::OpenCalendarTaskQuickMenu { task_id, time })
+        } else if keys::TASK_SNOOZE.matches(event) {
             Some(AppMsg::OpenTaskSnooze {
                 task_id,
                 return_focus,
@@ -236,6 +251,80 @@ impl CalendarWorkspace {
             return EventOutcome::Handled;
         }
         outcome
+    }
+
+    fn handle_move_mode(
+        &mut self,
+        event: &TuiEvent,
+        ctx: &mut EventCtx<AppMsg>,
+    ) -> Option<EventOutcome> {
+        if !self.reordering {
+            if !keys::TASK_MOVE_MODE.matches(event) {
+                return None;
+            }
+            let task_id = self.highlighted_task_id()?;
+            let state = self.context.store.borrow();
+            let task = state.state().tasks.iter().find(|task| task.id == task_id)?;
+            let time = task.snoozed_until?;
+            if task_ids_at_snooze_time(state.state(), time).len() < 2 {
+                ctx.notify(tuicore::Notification::warning(
+                    "Task cannot move",
+                    "No other tasks are scheduled at the same time.",
+                ));
+                ctx.stop_propagation();
+                return Some(EventOutcome::Handled);
+            }
+            drop(state);
+            self.reordering = true;
+            ctx.request_redraw();
+            ctx.stop_propagation();
+            return Some(EventOutcome::Handled);
+        }
+
+        if keys::TASK_MOVE_MODE.matches(event)
+            || matches!(event, TuiEvent::Key(key) if key.code == tuicore::Key::Enter)
+            || detail_escape(event)
+        {
+            self.reordering = false;
+            ctx.request_redraw();
+            ctx.stop_propagation();
+            return Some(EventOutcome::Handled);
+        }
+
+        let direction = calendar_move_direction(event)?;
+        self.move_highlighted_task(direction);
+        self.sync_store_version();
+        ctx.request_layout();
+        ctx.request_redraw();
+        ctx.stop_propagation();
+        Some(EventOutcome::Handled)
+    }
+
+    fn move_highlighted_task(&mut self, direction: isize) -> bool {
+        let Some(task_id) = self.highlighted_task_id() else {
+            return false;
+        };
+        let state = self.context.store.borrow().state().clone();
+        let Some(time) = state
+            .tasks
+            .iter()
+            .find(|task| task.id == task_id)
+            .and_then(|task| task.snoozed_until)
+        else {
+            return false;
+        };
+        let mut ordered = task_ids_at_snooze_time(&state, time);
+        let Some(index) = ordered.iter().position(|id| id == &task_id) else {
+            return false;
+        };
+        let next = index
+            .saturating_add_signed(direction)
+            .min(ordered.len() - 1);
+        if next == index {
+            return false;
+        }
+        ordered.swap(index, next);
+        persist_task_order(&self.context, &state, &ordered)
     }
 
     fn focus_calendar(route: &EventRoute, ctx: &mut EventCtx<AppMsg>) {
@@ -276,6 +365,7 @@ fn snoozed_task_entries(tasks: &[Task]) -> Vec<SnoozedTaskEntry> {
                 id: task.id.clone(),
                 title: task.title.clone(),
                 until: task.snoozed_until?,
+                rank: task.rank,
             })
         })
         .collect()
@@ -289,6 +379,11 @@ fn task_calendar(entries: Vec<SnoozedTaskEntry>) -> TaskCalendar {
         |entry| entry.title.clone(),
     )
     .bordered(false)
+    .entry_order(|left, right| {
+        left.rank
+            .cmp(&right.rank)
+            .then_with(|| left.title.cmp(&right.title))
+    })
     .role(|_| Some(CalendarEntryRole::Muted))
     .event_marker(|_| SNOOZE_ICON)
 }
@@ -304,6 +399,20 @@ fn is_calendar_view_hotkey(event: &TuiEvent) -> bool {
         .chain(&bindings.week_view)
         .chain(&bindings.day_view)
         .any(|binding| binding.matches(*key))
+}
+
+fn calendar_move_direction(event: &TuiEvent) -> Option<isize> {
+    let TuiEvent::Key(key) = event else {
+        return None;
+    };
+    let bindings = CalendarKeyBindings::default();
+    if bindings.up.iter().any(|binding| binding.matches(*key)) {
+        Some(-1)
+    } else if bindings.down.iter().any(|binding| binding.matches(*key)) {
+        Some(1)
+    } else {
+        None
+    }
 }
 
 impl TuiNode<AppMsg> for CalendarWorkspace {
@@ -361,6 +470,9 @@ impl TuiNode<AppMsg> for CalendarWorkspace {
     }
 
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<AppMsg>) -> EventOutcome {
+        if let Some(outcome) = self.handle_move_mode(event, ctx) {
+            return outcome;
+        }
         let previous = self.calendar().is_showing_weekends();
         let outcome = self.calendar_mut().event(event, ctx);
         self.persist_weekend_visibility_change(previous);
@@ -374,6 +486,9 @@ impl TuiNode<AppMsg> for CalendarWorkspace {
         event: &TuiEvent,
         ctx: &mut EventCtx<AppMsg>,
     ) -> EventOutcome {
+        if let Some(outcome) = self.handle_move_mode(event, ctx) {
+            return outcome;
+        }
         let previous = self.calendar().is_showing_weekends();
         let detail_route = route.path.keys().first() == Some(&ChildKey::second());
         let calendar_event = !detail_route || is_calendar_view_hotkey(event);
@@ -601,6 +716,100 @@ mod tests {
         workspace.event(&TuiEvent::Key(Key::Down.into()), &mut EventCtx::default());
 
         assert_eq!(workspace.pane.second().task_id.as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn day_view_quick_menu_targets_the_highlighted_task() {
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks: Vec::new(),
+            people: Vec::new(),
+            projects: Vec::new(),
+            tags: Vec::new(),
+        });
+        let mut workspace = CalendarWorkspace::new(context.clone(), true);
+        let until = workspace.today.with_time(Time::from_hms(8, 0, 0).unwrap());
+        context
+            .store
+            .borrow_mut()
+            .dispatch(AppEvent::TaskCreated(task(
+                "highlighted",
+                "Highlighted",
+                TaskState::Snoozed,
+                Some(until),
+            )));
+        workspace.sync_store_version();
+        workspace.calendar_mut().on_key(Key::Char('d'));
+        workspace.sync_calendar_detail(&mut EventCtx::default());
+        let mut ctx = EventCtx::default();
+
+        let outcome = workspace.event(&TuiEvent::Key(Key::Char('.').into()), &mut ctx);
+
+        assert!(outcome.handled());
+        assert!(matches!(
+            ctx.messages(),
+            [AppMsg::OpenCalendarTaskQuickMenu { task_id, time }] if task_id == "highlighted" && *time == until
+        ));
+    }
+
+    #[test]
+    fn day_view_move_mode_reorders_only_tasks_at_the_same_time() {
+        let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+            tasks: Vec::new(),
+            people: Vec::new(),
+            projects: Vec::new(),
+            tags: Vec::new(),
+        });
+        let eight = workspace_time(8);
+        let nine = workspace_time(9);
+        for (id, title, rank, until) in [
+            ("first", "First", 1, eight),
+            ("second", "Second", 2, eight),
+            ("third", "Third", 3, eight),
+            ("later", "Later", 4, nine),
+        ] {
+            let mut entry = task(id, title, TaskState::Snoozed, Some(until));
+            entry.rank = rank;
+            context
+                .store
+                .borrow_mut()
+                .dispatch(AppEvent::TaskCreated(entry));
+        }
+        let mut workspace = CalendarWorkspace::new(context, true);
+        workspace.calendar_mut().on_key(Key::Char('d'));
+        workspace.calendar_mut().on_key(KeyEvent::from(Key::Down));
+
+        for key in [
+            KeyEvent {
+                code: Key::Char('m'),
+                modifiers: KeyModifiers::CONTROL,
+            },
+            KeyEvent::from(Key::Down),
+            KeyEvent::from(Key::Enter),
+        ] {
+            workspace.event(&TuiEvent::Key(key), &mut EventCtx::default());
+        }
+
+        let state = store.borrow();
+        let rank = |id: &str| {
+            state
+                .state()
+                .tasks
+                .iter()
+                .find(|task| task.id == id)
+                .unwrap()
+                .rank
+        };
+        assert_eq!(rank("first"), 1);
+        assert_eq!(rank("second"), 3);
+        assert_eq!(rank("third"), 2);
+        assert_eq!(rank("later"), 4);
+        assert_eq!(workspace.highlighted_task_id().as_deref(), Some("second"));
+        let text = rendered_text(workspace.calendar(), Rect::new(0, 0, 80, 20));
+        assert!(text.find("Third").unwrap() < text.find("Second").unwrap());
+    }
+
+    fn workspace_time(hour: u8) -> PrimitiveDateTime {
+        current_date().with_time(Time::from_hms(hour, 0, 0).unwrap())
     }
 
     #[test]

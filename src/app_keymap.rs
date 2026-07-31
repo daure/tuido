@@ -392,7 +392,7 @@ pub mod keys {
     pub const TASK_PEOPLE_FIELD: AppBinding = AppBinding::new_sequence("TASK_PEOPLE_FIELD", "pe");
     pub const TASK_PROJECTS_FIELD: AppBinding =
         AppBinding::new_sequence("TASK_PROJECTS_FIELD", "pro");
-    pub const TASK_TAGS_FIELD: AppBinding = AppBinding::new_sequence("TASK_TAGS_FIELD", "ta");
+    pub const TASK_TAGS_FIELD: AppBinding = AppBinding::new_sequence("TASK_TAGS_FIELD", "gs");
     pub const TASK_CHECKLIST_FIELD: AppBinding =
         AppBinding::new_sequence("TASK_CHECKLIST_FIELD", "ch");
     pub const TASK_LINKS_FIELD: AppBinding = AppBinding::new_sequence("TASK_LINKS_FIELD", "ur");
@@ -759,7 +759,7 @@ mod tests {
             ("TASK_PRIORITY_FIELD", "pri"),
             ("TASK_PEOPLE_FIELD", "pe"),
             ("TASK_PROJECTS_FIELD", "pro"),
-            ("TASK_TAGS_FIELD", "ta"),
+            ("TASK_TAGS_FIELD", "gs"),
             ("TASK_CHECKLIST_FIELD", "ch"),
             ("TASK_LINKS_FIELD", "ur"),
             ("TASK_SNOOZED_UNTIL_FIELD", "su"),

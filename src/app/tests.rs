@@ -152,6 +152,7 @@ fn task_tags_input_selects_existing_tags_and_creates_shared_candidates() {
     assert_eq!(tags.first(), Some(&api));
     assert_eq!(tags.get(1).map(|tag| tag.label.as_str()), Some("backend"));
     assert_ne!(tags[1].id, api.id);
+    assert!(rendered_text(&input, Rect::new(0, 0, 40, 3)).contains("Add another tag"));
 }
 
 #[test]
@@ -168,6 +169,26 @@ fn task_tags_input_participates_in_control_focus_navigation() {
         .expect("tags input should register a focus target");
     assert!(target.enabled);
     assert!(target.control);
+}
+
+#[test]
+fn task_tags_input_prompts_for_another_tag_when_one_is_selected() {
+    let tag = Tag {
+        id: "tag-study".to_string(),
+        label: "study".to_string(),
+    };
+    let empty = TaskTagsInput::new(&test_task(), &[], Rc::new(RefCell::new(Vec::new())));
+    let mut tagged_task = test_task();
+    tagged_task.tag_ids.push(tag.id.clone());
+    let tagged = TaskTagsInput::new(
+        &tagged_task,
+        std::slice::from_ref(&tag),
+        Rc::new(RefCell::new(Vec::new())),
+    );
+    let area = Rect::new(0, 0, 40, 3);
+
+    assert!(rendered_text(&empty, area).contains("No tags added"));
+    assert!(rendered_text(&tagged, area).contains("Add another tag"));
 }
 
 fn task_with(id: &str, title: &str, state: TaskState) -> Task {

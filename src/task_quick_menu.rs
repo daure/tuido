@@ -1,6 +1,7 @@
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
 use ratatui::{Frame, layout::Rect};
+use time::PrimitiveDateTime;
 use tuicore::{
     AnimationSettings, Dropdown, DropdownCommitMode, DropdownLabelPosition, DropdownSearchMode,
     DropdownVariant, EventCtx, EventOutcome, EventRoute, FocusCtx, FocusTarget, LayoutCtx,
@@ -49,11 +50,20 @@ pub(crate) struct TaskQuickMenu {
     task_id: String,
     dropdown: Dropdown<TaskQuickOption, TaskQuickAction>,
     actions: Rc<RefCell<Vec<TaskQuickAction>>>,
+    time: Option<PrimitiveDateTime>,
     field_area: Rect,
 }
 
 impl TaskQuickMenu {
     pub(crate) fn new(task_id: String) -> Self {
+        Self::new_with_time(task_id, None)
+    }
+
+    pub(crate) fn new_at_time(task_id: String, time: PrimitiveDateTime) -> Self {
+        Self::new_with_time(task_id, Some(time))
+    }
+
+    fn new_with_time(task_id: String, time: Option<PrimitiveDateTime>) -> Self {
         let actions = Rc::new(RefCell::new(Vec::new()));
         let selected_actions = Rc::clone(&actions);
         let options = TaskQuickAction::ALL.map(|action| TaskQuickOption {
@@ -84,6 +94,7 @@ impl TaskQuickMenu {
             task_id,
             dropdown,
             actions,
+            time,
             field_area: Rect::default(),
         }
     }
@@ -102,8 +113,16 @@ impl TaskQuickMenu {
                     task_id,
                     return_focus: None,
                 },
-                TaskQuickAction::MoveToTop => AppMsg::MoveTaskToTop(task_id),
-                TaskQuickAction::MoveToBottom => AppMsg::MoveTaskToBottom(task_id),
+                TaskQuickAction::MoveToTop => self
+                    .time
+                    .map_or(AppMsg::MoveTaskToTop(task_id.clone()), |time| {
+                        AppMsg::MoveCalendarTaskToTop { task_id, time }
+                    }),
+                TaskQuickAction::MoveToBottom => self
+                    .time
+                    .map_or(AppMsg::MoveTaskToBottom(task_id.clone()), |time| {
+                        AppMsg::MoveCalendarTaskToBottom { task_id, time }
+                    }),
             });
         }
         handled
@@ -225,6 +244,23 @@ mod tests {
         assert!(matches!(
             ctx.messages(),
             [AppMsg::MoveTaskToTop(task_id)] if task_id == "task-1"
+        ));
+    }
+
+    #[test]
+    fn calendar_quick_menu_scopes_move_actions_to_the_entry_time() {
+        let time = time::macros::datetime!(2026-07-31 8:00);
+        let mut menu = TaskQuickMenu::new_at_time("task-1".into(), time);
+        let mut ctx = EventCtx::default();
+
+        menu.event(&TuiEvent::Key(KeyEvent::from(Key::Enter)), &mut ctx);
+
+        assert!(matches!(
+            ctx.messages(),
+            [AppMsg::MoveCalendarTaskToTop {
+                task_id,
+                time: entry_time,
+            }] if task_id == "task-1" && *entry_time == time
         ));
     }
 

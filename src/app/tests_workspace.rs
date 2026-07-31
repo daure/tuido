@@ -1032,6 +1032,46 @@ fn task_reordering_and_move_to_edge_actions_notify() {
 }
 
 #[test]
+fn calendar_move_to_edge_only_reorders_tasks_at_the_same_time() {
+    let eight = time::macros::datetime!(2026-07-31 8:00);
+    let nine = time::macros::datetime!(2026-07-31 9:00);
+    let mut tasks = vec![
+        task_with_rank("first", "First", TaskState::Snoozed, 1),
+        task_with_rank("second", "Second", TaskState::Snoozed, 2),
+        task_with_rank("third", "Third", TaskState::Snoozed, 3),
+        task_with_rank("later", "Later", TaskState::Snoozed, 4),
+    ];
+    for task in &mut tasks[..3] {
+        task.snoozed_until = Some(eight);
+    }
+    tasks[3].snoozed_until = Some(nine);
+    let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+        tasks,
+        people: Vec::new(),
+        projects: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(context.store, context.coordinator);
+
+    app.move_calendar_task_to_edge("second", eight, false, &mut EventCtx::default());
+
+    let state = store.borrow();
+    let rank = |id: &str| {
+        state
+            .state()
+            .tasks
+            .iter()
+            .find(|task| task.id == id)
+            .unwrap()
+            .rank
+    };
+    assert_eq!(rank("first"), 1);
+    assert_eq!(rank("second"), 3);
+    assert_eq!(rank("third"), 2);
+    assert_eq!(rank("later"), 4);
+}
+
+#[test]
 fn successful_snooze_and_unsnooze_clear_return_focus_and_focus_task_table() {
     let (_runtime, context, store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],

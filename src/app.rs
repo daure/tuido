@@ -122,8 +122,20 @@ pub(crate) enum AppMsg {
     },
     DeleteTaskConfirmed(String),
     OpenTaskQuickMenu(String),
+    OpenCalendarTaskQuickMenu {
+        task_id: String,
+        time: PrimitiveDateTime,
+    },
     MoveTaskToTop(String),
     MoveTaskToBottom(String),
+    MoveCalendarTaskToTop {
+        task_id: String,
+        time: PrimitiveDateTime,
+    },
+    MoveCalendarTaskToBottom {
+        task_id: String,
+        time: PrimitiveDateTime,
+    },
     OpenTaskSnooze {
         task_id: String,
         return_focus: Option<TreePath>,
@@ -239,8 +251,17 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         } => app.open_delete_task_dialog(&task_id, return_focus, ctx),
         AppMsg::DeleteTaskConfirmed(task_id) => app.delete_task(task_id, ctx),
         AppMsg::OpenTaskQuickMenu(task_id) => app.open_task_quick_menu(&task_id, ctx),
+        AppMsg::OpenCalendarTaskQuickMenu { task_id, time } => {
+            app.open_calendar_task_quick_menu(&task_id, time, ctx)
+        }
         AppMsg::MoveTaskToTop(task_id) => app.move_task_to_edge(&task_id, true, ctx),
         AppMsg::MoveTaskToBottom(task_id) => app.move_task_to_edge(&task_id, false, ctx),
+        AppMsg::MoveCalendarTaskToTop { task_id, time } => {
+            app.move_calendar_task_to_edge(&task_id, time, true, ctx)
+        }
+        AppMsg::MoveCalendarTaskToBottom { task_id, time } => {
+            app.move_calendar_task_to_edge(&task_id, time, false, ctx)
+        }
         AppMsg::OpenTaskSnooze {
             task_id,
             return_focus,
@@ -723,6 +744,29 @@ impl App {
         primary.set_active_with_context(true, ctx);
     }
 
+    fn open_calendar_task_quick_menu(
+        &mut self,
+        task_id: &str,
+        time: PrimitiveDateTime,
+        ctx: &mut EventCtx<AppMsg>,
+    ) {
+        if self.task(task_id).is_none() {
+            return;
+        }
+        let primary = self.primary_dialog();
+        primary.replace_layer(
+            AppDialog::TaskQuickMenu(Box::new(TaskQuickMenu::new_at_time(
+                task_id.to_string(),
+                time,
+            ))),
+            ctx,
+        );
+        primary.set_layer_percent(40);
+        primary.set_layer_cross_percent(35);
+        primary.set_fit_content(true);
+        primary.set_active_with_context(true, ctx);
+    }
+
     fn move_task_to_edge(&mut self, task_id: &str, to_top: bool, ctx: &mut EventCtx<AppMsg>) {
         let state = self.context.store.borrow().state().clone();
         let mut ordered = state
@@ -749,6 +793,42 @@ impl App {
         }
         self.close_dialog(ctx);
         focus_task_table(ctx);
+    }
+
+    fn move_calendar_task_to_edge(
+        &mut self,
+        task_id: &str,
+        time: PrimitiveDateTime,
+        to_top: bool,
+        ctx: &mut EventCtx<AppMsg>,
+    ) {
+        let state = self.context.store.borrow().state().clone();
+        let mut ordered = task_ids_at_snooze_time(&state, time);
+        let Some(index) = ordered.iter().position(|id| id == task_id) else {
+            self.close_dialog(ctx);
+            return;
+        };
+        let task_title = state
+            .tasks
+            .iter()
+            .find(|task| task.id == task_id)
+            .map(|task| task.title.clone());
+        let task_id = ordered.remove(index);
+        if to_top {
+            ordered.insert(0, task_id);
+        } else {
+            ordered.push(task_id);
+        }
+        if persist_task_order(&self.context, &state, &ordered)
+            && let Some(task_title) = task_title
+        {
+            let edge = if to_top { "top" } else { "bottom" };
+            ctx.notify(tuicore::Notification::success(
+                "Task moved",
+                format!("“{task_title}” moved to the {edge} of tasks at the same time."),
+            ));
+        }
+        self.close_dialog(ctx);
     }
 
     fn delete_task(&mut self, task_id: String, ctx: &mut EventCtx<AppMsg>) {
@@ -1134,7 +1214,21 @@ type ActiveTaskView = Rc<RefCell<TaskView>>;
 type ActiveLabelFilter = Rc<RefCell<Vec<String>>>;
 type VisibleTaskSelection = Rc<RefCell<Option<String>>>;
 
-fn persist_task_order(context: &AppContext, state: &AppState, ordered_ids: &[String]) -> bool {
+pub(crate) fn task_ids_at_snooze_time(state: &AppState, time: PrimitiveDateTime) -> Vec<String> {
+    let mut tasks = state
+        .tasks
+        .iter()
+        .filter(|task| task.state == TaskState::Snoozed && task.snoozed_until == Some(time))
+        .collect::<Vec<_>>();
+    tasks.sort_by_key(|task| task.rank);
+    tasks.into_iter().map(|task| task.id.clone()).collect()
+}
+
+pub(crate) fn persist_task_order(
+    context: &AppContext,
+    state: &AppState,
+    ordered_ids: &[String],
+) -> bool {
     let mut ranks = ordered_ids
         .iter()
         .filter_map(|id| state.tasks.iter().find(|task| task.id == *id))

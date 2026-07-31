@@ -210,13 +210,18 @@ pub(super) struct TaskTagsInput {
 
 impl TaskTagsInput {
     pub(super) fn new(task: &Task, tags: &[Tag], patch_sink: PatchSink) -> Self {
+        let placeholder = if task.tag_ids.is_empty() {
+            "No tags added"
+        } else {
+            "Add another tag"
+        };
         let input = TagInput::with_options(
             tags.iter().cloned(),
             |tag| tag.id.clone(),
             |tag| tag.label.clone(),
         )
         .selected_existing(task.tag_ids.iter().cloned())
-        .placeholder("No tags added")
+        .placeholder(placeholder)
         .panel("Tags")
         .hotkey(keys::TASK_TAGS_FIELD.hotkey());
         Self {
@@ -237,6 +242,13 @@ impl TaskTagsInput {
         if !value_changed {
             return;
         }
+
+        let placeholder = if self.input.selected_tags().is_empty() {
+            "No tags added"
+        } else {
+            "Add another tag"
+        };
+        self.input.set_placeholder(placeholder);
 
         let mut selected = Vec::new();
         for tag in self.input.selected_tags() {
