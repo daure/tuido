@@ -613,6 +613,95 @@ fn ctrl_x_from_task_detail_opens_delete_except_under_links() {
 }
 
 #[test]
+fn first_escape_cancels_checklist_and_link_insert_before_leaving_detail() {
+    let cancel_keys = [
+        KeyEvent::from(Key::Esc),
+        KeyEvent {
+            code: Key::Char('['),
+            modifiers: KeyModifiers::CONTROL,
+        },
+    ];
+
+    for component in ["checklist", "links"] {
+        for cancel_key in cancel_keys {
+            let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+                tasks: vec![test_task()],
+                people: Vec::new(),
+                projects: Vec::new(),
+                tags: Vec::new(),
+            });
+            let mut workspace = TaskWorkspace::new(context);
+            let area = Rect::new(0, 0, 120, 80);
+            let mut layout = LayoutCtx::new();
+            workspace.layout(area, &mut layout);
+            let data_path = layout
+                .focus_targets()
+                .iter()
+                .find(|target| {
+                    target.id.as_str() == "data-view"
+                        && target
+                            .path
+                            .keys()
+                            .iter()
+                            .any(|key| key.as_str() == component)
+                })
+                .expect("list control should be focusable")
+                .path
+                .clone();
+            workspace.dispatch_event(
+                &EventRoute::new(data_path.clone()),
+                &TuiEvent::Key(Key::Char('+').into()),
+                &mut EventCtx::default(),
+            );
+            let mut editor_layout = LayoutCtx::new();
+            workspace.layout(area, &mut editor_layout);
+            let editor_path = editor_layout
+                .focus_targets()
+                .iter()
+                .find(|target| {
+                    target
+                        .path
+                        .keys()
+                        .iter()
+                        .any(|key| key.as_str() == component)
+                        && target
+                            .path
+                            .keys()
+                            .iter()
+                            .any(|key| key.as_str() == "add-input")
+                })
+                .expect("insert editor should be focusable")
+                .path
+                .clone();
+
+            let mut first_ctx = EventCtx::default();
+            let first = workspace.dispatch_event(
+                &EventRoute::new(editor_path),
+                &TuiEvent::Key(cancel_key),
+                &mut first_ctx,
+            );
+            assert!(first.handled());
+            assert_ne!(
+                first_ctx.focus_request(),
+                Some(&initial_task_table_focus_request())
+            );
+
+            let mut second_ctx = EventCtx::default();
+            let second = workspace.dispatch_event(
+                &EventRoute::new(data_path),
+                &TuiEvent::Key(cancel_key),
+                &mut second_ctx,
+            );
+            assert!(second.handled());
+            assert_eq!(
+                second_ctx.focus_request(),
+                Some(&initial_task_table_focus_request())
+            );
+        }
+    }
+}
+
+#[test]
 fn detail_dialog_cancel_restores_resolvable_full_app_focus_path() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
@@ -1230,7 +1319,7 @@ fn snooze_dropdown_does_not_dim_dialog_backdrop_twice() {
 }
 
 #[test]
-fn snoozed_detail_places_datetime_field_before_start_and_end_dates_and_queues_selection() {
+fn snoozed_detail_queues_datetime_selection() {
     let until = time::macros::datetime!(2026-08-24 8:00);
     let mut task = test_task();
     task.state = TaskState::Snoozed;
@@ -1239,13 +1328,7 @@ fn snoozed_detail_places_datetime_field_before_start_and_end_dates_and_queues_se
     let area = Rect::new(0, 0, 80, 120);
     detail.layout(area, &mut LayoutCtx::new());
     let text = rendered_text(&detail, area);
-    let snoozed_until = text
-        .find("Snoozed until")
-        .expect("snoozed datetime should render");
-    let start_date = text.find("Start date").expect("start date should render");
-    let end_date = text.find("End date").expect("end date should render");
-    assert!(snoozed_until < start_date);
-    assert!(start_date < end_date);
+    assert!(text.contains("Snoozed until"));
 
     let mut layout = LayoutCtx::new();
     detail.layout(area, &mut layout);
@@ -1772,7 +1855,7 @@ fn create_task_dialog_fits_its_content_height() {
     let mut app = App::new(context.store, context.coordinator);
     let area = Rect::new(0, 0, 120, 40);
 
-    app.open_create_task_dialog(&mut EventCtx::default());
+    app.open_create_task_dialog(None, &mut EventCtx::default());
     let mut layout = LayoutCtx::new();
     app.layout(area, &mut layout);
     let dialog_area = layout
@@ -1814,11 +1897,118 @@ fn create_task_submission_formats_title_and_uses_quick_capture_defaults() {
     assert_eq!(task.size, TaskSize::Small);
     assert_eq!(task.state, TaskState::Backlog);
     assert_eq!(
+        ctx.focus_request(),
+        Some(&initial_task_table_focus_request())
+    );
+    assert_eq!(
         ctx.notifications(),
         &[tuicore::Notification::success(
             "Task created",
             "“Fix don't crash” was added to backlog."
         )]
+    );
+}
+
+#[test]
+fn create_task_submission_uses_default_project() {
+    let project = Project::new(
+        "project-1".into(),
+        "ONE".into(),
+        "Project one".into(),
+        String::new(),
+    );
+    let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+        tasks: Vec::new(),
+        people: Vec::new(),
+        projects: vec![project.clone()],
+        tags: Vec::new(),
+    });
+    store
+        .borrow_mut()
+        .dispatch(AppEvent::AppSettingChangeRequested {
+            key: DEFAULT_PROJECT_SETTING.into(),
+            value: project.id.clone(),
+            generation: 1,
+        });
+    let mut app = App::new(context.store, context.coordinator);
+
+    app.submit_create_task(
+        CreateTaskDraft {
+            title: "Defaulted task".into(),
+        },
+        &mut EventCtx::default(),
+    );
+
+    assert_eq!(
+        store.borrow().state().tasks[0].project_id.as_deref(),
+        Some("project-1")
+    );
+}
+
+#[test]
+fn calendar_task_creation_snoozes_at_selected_day_default_time() {
+    let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+        tasks: Vec::new(),
+        people: Vec::new(),
+        projects: Vec::new(),
+        tags: Vec::new(),
+    });
+    store
+        .borrow_mut()
+        .dispatch(AppEvent::AppSettingChangeRequested {
+            key: DEFAULT_SNOOZE_TIME_SETTING.into(),
+            value: "14:30".into(),
+            generation: 1,
+        });
+    let mut app = App::new(context.store, context.coordinator);
+    let mut layout = LayoutCtx::new();
+    app.layout(Rect::new(0, 0, 100, 30), &mut layout);
+    let task_path = layout
+        .focus_targets()
+        .iter()
+        .find(|target| target.id.as_str() == "data-view")
+        .expect("task table should be focusable")
+        .path
+        .clone();
+    let new_path = layout
+        .focus_targets()
+        .iter()
+        .find(|target| target.path.keys().iter().any(|part| part.as_str() == "new"))
+        .expect("new button should be focusable")
+        .path
+        .clone();
+    app.dispatch_event(
+        &EventRoute::new(task_path),
+        &TuiEvent::Key(Key::Char(']').into()),
+        &mut EventCtx::default(),
+    );
+    let selected_date = app.calendar_create_context.selected_date();
+    let mut open_ctx = EventCtx::default();
+    app.dispatch_event(
+        &EventRoute::new(new_path),
+        &TuiEvent::Key(Key::Enter.into()),
+        &mut open_ctx,
+    );
+    let calendar_date = match open_ctx.messages() {
+        [AppMsg::OpenCreateTask { calendar_date }] => *calendar_date,
+        _ => panic!("new button should open task creation"),
+    };
+    assert_eq!(calendar_date, Some(selected_date));
+    app.open_create_task_dialog(calendar_date, &mut EventCtx::default());
+
+    app.submit_create_task(
+        CreateTaskDraft {
+            title: "Schedule follow up".into(),
+        },
+        &mut EventCtx::default(),
+    );
+
+    let state = store.borrow();
+    let task = state.state().tasks.first().expect("task should be created");
+    assert_eq!(task.state, TaskState::Snoozed);
+    assert_eq!(
+        task.snoozed_until,
+        Some(selected_date.with_time(Time::from_hms(14, 30, 0).unwrap()))
     );
 }
 
@@ -2081,11 +2271,9 @@ fn title_blur_during_description_hotkey_preserves_description_focus() {
                 state: TaskState::InProgress,
                 size: TaskSize::Small,
                 priority: TaskPriority::Medium,
-                start_date: None,
-                due_date: None,
                 snoozed_until: None,
                 people_ids: Vec::new(),
-                project_ids: Vec::new(),
+                project_id: None,
                 tag_ids: Vec::new(),
                 checklist: Vec::new(),
                 links: Vec::new(),
@@ -2424,7 +2612,7 @@ fn task_dropdown_save_completion_tabs_to_next_control_without_reset() {
             tab.focus_request.as_ref().unwrap_or(&FocusRequest::Next),
             post_save_layout.focus_targets(),
         )
-        .expect("tab should move to start date");
+        .expect("tab should move to people");
     dispatcher.dispatch_focus(&mut workspace, transition, AnimationSettings::default());
     assert!(
         focus
@@ -2433,7 +2621,7 @@ fn task_dropdown_save_completion_tabs_to_next_control_without_reset() {
             .path
             .keys()
             .iter()
-            .any(|key| key.as_str() == "start-date")
+            .any(|key| key.as_str() == "people")
     );
     assert_eq!(store.borrow().state().tasks[0].size, TaskSize::Big);
 }

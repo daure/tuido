@@ -61,10 +61,15 @@ impl CreateManagementDialog {
         let mut root = if kind == ManagementDialogKind::Projects {
             Flex::column().child(
                 "primary",
-                ProjectKeyInput::new(first).on_commit({
-                    let primary = Rc::clone(&primary);
-                    move |value| *primary.borrow_mut() = value.to_string()
-                }),
+                ProjectKeyInput::new(first.max_len(5))
+                    .on_commit({
+                        let primary = Rc::clone(&primary);
+                        move |value| *primary.borrow_mut() = value.to_string()
+                    })
+                    .on_invalid({
+                        let primary = Rc::clone(&primary);
+                        move |value| *primary.borrow_mut() = value.to_string()
+                    }),
                 FlexItem::fixed(3),
             )
         } else {

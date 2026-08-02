@@ -19,7 +19,7 @@ use crate::{
     },
 };
 
-const MCP_INSTRUCTIONS: &str = "Read and mutate Tuido tasks, task checklists, people, projects, and tags. Replace checklists as complete ordered trees rather than issuing granular item actions. Treat task state as user-facing Status, not Type or Workflow. Task people are people involved besides the workspace owner; never describe them as assignees or owners. Revisions are internal optimistic-concurrency tokens: use the latest entity revision as expected_revision for mutations, but omit revisions from user-facing task tables and summaries unless the user asks for them.";
+const MCP_INSTRUCTIONS: &str = "Read and mutate Tuido tasks, task checklists, people, projects, and tags. Task IDs use PROJECT_KEY-number, or number when no project was set at creation. Replace checklists as complete ordered trees rather than issuing granular item actions. Treat task state as user-facing Status, not Type or Workflow. Task people are people involved besides the workspace owner; never describe them as assignees or owners. Revisions are internal optimistic-concurrency tokens: use the latest entity revision as expected_revision for mutations, but omit revisions from user-facing task tables and summaries unless the user asks for them.";
 
 #[derive(Clone)]
 struct McpServer {
@@ -751,7 +751,7 @@ mod tests {
             let service = TuidoService::from_parts(pool, SqlDialect::Sqlite);
             service
                 .create_task_entity(Task::quick_capture(
-                    "task".into(),
+                    "1".into(),
                     "Original".into(),
                     String::new(),
                     TaskSize::Small,
@@ -808,28 +808,26 @@ mod tests {
 
             let malformed = server
                 .update_task(Parameters(TaskUpdate {
-                    id: "task".into(),
+                    id: "1".into(),
                     expected_revision: 1,
                     title: "Poisoned".into(),
                     state: "todo".into(),
                     size: "small".into(),
                     priority: "medium".into(),
-                    start_date: None,
-                    due_date: None,
                     snoozed_until: Some("malformed".into()),
                     people_ids: Vec::new(),
-                    project_ids: Vec::new(),
+                    project_id: None,
                     tag_ids: Vec::new(),
                     links: Vec::new(),
                     description: String::new(),
                 }))
                 .await;
             assert!(malformed.is_err());
-            assert_eq!(service.get_task("task").await.unwrap().revision, 1);
+            assert_eq!(service.get_task("1").await.unwrap().revision, 1);
 
             let completed = server
                 .complete_task(Parameters(Expected {
-                    id: "task".into(),
+                    id: "1".into(),
                     expected_revision: 1,
                 }))
                 .await
@@ -840,7 +838,7 @@ mod tests {
 
             let deleted = server
                 .delete_task(Parameters(Expected {
-                    id: "task".into(),
+                    id: "1".into(),
                     expected_revision: 2,
                 }))
                 .await
@@ -848,7 +846,7 @@ mod tests {
                 .0;
             assert!(deleted.deleted);
             assert_eq!(deleted.entity, "task");
-            assert_eq!(deleted.id, "task");
+            assert_eq!(deleted.id, "1");
             assert!(
                 serde_json::to_value(deleted)
                     .unwrap()
@@ -873,11 +871,9 @@ mod tests {
                 size: "small".into(),
                 state: "snoozed".into(),
                 priority: "medium".into(),
-                start_date: None,
-                due_date: None,
                 snoozed_until: Some("2000-01-01T00:00:00".into()),
                 people_ids: Vec::new(),
-                project_ids: Vec::new(),
+                project_id: None,
                 tag_ids: Vec::new(),
                 links: Vec::new(),
             };
@@ -935,11 +931,9 @@ mod tests {
                     size: "small".into(),
                     state: "snoozed".into(),
                     priority: "medium".into(),
-                    start_date: None,
-                    due_date: None,
                     snoozed_until: Some("2000-01-01T00:00:00".into()),
                     people_ids: Vec::new(),
-                    project_ids: Vec::new(),
+                    project_id: None,
                     tag_ids: Vec::new(),
                     links: Vec::new(),
                 }))
@@ -997,11 +991,9 @@ mod tests {
                     size: "small".into(),
                     state: "todo".into(),
                     priority: "medium".into(),
-                    start_date: None,
-                    due_date: None,
                     snoozed_until: None,
                     people_ids: Vec::new(),
-                    project_ids: Vec::new(),
+                    project_id: None,
                     tag_ids: Vec::new(),
                     links: Vec::new(),
                 }))
@@ -1039,11 +1031,9 @@ mod tests {
                     size: "small".into(),
                     state: "todo".into(),
                     priority: "medium".into(),
-                    start_date: None,
-                    due_date: None,
                     snoozed_until: None,
                     people_ids: Vec::new(),
-                    project_ids: Vec::new(),
+                    project_id: None,
                     tag_ids: Vec::new(),
                     links: vec![
                         "https://z.example/item".into(),
@@ -1112,11 +1102,9 @@ mod tests {
                     size: "small".into(),
                     state: "todo".into(),
                     priority: "medium".into(),
-                    start_date: None,
-                    due_date: None,
                     snoozed_until: None,
                     people_ids: Vec::new(),
-                    project_ids: Vec::new(),
+                    project_id: None,
                     tag_ids: Vec::new(),
                     links: Vec::new(),
                 }))

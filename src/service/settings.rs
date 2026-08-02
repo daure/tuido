@@ -33,4 +33,18 @@ impl TuidoService {
             .map_err(storage_error)?;
         Ok(())
     }
+
+    pub(crate) async fn default_project_id(&self) -> ServiceResult<Option<String>> {
+        let sql = format!(
+            "SELECT projects.id FROM app_settings JOIN projects ON projects.id = app_settings.value WHERE app_settings.key = {}",
+            self.dialect.placeholder(1)
+        );
+        sqlx::query(AssertSqlSafe(sql.as_str()))
+            .bind(crate::domain::DEFAULT_PROJECT_SETTING)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(storage_error)?
+            .map(|row| row.try_get("id").map_err(storage_error))
+            .transpose()
+    }
 }

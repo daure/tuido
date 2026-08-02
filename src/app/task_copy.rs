@@ -60,11 +60,9 @@ struct TaskExport<'a> {
     state: &'static str,
     size: &'static str,
     priority: &'static str,
-    start_date: Option<&'a str>,
-    due_date: Option<&'a str>,
     snoozed_until: Option<String>,
     people: Vec<PersonExport<'a>>,
-    projects: Vec<ProjectExport<'a>>,
+    project: Option<ProjectExport<'a>>,
     tags: Vec<TagExport<'a>>,
     links: Vec<String>,
 }
@@ -76,9 +74,9 @@ impl<'a> TaskExport<'a> {
             .iter()
             .map(|id| context.person(task, id, "person"))
             .collect::<Result<_, _>>()?;
-        let projects = task
-            .project_ids
-            .iter()
+        let project = task
+            .project_id
+            .as_deref()
             .map(|id| {
                 let project = context
                     .projects
@@ -91,7 +89,7 @@ impl<'a> TaskExport<'a> {
                     .transpose()?;
                 Ok(ProjectExport::new(project, lead))
             })
-            .collect::<Result<_, CopyError>>()?;
+            .transpose()?;
         let tags = task
             .tag_ids
             .iter()
@@ -111,11 +109,9 @@ impl<'a> TaskExport<'a> {
             state: task.state.id(),
             size: task.size.id(),
             priority: task.priority.id(),
-            start_date: task.start_date.as_deref(),
-            due_date: task.due_date.as_deref(),
             snoozed_until: task.snoozed_until.map(crate::snooze::format_datetime),
             people,
-            projects,
+            project,
             tags,
             links: task
                 .links

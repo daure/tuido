@@ -3,28 +3,40 @@ use super::*;
 #[cfg(test)]
 use tuicore::SeasonalGlyphs;
 
-const DATE_PLACEHOLDER: &str = "YYYY-MM-DD";
 const DATE_TIME_PLACEHOLDER: &str = "YYYY-MM-DD HH:MM";
 
 pub(super) fn task_toolbar(
     pending_view: TaskViewChange,
     active_view: ActiveTaskView,
-    tags: &[Tag],
-    active_label_filter: ActiveLabelFilter,
 ) -> Flex<AppMsg> {
     let view = TaskViewMenu::new(pending_view, active_view);
-    let labels = label_filter_dropdown(tags, active_label_filter);
-    let new_task = Button::new("New")
-        .hotkey(keys::TASK_QUICK_CREATE.hotkey())
-        .on_press(|| AppMsg::OpenCreateTask);
 
     Flex::row()
         .align(CrossAlign::Center)
         .gap(1)
         .child("view", view, FlexItem::content())
-        .child("labels", labels, FlexItem::content())
         .child("space", Paragraph::new(""), FlexItem::fill(1))
-        .child("new", new_task, FlexItem::content())
+}
+
+pub(super) fn project_filter_dropdown(
+    projects: &[Project],
+    active_filter: ActiveProjectFilter,
+) -> Dropdown<Project, String> {
+    let selected = active_filter.borrow().iter().cloned().collect::<Vec<_>>();
+    Dropdown::single(
+        projects.to_vec(),
+        |project| project.id.clone(),
+        |project| project.name.clone(),
+    )
+    .placeholder("󰲋 Project")
+    .no_selection_text("None")
+    .hotkey(keys::TASK_PROJECT_FILTER.hotkey())
+    .selected(selected)
+    .search_mode(DropdownSearchMode::Contains)
+    .commit_mode(DropdownCommitMode::Explicit)
+    .variant(DropdownVariant::Filled)
+    .max_popup_height(12)
+    .on_select(move |ids| *active_filter.borrow_mut() = ids.into_iter().next())
 }
 
 pub(super) fn label_filter_dropdown(
@@ -46,11 +58,12 @@ pub(super) fn label_filter_dropdown(
 pub(super) fn task_split(
     store: &AppStore,
     task_view: TaskView,
+    project_filter: Option<&str>,
     label_filter: &[String],
 ) -> TaskPane {
     let store_ref = store.borrow();
     let state = store_ref.state();
-    let rows = task_rows_for_view(&state.tasks, task_view, label_filter);
+    let rows = task_rows_for_view(&state.tasks, task_view, project_filter, label_filter);
     let selected = state
         .selected_task_id
         .as_deref()
@@ -73,12 +86,15 @@ pub(super) fn task_split(
 pub(super) fn task_rows_for_view(
     tasks: &[Task],
     task_view: TaskView,
+    project_filter: Option<&str>,
     label_filter: &[String],
 ) -> Vec<TaskRow> {
     let mut rows = tasks
         .iter()
         .filter(|task| {
             task_view.contains(task)
+                && project_filter
+                    .is_none_or(|project_id| task.project_id.as_deref() == Some(project_id))
                 && label_filter
                     .iter()
                     .all(|tag_id| task.tag_ids.contains(tag_id))
@@ -355,6 +371,7 @@ pub(crate) fn detail_form(
     projects: &[Project],
     tags: &[Tag],
     patch_sink: PatchSink,
+    checklist_highlighted_id: Rc<RefCell<Option<String>>>,
     save_status: SaveStatusLine,
 ) -> Flex<AppMsg> {
     let Some(task) = task else {
@@ -409,7 +426,7 @@ pub(crate) fn detail_form(
             FlexItem::fill(1),
         );
 
-    let mut date_fields = Flex::<AppMsg>::row().gap(1);
+    let mut date_fields = Flex::<AppMsg>::row();
     if task.state == TaskState::Snoozed {
         date_fields = date_fields.child(
             "snoozed-until",
@@ -431,44 +448,6 @@ pub(crate) fn detail_form(
             FlexItem::fill(1),
         );
     }
-    let date_fields = date_fields
-        .child(
-            "start-date",
-            DatePickerDropdown::<AppMsg>::new()
-                .value(parse_date(task.start_date.as_deref()))
-                .placeholder(DATE_PLACEHOLDER)
-                .panel("Start date")
-                .hotkey(keys::TASK_START_DATE_FIELD.hotkey())
-                .on_select({
-                    let patch_sink = Rc::clone(&patch_sink);
-                    move |date| {
-                        patch_sink
-                            .borrow_mut()
-                            .push(TaskPatch::StartDate(Some(date.to_string())));
-                        AppMsg::Noop
-                    }
-                }),
-            FlexItem::fill(1),
-        )
-        .child(
-            "end-date",
-            DatePickerDropdown::<AppMsg>::new()
-                .value(parse_date(task.due_date.as_deref()))
-                .placeholder(DATE_PLACEHOLDER)
-                .panel("End date")
-                .hotkey(keys::TASK_END_DATE_FIELD.hotkey())
-                .on_select({
-                    let patch_sink = Rc::clone(&patch_sink);
-                    move |date| {
-                        patch_sink
-                            .borrow_mut()
-                            .push(TaskPatch::EndDate(Some(date.to_string())));
-                        AppMsg::Noop
-                    }
-                }),
-            FlexItem::fill(1),
-        );
-
     Flex::<AppMsg>::column()
         .gap(0)
         .child("save-status", save_status, FlexItem::content())
@@ -497,7 +476,7 @@ pub(crate) fn detail_form(
             FlexItem::content(),
         )
         .child("status-fields", status_fields, FlexItem::fixed(3))
-        .child("date-fields", date_fields, FlexItem::fixed(3))
+        .child("date-fields", date_fields, FlexItem::content())
         .child(
             "people-projects",
             Flex::<AppMsg>::row()
@@ -521,7 +500,7 @@ pub(crate) fn detail_form(
         )
         .child(
             "checklist",
-            TaskChecklistInput::new(task, Rc::clone(&patch_sink)),
+            TaskChecklistInput::new(task, Rc::clone(&patch_sink), checklist_highlighted_id),
             FlexItem::content(),
         )
         .child(
@@ -529,12 +508,6 @@ pub(crate) fn detail_form(
             TaskLinksInput::new(task, Rc::clone(&patch_sink)),
             FlexItem::content(),
         )
-}
-
-pub(super) fn parse_date(value: Option<&str>) -> Option<Date> {
-    value.and_then(|value| {
-        Date::parse(value, &time::format_description::well_known::Iso8601::DATE).ok()
-    })
 }
 
 pub(super) fn chip_line(label: &'static str, role: ChipColorRole) -> Line<'static> {
@@ -651,13 +624,22 @@ pub(super) fn task_projects_dropdown(
     projects: &[Project],
     patch_sink: PatchSink,
 ) -> Dropdown<Choice, String> {
-    dropdown_multi(
-        "Projects",
-        "Select projects",
+    Dropdown::single(
         project_choices(projects),
-        &task.project_ids,
-        move |ids| patch_sink.borrow_mut().push(TaskPatch::Projects(ids)),
+        |row| row.id.clone(),
+        |row| row.label.clone(),
     )
+    .label("Project")
+    .placeholder("Select project")
+    .no_selection_text("None")
+    .selected(task.project_id.iter().cloned())
+    .search_mode(DropdownSearchMode::Contains)
+    .commit_mode(DropdownCommitMode::Explicit)
+    .on_select(move |ids| {
+        patch_sink
+            .borrow_mut()
+            .push(TaskPatch::Project(ids.into_iter().next()));
+    })
     .hotkey(keys::TASK_PROJECTS_FIELD.hotkey())
 }
 

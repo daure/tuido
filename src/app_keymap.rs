@@ -350,6 +350,7 @@ pub mod keys {
     pub const APP_PEOPLE_TAB: AppBinding = AppBinding::new_sequence("APP_PEOPLE_TAB", "pe");
     pub const TASK_QUICK_CREATE: AppBinding = AppBinding::new("TASK_QUICK_CREATE", "n");
     pub const TASK_VIEW_MENU: AppBinding = AppBinding::new("TASK_VIEW_MENU", "f");
+    pub const TASK_PROJECT_FILTER: AppBinding = AppBinding::new("TASK_PROJECT_FILTER", "r");
     pub const TASK_LABEL_FILTER: AppBinding = AppBinding::new("TASK_LABEL_FILTER", "a");
     pub const TASK_DELETE: AppBinding = AppBinding::new("TASK_DELETE", "delete");
     pub const TASK_DELETE_BACKSPACE: AppBinding = AppBinding::new("TASK_DELETE_X", "backspace");
@@ -388,19 +389,15 @@ pub mod keys {
     pub const TASK_STATE_FIELD: AppBinding = AppBinding::new_sequence("TASK_STATE_FIELD", "st");
     pub const TASK_SIZE_FIELD: AppBinding = AppBinding::new_sequence("TASK_SIZE_FIELD", "si");
     pub const TASK_PRIORITY_FIELD: AppBinding =
-        AppBinding::new_sequence("TASK_PRIORITY_FIELD", "pri");
+        AppBinding::new_sequence("TASK_PRIORITY_FIELD", "pr");
     pub const TASK_PEOPLE_FIELD: AppBinding = AppBinding::new_sequence("TASK_PEOPLE_FIELD", "pe");
     pub const TASK_PROJECTS_FIELD: AppBinding =
-        AppBinding::new_sequence("TASK_PROJECTS_FIELD", "pro");
-    pub const TASK_TAGS_FIELD: AppBinding = AppBinding::new_sequence("TASK_TAGS_FIELD", "gs");
+        AppBinding::new_sequence("TASK_PROJECTS_FIELD", "po");
+    pub const TASK_TAGS_FIELD: AppBinding = AppBinding::new_sequence("TASK_TAGS_FIELD", "ut");
     pub const TASK_CHECKLIST_FIELD: AppBinding =
-        AppBinding::new_sequence("TASK_CHECKLIST_FIELD", "ch");
-    pub const TASK_LINKS_FIELD: AppBinding = AppBinding::new_sequence("TASK_LINKS_FIELD", "ur");
+        AppBinding::new_sequence("TASK_CHECKLIST_FIELD", "uc");
+    pub const TASK_LINKS_FIELD: AppBinding = AppBinding::new_sequence("TASK_LINKS_FIELD", "ul");
     pub const TASK_LINK_DELETE: AppBinding = AppBinding::new("TASK_LINK_DELETE", "ctrl+x");
-    pub const TASK_START_DATE_FIELD: AppBinding =
-        AppBinding::new_sequence("TASK_START_DATE_FIELD", "sd");
-    pub const TASK_END_DATE_FIELD: AppBinding =
-        AppBinding::new_sequence("TASK_END_DATE_FIELD", "ed");
     pub const TASK_SNOOZED_UNTIL_FIELD: AppBinding =
         AppBinding::new_sequence("TASK_SNOOZED_UNTIL_FIELD", "su");
     pub const DETAIL_CLOSE: AppBinding = AppBinding::new("DETAIL_CLOSE", "esc");
@@ -489,6 +486,7 @@ pub mod keys {
         APP_PEOPLE_TAB,
         TASK_QUICK_CREATE,
         TASK_VIEW_MENU,
+        TASK_PROJECT_FILTER,
         TASK_LABEL_FILTER,
         TASK_DELETE,
         TASK_DELETE_BACKSPACE,
@@ -526,8 +524,6 @@ pub mod keys {
         TASK_CHECKLIST_FIELD,
         TASK_LINKS_FIELD,
         TASK_LINK_DELETE,
-        TASK_START_DATE_FIELD,
-        TASK_END_DATE_FIELD,
         TASK_SNOOZED_UNTIL_FIELD,
         DETAIL_CLOSE,
         DETAIL_CLOSE_ALT,
@@ -615,6 +611,7 @@ pub mod keys {
             bindings: &[
                 TASK_QUICK_CREATE,
                 TASK_VIEW_MENU,
+                TASK_PROJECT_FILTER,
                 TASK_LABEL_FILTER,
                 TASK_DELETE,
                 TASK_DELETE_BACKSPACE,
@@ -631,6 +628,7 @@ pub mod keys {
             name: "task detail",
             bindings: &[
                 TASK_COMPLETE,
+                TASK_PROJECT_FILTER,
                 TASK_LABEL_FILTER,
                 TASK_TITLE_FIELD,
                 TASK_DESCRIPTION_FIELD,
@@ -644,8 +642,6 @@ pub mod keys {
                 TASK_CHECKLIST_FIELD,
                 TASK_LINKS_FIELD,
                 TASK_LINK_DELETE,
-                TASK_START_DATE_FIELD,
-                TASK_END_DATE_FIELD,
                 TASK_SNOOZED_UNTIL_FIELD,
                 DETAIL_CLOSE,
                 DETAIL_CLOSE_ALT,
@@ -756,12 +752,12 @@ mod tests {
             ("TASK_DESCRIPTION_EDITOR", "do"),
             ("TASK_STATE_FIELD", "st"),
             ("TASK_SIZE_FIELD", "si"),
-            ("TASK_PRIORITY_FIELD", "pri"),
+            ("TASK_PRIORITY_FIELD", "pr"),
             ("TASK_PEOPLE_FIELD", "pe"),
-            ("TASK_PROJECTS_FIELD", "pro"),
-            ("TASK_TAGS_FIELD", "gs"),
-            ("TASK_CHECKLIST_FIELD", "ch"),
-            ("TASK_LINKS_FIELD", "ur"),
+            ("TASK_PROJECTS_FIELD", "po"),
+            ("TASK_TAGS_FIELD", "ut"),
+            ("TASK_CHECKLIST_FIELD", "uc"),
+            ("TASK_LINKS_FIELD", "ul"),
             ("TASK_SNOOZED_UNTIL_FIELD", "su"),
         ];
 
@@ -811,9 +807,9 @@ mod tests {
             .filter(|context| matches!(context.name, "task detail" | "tag management"))
         {
             assert!(context.bindings.iter().all(|binding| {
-                !binding_pattern(*binding, &keymap.bindings[binding.name])
+                binding_pattern(*binding, &keymap.bindings[binding.name])
                     .first()
-                    .is_some_and(|key| key == "l")
+                    .is_none_or(|key| key != "l")
             }));
         }
     }
@@ -822,6 +818,7 @@ mod tests {
     fn task_and_management_shortcuts_use_requested_defaults() {
         let keymap = AppKeymap::from_overrides(std::iter::empty::<(String, String)>()).unwrap();
         for (name, expected) in [
+            ("TASK_PROJECT_FILTER", "r"),
             ("TASK_LABEL_FILTER", "a"),
             ("TASK_SNOOZE", "ctrl+z"),
             ("TASK_COMPLETE", "ctrl+c"),
@@ -961,6 +958,21 @@ mod tests {
             assert!(error.to_string().contains(name));
             assert!(error.to_string().contains("runtime quit"));
         }
+    }
+
+    #[test]
+    fn task_detail_hotkeys_leave_data_view_go_prefix_unclaimed() {
+        let keymap = AppKeymap::from_overrides(std::iter::empty::<(String, String)>()).unwrap();
+        let task_detail = keys::CONTEXTS
+            .iter()
+            .find(|context| context.name == "task detail")
+            .unwrap();
+
+        assert!(task_detail.bindings.iter().all(|binding| {
+            binding_pattern(*binding, &keymap.bindings[binding.name])
+                .first()
+                .is_none_or(|key| key != "g")
+        }));
     }
 
     #[test]

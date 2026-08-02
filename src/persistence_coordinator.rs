@@ -84,6 +84,12 @@ struct Completion {
     command: PersistenceCommand,
     error: Option<String>,
     related_revisions: HashMap<String, u64>,
+    created_task: Option<Task>,
+}
+
+struct ExecutionResult {
+    related_revisions: HashMap<String, u64>,
+    created_task: Option<Task>,
 }
 
 struct RefreshCompletion {
@@ -371,9 +377,9 @@ impl PersistenceCoordinator {
         let tx = self.completion_tx.clone();
         self.runtime.spawn(async move {
             let result = execute(service, command.clone(), expected_revision).await;
-            let (error, related_revisions) = match result {
-                Ok(revisions) => (None, revisions),
-                Err(error) => (Some(error.to_string()), HashMap::new()),
+            let (error, related_revisions, created_task) = match result {
+                Ok(result) => (None, result.related_revisions, result.created_task),
+                Err(error) => (Some(error.to_string()), HashMap::new(), None),
             };
             let _ = tx.send(Completion {
                 key,
@@ -381,6 +387,7 @@ impl PersistenceCoordinator {
                 command,
                 error,
                 related_revisions,
+                created_task,
             });
         });
     }
@@ -391,12 +398,17 @@ impl PersistenceCoordinator {
         }
         self.active.remove(&completion.key);
         let committed_expected = self.active_expected.remove(&completion.sequence).flatten();
-        if completion.error.is_none()
-            && let Some((key, revision)) = revision_update(&completion.command, committed_expected)
-        {
-            self.store
-                .borrow_mut()
-                .dispatch(AppEvent::EntityRevisionCommitted { key, revision });
+        if completion.error.is_none() {
+            let revision = completion
+                .created_task
+                .as_ref()
+                .map(|task| (format!("task:{}", task.id), Some(1)))
+                .or_else(|| revision_update(&completion.command, committed_expected));
+            if let Some((key, revision)) = revision {
+                self.store
+                    .borrow_mut()
+                    .dispatch(AppEvent::EntityRevisionCommitted { key, revision });
+            }
         }
         if completion.error.is_none() {
             let cascade_revisions = cascade_revision_updates(
@@ -456,6 +468,22 @@ impl PersistenceCoordinator {
                         .dispatch(AppEvent::TaskDeleted(task.id))
                         .changed;
                     remove_queued_task_commands(self.queued.get_mut(&completion.key), &task_id);
+                } else if let Some(created_task) = completion.created_task {
+                    remap_queued_task_id(
+                        self.queued.get_mut(&completion.key),
+                        &task.id,
+                        &created_task.id,
+                    );
+                    changed |= self
+                        .store
+                        .borrow_mut()
+                        .dispatch(AppEvent::TaskDeleted(task.id))
+                        .changed;
+                    changed |= self
+                        .store
+                        .borrow_mut()
+                        .dispatch(AppEvent::TaskCreated(created_task))
+                        .changed;
                 }
             }
             PersistenceCommand::DeleteTask(task) => match completion.error {
@@ -668,16 +696,26 @@ async fn execute(
     service: TuidoService,
     command: PersistenceCommand,
     expected_revision: Option<u64>,
-) -> Result<HashMap<String, u64>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<ExecutionResult, Box<dyn std::error::Error + Send + Sync>> {
     let expected = || -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
         expected_revision.ok_or_else(|| "missing entity revision; refresh required".into())
     };
+    let mut created_task = None;
     let related_revisions = match command {
-        PersistenceCommand::CreateTask(task) => service
-            .create_task_entity(task)
-            .await
-            .map(|_| HashMap::new())
-            .map_err(boxed_service_error),
+        PersistenceCommand::CreateTask(task) => {
+            let created = service
+                .create_task_entity(task)
+                .await
+                .map_err(boxed_service_error)?;
+            created_task = service
+                .domain_snapshot()
+                .await
+                .map_err(boxed_service_error)?
+                .tasks
+                .into_iter()
+                .find(|task| task.id == created.value.id);
+            Ok(HashMap::new())
+        }
         PersistenceCommand::DeleteTask(task) => service
             .delete_task(&task.id, expected()?)
             .await
@@ -762,7 +800,10 @@ async fn execute(
             .map(|_| HashMap::new())
             .map_err(boxed_service_error),
     }?;
-    Ok(related_revisions)
+    Ok(ExecutionResult {
+        related_revisions,
+        created_task,
+    })
 }
 
 fn boxed_service_error(
@@ -942,6 +983,39 @@ fn preserve_failed_active_custom(
 fn remove_queued_task_commands(queue: Option<&mut VecDeque<PersistenceCommand>>, task_id: &str) {
     if let Some(queue) = queue {
         queue.retain(|command| command_task_id(command) != Some(task_id));
+    }
+}
+
+fn remap_queued_task_id(
+    queue: Option<&mut VecDeque<PersistenceCommand>>,
+    old_id: &str,
+    new_id: &str,
+) {
+    let Some(queue) = queue else { return };
+    for command in queue {
+        match command {
+            PersistenceCommand::DeleteTask(task) if task.id == old_id => {
+                task.id = new_id.to_string();
+            }
+            PersistenceCommand::PatchTask(id, _) if id == old_id => {
+                *id = new_id.to_string();
+            }
+            PersistenceCommand::ReorderTasks {
+                before,
+                after,
+                expected_revisions,
+            } => {
+                for rank in before.iter_mut().chain(after.iter_mut()) {
+                    if rank.id == old_id {
+                        rank.id = new_id.to_string();
+                    }
+                }
+                if let Some(revision) = expected_revisions.remove(old_id) {
+                    expected_revisions.insert(new_id.to_string(), revision);
+                }
+            }
+            _ => {}
+        }
     }
 }
 

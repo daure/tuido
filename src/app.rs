@@ -1,12 +1,20 @@
-use std::{cell::RefCell, error::Error, rc::Rc, time::Duration};
+use std::{
+    cell::{Cell, RefCell},
+    error::Error,
+    rc::Rc,
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
+};
 
 use crate::app_keymap::{self, keys};
-use crate::calendar::{CalendarWorkspace, SHOW_WEEKENDS_SETTING, parse_show_weekends_setting};
+use crate::calendar::{
+    CalendarCreateContext, CalendarWorkspace, SHOW_WEEKENDS_SETTING, parse_show_weekends_setting,
+};
 use crate::create_management_dialog::{CreateManagementDialog, ManagementEntityDraft};
 use crate::create_task_dialog::{CreateTaskDialog, CreateTaskDraft};
 use crate::domain::{
-    AppEvent, AppState, Person, Project, Tag, Task, TaskPatch, TaskPriority, TaskRank, TaskSize,
-    TaskState, reduce_app_state,
+    AppEvent, AppState, DEFAULT_PROJECT_SETTING, Person, Project, Tag, Task, TaskPatch,
+    TaskPriority, TaskRank, TaskSize, TaskState, reduce_app_state, task_identifier, task_number,
 };
 use crate::persistence_coordinator::{AppStore, PersistenceCommand, PersistenceCoordinator};
 use crate::service::TuidoService;
@@ -32,15 +40,15 @@ use time::{Date, PrimitiveDateTime, Time};
 use tuicore::{
     ActivationMode, AnimationSettings, AxisProposal, Button, CellContext, ChildKey, ChipColorRole,
     Column, ConfirmationDialog, ConfirmationDialogOutcome, CrossAlign, DataView,
-    DataViewTypedEvent, DatePickerDropdown, DateTimePickerDropdown, Dialog, DialogBackdrop,
-    DialogHost, DialogLayer, Dropdown, DropdownCommitMode, DropdownSearchMode, DropdownVariant,
-    EventCtx, EventOutcome, EventRoute, Flex, FlexItem, FocusCtx, FocusId, FocusRequest,
-    FocusTarget, HotkeyEvent, HotkeyLabelMode, LayoutCtx, LayoutProposal, LayoutResult,
-    LayoutSizeHint, LifecycleCtx, ListControl, ListControlEvent, ListControlField,
-    ListControlKeyBindings, MenuButton, MenuItem, Paragraph, Propagation, RenderCtx,
-    SeasonalEmptyState, SelectedTag, SelectionMode, SelectionTrigger, Split, StatusBar,
-    StatusBarMenuItem, Store, Tab, Tabs, TabsVariant, TagInput, TagInputEvent, TextareaInput,
-    TickResult, TreeApp, TreePath, TuiEvent, TuiNode, WeatherProviderConfig,
+    DataViewTypedEvent, DateTimePickerDropdown, Dialog, DialogBackdrop, DialogHost, DialogLayer,
+    Dropdown, DropdownCommitMode, DropdownSearchMode, DropdownVariant, EventCtx, EventOutcome,
+    EventRoute, Flex, FlexItem, FocusCtx, FocusId, FocusRequest, FocusTarget, HotkeyEvent,
+    HotkeyLabelMode, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx,
+    ListControl, ListControlEvent, ListControlField, ListControlKeyBindings, MenuButton, MenuItem,
+    Padding, Paragraph, Propagation, RenderCtx, SeasonalEmptyState, SelectedTag, SelectionMode,
+    SelectionTrigger, Split, Stack, StackAlign, StackItem, StatusBar, StatusBarMenuItem, Store,
+    Tab, Tabs, TabsVariant, TagInput, TagInputEvent, TextareaInput, TickResult, TreeApp, TreePath,
+    TuiEvent, TuiNode, WeatherProviderConfig,
 };
 use uuid::Uuid;
 
@@ -58,6 +66,8 @@ const PEOPLE_MENU_ID: &str = "people";
 const PROJECTS_MENU_ID: &str = "projects";
 const TAGS_MENU_ID: &str = "tags";
 const SETTINGS_MENU_ID: &str = "settings";
+const CALENDAR_TAB_INDEX: usize = 1;
+static NEXT_PENDING_TASK_ID: AtomicU64 = AtomicU64::new(1);
 const STATUS_BAR_MENU_ITEMS: [StatusBarMenuItem; 6] = [
     StatusBarMenuItem::Custom {
         id: SETTINGS_MENU_ID,
@@ -103,6 +113,7 @@ pub(crate) enum AppMsg {
     OpenSettings,
     SetShowCalendarWeekends(bool),
     SetDefaultSnoozeTime(Time),
+    SetDefaultProject(Option<String>),
     OpenManagementDialog(ManagementDialogKind),
     OpenCreateManagement(ManagementDialogKind),
     CreateManagementSubmitted(ManagementEntityDraft),
@@ -114,7 +125,9 @@ pub(crate) enum AppMsg {
         kind: ManagementDialogKind,
         entity_id: String,
     },
-    OpenCreateTask,
+    OpenCreateTask {
+        calendar_date: Option<Date>,
+    },
     CreateTaskSubmitted(CreateTaskDraft),
     OpenDeleteTask {
         task_id: String,
@@ -198,6 +211,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             .as_deref(),
     )
     .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?;
+    let default_project_id = runtime.block_on(service.default_project_id())?;
     let mut app_state = AppState::from_snapshot(workspace.snapshot);
     seed_app_setting(
         &mut app_state,
@@ -208,6 +222,11 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         &mut app_state,
         DEFAULT_SNOOZE_TIME_SETTING,
         format_default_snooze_time(default_snooze_time),
+    );
+    seed_app_setting(
+        &mut app_state,
+        DEFAULT_PROJECT_SETTING,
+        default_project_id.unwrap_or_default(),
     );
     app_state.refresh_error = startup_expiry_error;
     app_state.workspace_revision = workspace.revision;
@@ -234,6 +253,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         AppMsg::OpenSettings => app.open_settings_dialog(ctx),
         AppMsg::SetShowCalendarWeekends(show) => app.set_show_calendar_weekends(show),
         AppMsg::SetDefaultSnoozeTime(time) => app.set_default_snooze_time(time),
+        AppMsg::SetDefaultProject(project_id) => app.set_default_project(project_id),
         AppMsg::OpenManagementDialog(kind) => app.open_management_dialog(kind, ctx),
         AppMsg::OpenCreateManagement(kind) => app.open_create_management_dialog(kind, ctx),
         AppMsg::CreateManagementSubmitted(draft) => app.submit_create_management(draft, ctx),
@@ -243,7 +263,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         AppMsg::DeleteManagementConfirmed { kind, entity_id } => {
             app.delete_management(kind, &entity_id, ctx)
         }
-        AppMsg::OpenCreateTask => app.open_create_task_dialog(ctx),
+        AppMsg::OpenCreateTask { calendar_date } => app.open_create_task_dialog(calendar_date, ctx),
         AppMsg::CreateTaskSubmitted(draft) => app.submit_create_task(draft, ctx),
         AppMsg::OpenDeleteTask {
             task_id,
@@ -293,12 +313,85 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+struct TrackedTabs {
+    tabs: Tabs<AppMsg>,
+    selected: Rc<Cell<usize>>,
+}
+
+impl TrackedTabs {
+    fn new(tabs: Tabs<AppMsg>, selected: Rc<Cell<usize>>) -> Self {
+        selected.set(tabs.selected_index());
+        Self { tabs, selected }
+    }
+
+    fn sync_selected(&self) {
+        self.selected.set(self.tabs.selected_index());
+    }
+}
+
+impl TuiNode<AppMsg> for TrackedTabs {
+    fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
+        self.tabs.measure(proposal)
+    }
+
+    fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
+        self.tabs.layout(area, ctx)
+    }
+
+    fn render<'a>(&'a self, frame: &mut Frame, area: Rect, ctx: &mut RenderCtx<'a>) {
+        self.tabs.render(frame, area, ctx);
+    }
+
+    fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<AppMsg>) -> EventOutcome {
+        let outcome = self.tabs.event(event, ctx);
+        self.sync_selected();
+        outcome
+    }
+
+    fn dispatch_event(
+        &mut self,
+        route: &EventRoute,
+        event: &TuiEvent,
+        ctx: &mut EventCtx<AppMsg>,
+    ) -> EventOutcome {
+        let outcome = self.tabs.dispatch_event(route, event, ctx);
+        self.sync_selected();
+        outcome
+    }
+
+    fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<AppMsg>) {
+        self.tabs.dispatch_focus(target, focused, ctx);
+    }
+
+    fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
+        self.tabs.tick(dt, settings)
+    }
+
+    fn init(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
+        self.tabs.init(ctx);
+    }
+
+    fn mount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
+        self.tabs.mount(ctx);
+    }
+
+    fn unmount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
+        self.tabs.unmount(ctx);
+    }
+
+    fn destroy(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
+        self.tabs.destroy(ctx);
+    }
+}
+
 type PrimaryDialogLayer = DialogLayer<Flex<AppMsg>, AppDialog>;
 type AppDialogLayers = DialogLayer<PrimaryDialogLayer, AppDialog>;
 
 struct App {
     root: AppDialogLayers,
     context: AppContext,
+    calendar_create_context: CalendarCreateContext,
+    create_task_calendar_date: Option<Date>,
     snooze_return_focus: Option<TreePath>,
     delete_return_focus: Option<TreePath>,
     complete_return_focus: Option<CompleteReturnFocus>,
@@ -335,33 +428,95 @@ impl App {
         show_calendar_weekends: bool,
     ) -> Self {
         let context = AppContext { store, coordinator };
+        let active_tab = Rc::new(Cell::new(0));
+        let active_project_filter = Rc::new(RefCell::new(None));
+        let active_label_filter = Rc::new(RefCell::new(Vec::new()));
+        let calendar_create_context = CalendarCreateContext::new();
         let tabs = Tabs::new(vec![
-            Tab::new("Tasks", TaskWorkspace::new(context.clone())),
+            Tab::new(
+                "Tasks",
+                TaskWorkspace::new_with_filters(
+                    context.clone(),
+                    Rc::clone(&active_project_filter),
+                    Rc::clone(&active_label_filter),
+                ),
+            ),
             Tab::new(
                 "Calendar",
-                CalendarWorkspace::new(context.clone(), show_calendar_weekends),
+                CalendarWorkspace::new_with_create_context_and_filters(
+                    context.clone(),
+                    show_calendar_weekends,
+                    calendar_create_context.clone(),
+                    Rc::clone(&active_project_filter),
+                    Rc::clone(&active_label_filter),
+                ),
             ),
         ])
         .selected(0)
         .variant(TabsVariant::Underline)
         .bordered(true);
-
-        let root = Flex::column().child("tabs", tabs, FlexItem::fill(1)).child(
-            "footer",
-            StatusBar::new()
-                .menu_items(STATUS_BAR_MENU_ITEMS)
-                .weather_provider(weather_provider_config())
-                .on_custom_menu_item(|id| match id {
-                    SETTINGS_MENU_ID => AppMsg::OpenSettings,
-                    PEOPLE_MENU_ID => AppMsg::OpenManagementDialog(ManagementDialogKind::People),
-                    PROJECTS_MENU_ID => {
-                        AppMsg::OpenManagementDialog(ManagementDialogKind::Projects)
-                    }
-                    TAGS_MENU_ID => AppMsg::OpenManagementDialog(ManagementDialogKind::Tags),
-                    _ => AppMsg::OpenManagementDialog(ManagementDialogKind::People),
-                }),
-            FlexItem::fixed(1),
+        let task_filters = TaskFilterControls::new(
+            context.clone(),
+            active_project_filter,
+            active_label_filter,
+            Rc::clone(&active_tab),
         );
+        let actions = Flex::row()
+            .align(CrossAlign::Center)
+            .gap(1)
+            .child("filters", task_filters, FlexItem::content())
+            .child(
+                "new",
+                Button::new("New")
+                    .hotkey(keys::TASK_QUICK_CREATE.hotkey())
+                    .on_press({
+                        let active_tab = Rc::clone(&active_tab);
+                        let calendar_create_context = calendar_create_context.clone();
+                        move || AppMsg::OpenCreateTask {
+                            calendar_date: (active_tab.get() == CALENDAR_TAB_INDEX)
+                                .then(|| calendar_create_context.selected_date()),
+                        }
+                    }),
+                FlexItem::content(),
+            );
+        let content = Stack::new()
+            .child(
+                "tabs",
+                TrackedTabs::new(tabs, Rc::clone(&active_tab)),
+                StackItem::new(),
+            )
+            .child(
+                "actions",
+                actions,
+                StackItem::new()
+                    .fit_content()
+                    .align(StackAlign::End, StackAlign::Start)
+                    .inset(Padding {
+                        right: 1,
+                        ..Padding::default()
+                    }),
+            );
+
+        let root = Flex::column()
+            .child("content", content, FlexItem::fill(1))
+            .child(
+                "footer",
+                StatusBar::new()
+                    .menu_items(STATUS_BAR_MENU_ITEMS)
+                    .weather_provider(weather_provider_config())
+                    .on_custom_menu_item(|id| match id {
+                        SETTINGS_MENU_ID => AppMsg::OpenSettings,
+                        PEOPLE_MENU_ID => {
+                            AppMsg::OpenManagementDialog(ManagementDialogKind::People)
+                        }
+                        PROJECTS_MENU_ID => {
+                            AppMsg::OpenManagementDialog(ManagementDialogKind::Projects)
+                        }
+                        TAGS_MENU_ID => AppMsg::OpenManagementDialog(ManagementDialogKind::Tags),
+                        _ => AppMsg::OpenManagementDialog(ManagementDialogKind::People),
+                    }),
+                FlexItem::fixed(1),
+            );
 
         let primary = DialogLayer::new(root, empty_app_dialog())
             .active(false)
@@ -376,6 +531,8 @@ impl App {
                 .base_overlays_visible(true)
                 .backdrop(DialogBackdrop::dim().amount(0.5)),
             context,
+            calendar_create_context,
+            create_task_calendar_date: None,
             snooze_return_focus: None,
             delete_return_focus: None,
             complete_return_focus: None,
@@ -400,8 +557,20 @@ impl App {
             .get(DEFAULT_SNOOZE_TIME_SETTING)
             .and_then(|value| parse_default_snooze_time(Some(value)).ok())
             .unwrap_or(default_snooze_time());
+        let projects = state.state().projects.clone();
+        let default_project_id = state
+            .state()
+            .app_setting_values
+            .get(DEFAULT_PROJECT_SETTING)
+            .filter(|value| projects.iter().any(|project| project.id == **value))
+            .cloned();
         drop(state);
-        let settings = SettingsDialog::new(show_weekends, default_time);
+        let settings = SettingsDialog::new(
+            show_weekends,
+            default_time,
+            &projects,
+            default_project_id.as_deref(),
+        );
         let dialog = Dialog::new()
             .top_left("Settings")
             .actions([tuicore::DialogAction::new("Close")
@@ -425,6 +594,10 @@ impl App {
             DEFAULT_SNOOZE_TIME_SETTING,
             format_default_snooze_time(time),
         );
+    }
+
+    fn set_default_project(&mut self, project_id: Option<String>) {
+        self.persist_app_setting(DEFAULT_PROJECT_SETTING, project_id.unwrap_or_default());
     }
 
     fn persist_app_setting(&mut self, key: &str, value: String) {
@@ -497,7 +670,15 @@ impl App {
                 name,
                 description,
             } => {
-                if key.trim().is_empty() || name.trim().is_empty() {
+                if !Project::is_valid_key(&key) {
+                    notify_required(
+                        ctx,
+                        "Invalid project key",
+                        "Use 2-5 characters without spaces.",
+                    );
+                    return;
+                }
+                if name.trim().is_empty() {
                     notify_required(
                         ctx,
                         "Project key and name required",
@@ -658,7 +839,8 @@ impl App {
         self.close_management_overlay(ctx);
     }
 
-    fn open_create_task_dialog(&mut self, ctx: &mut EventCtx<AppMsg>) {
+    fn open_create_task_dialog(&mut self, calendar_date: Option<Date>, ctx: &mut EventCtx<AppMsg>) {
+        self.create_task_calendar_date = calendar_date;
         let primary = self.primary_dialog();
         primary.replace_layer(create_task_dialog_host(), ctx);
         primary.set_layer_percent(60);
@@ -678,11 +860,39 @@ impl App {
         }
 
         let mut task = Task::quick_capture(
-            Uuid::new_v4().to_string(),
+            format!(
+                "pending-{}",
+                NEXT_PENDING_TASK_ID.fetch_add(1, Ordering::Relaxed)
+            ),
             title,
             String::new(),
             TaskSize::Small,
         );
+        task.project_id = self
+            .context
+            .store
+            .borrow()
+            .state()
+            .app_setting_values
+            .get(DEFAULT_PROJECT_SETTING)
+            .filter(|value| !value.is_empty())
+            .cloned();
+        let calendar_date = self.create_task_calendar_date;
+        if let Some(date) = calendar_date {
+            let default_time = self
+                .context
+                .store
+                .borrow()
+                .state()
+                .app_setting_values
+                .get(DEFAULT_SNOOZE_TIME_SETTING)
+                .and_then(|value| parse_default_snooze_time(Some(value)).ok())
+                .unwrap_or(default_snooze_time());
+            task.state = TaskState::Snoozed;
+            task.snoozed_until = Some(date.with_time(default_time));
+            self.calendar_create_context
+                .select_created_task(task.id.clone());
+        }
         let task_title = task.title.clone();
         task.rank = self
             .context
@@ -703,11 +913,16 @@ impl App {
             .coordinator
             .borrow_mut()
             .submit(PersistenceCommand::CreateTask(task));
-        ctx.notify(tuicore::Notification::success(
-            "Task created",
-            format!("“{task_title}” was added to backlog."),
-        ));
+        let notification = if let Some(date) = calendar_date {
+            format!("“{task_title}” was scheduled for {date}.")
+        } else {
+            format!("“{task_title}” was added to backlog.")
+        };
+        ctx.notify(tuicore::Notification::success("Task created", notification));
         self.close_dialog(ctx);
+        if calendar_date.is_none() {
+            focus_task_table(ctx);
+        }
     }
 
     fn open_delete_task_dialog(
@@ -1161,6 +1376,18 @@ impl TuiNode<AppMsg> for App {
         event: &TuiEvent,
         ctx: &mut EventCtx<AppMsg>,
     ) -> EventOutcome {
+        if route
+            .path
+            .keys()
+            .last()
+            .is_some_and(|key| key.as_str() == "new")
+            && detail_escape(event)
+        {
+            ctx.focus(app_tabs_focus_request());
+            ctx.stop_propagation();
+            ctx.request_redraw();
+            return EventOutcome::Handled;
+        }
         self.root.dispatch_event(route, event, ctx)
     }
 
@@ -1211,7 +1438,8 @@ type TaskPane = ResponsiveSplit<TaskTable, TaskDetail>;
 type TaskWorkspaceLayout = Split<Flex<AppMsg>, TaskPane>;
 type TaskViewChange = Rc<RefCell<Option<TaskView>>>;
 type ActiveTaskView = Rc<RefCell<TaskView>>;
-type ActiveLabelFilter = Rc<RefCell<Vec<String>>>;
+pub(crate) type ActiveProjectFilter = Rc<RefCell<Option<String>>>;
+pub(crate) type ActiveLabelFilter = Rc<RefCell<Vec<String>>>;
 type VisibleTaskSelection = Rc<RefCell<Option<String>>>;
 
 pub(crate) fn task_ids_at_snooze_time(state: &AppState, time: PrimitiveDateTime) -> Vec<String> {
@@ -1291,6 +1519,7 @@ fn initial_task_table_focus_request() -> FocusRequest {
         path: TreePath::from_keys([
             ChildKey::first(),
             ChildKey::first(),
+            ChildKey::new("content"),
             ChildKey::new("tabs"),
             ChildKey::new("tab-0"),
             ChildKey::second(),
@@ -1300,6 +1529,33 @@ fn initial_task_table_focus_request() -> FocusRequest {
         id: FocusId::new("data-view"),
     }
 }
+
+fn app_tabs_focus_request() -> FocusRequest {
+    FocusRequest::TargetAt {
+        path: TreePath::from_keys([
+            ChildKey::first(),
+            ChildKey::first(),
+            ChildKey::new("content"),
+            ChildKey::new("tabs"),
+        ]),
+        id: FocusId::new("tabs"),
+    }
+}
+
+fn initial_calendar_focus_request() -> FocusRequest {
+    FocusRequest::TargetAt {
+        path: TreePath::from_keys([
+            ChildKey::first(),
+            ChildKey::first(),
+            ChildKey::new("content"),
+            ChildKey::new("tabs"),
+            ChildKey::new("tab-1"),
+            ChildKey::first(),
+        ]),
+        id: FocusId::new("calendar"),
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct AppContext {
     pub(crate) store: AppStore,
@@ -1472,12 +1728,195 @@ impl TuiNode<AppMsg> for TaskViewMenu {
     }
 }
 
+struct TaskFilterControls {
+    context: AppContext,
+    controls: Flex<AppMsg>,
+    active_project_filter: ActiveProjectFilter,
+    active_label_filter: ActiveLabelFilter,
+    active_tab: Rc<Cell<usize>>,
+    known_projects: Vec<(String, String)>,
+    known_tags: Vec<(String, String)>,
+}
+
+impl TaskFilterControls {
+    fn new(
+        context: AppContext,
+        active_project_filter: ActiveProjectFilter,
+        active_label_filter: ActiveLabelFilter,
+        active_tab: Rc<Cell<usize>>,
+    ) -> Self {
+        let state = context.store.borrow();
+        let projects = state.state().projects.clone();
+        let tags = state.state().tags.clone();
+        drop(state);
+        let controls = Flex::row()
+            .align(CrossAlign::Center)
+            .gap(1)
+            .child(
+                "project",
+                project_filter_dropdown(&projects, Rc::clone(&active_project_filter)),
+                FlexItem::content(),
+            )
+            .child(
+                "labels",
+                label_filter_dropdown(&tags, Rc::clone(&active_label_filter)),
+                FlexItem::content(),
+            );
+        Self {
+            context,
+            controls,
+            active_project_filter,
+            active_label_filter,
+            active_tab,
+            known_projects: projects
+                .iter()
+                .map(|project| (project.id.clone(), project.name.clone()))
+                .collect(),
+            known_tags: tags
+                .iter()
+                .map(|tag| (tag.id.clone(), tag.label.clone()))
+                .collect(),
+        }
+    }
+
+    fn sync_options(&mut self) {
+        let state = self.context.store.borrow();
+        let projects = state.state().projects.clone();
+        let tags = state.state().tags.clone();
+        drop(state);
+        let known_projects = projects
+            .iter()
+            .map(|project| (project.id.clone(), project.name.clone()))
+            .collect::<Vec<_>>();
+        let known_tags = tags
+            .iter()
+            .map(|tag| (tag.id.clone(), tag.label.clone()))
+            .collect::<Vec<_>>();
+        let mut ctx = EventCtx::default();
+
+        if known_projects != self.known_projects {
+            let project_ids = projects
+                .iter()
+                .map(|project| project.id.as_str())
+                .collect::<Vec<_>>();
+            if self
+                .active_project_filter
+                .borrow()
+                .as_deref()
+                .is_some_and(|id| !project_ids.contains(&id))
+            {
+                *self.active_project_filter.borrow_mut() = None;
+            }
+            self.controls
+                .replace(
+                    "project",
+                    project_filter_dropdown(&projects, Rc::clone(&self.active_project_filter)),
+                    FlexItem::content(),
+                    &mut ctx,
+                )
+                .expect("task filters should contain project filter");
+            self.known_projects = known_projects;
+        }
+        if known_tags != self.known_tags {
+            let tag_ids = tags.iter().map(|tag| tag.id.as_str()).collect::<Vec<_>>();
+            self.active_label_filter
+                .borrow_mut()
+                .retain(|id| tag_ids.contains(&id.as_str()));
+            self.controls
+                .replace(
+                    "labels",
+                    label_filter_dropdown(&tags, Rc::clone(&self.active_label_filter)),
+                    FlexItem::content(),
+                    &mut ctx,
+                )
+                .expect("task filters should contain label filter");
+            self.known_tags = known_tags;
+        }
+    }
+
+    fn finish_event(
+        &self,
+        outcome: EventOutcome,
+        event: &TuiEvent,
+        ctx: &mut EventCtx<AppMsg>,
+    ) -> EventOutcome {
+        if !detail_escape(event) {
+            return outcome;
+        }
+        let focus = if self.active_tab.get() == CALENDAR_TAB_INDEX {
+            initial_calendar_focus_request()
+        } else {
+            initial_task_table_focus_request()
+        };
+        ctx.focus(focus);
+        ctx.stop_propagation();
+        ctx.request_redraw();
+        EventOutcome::Handled
+    }
+}
+
+impl TuiNode<AppMsg> for TaskFilterControls {
+    fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
+        self.controls.measure(proposal)
+    }
+
+    fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
+        self.sync_options();
+        self.controls.layout(area, ctx)
+    }
+
+    fn render<'a>(&'a self, frame: &mut Frame, area: Rect, ctx: &mut RenderCtx<'a>) {
+        self.controls.render(frame, area, ctx);
+    }
+
+    fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<AppMsg>) -> EventOutcome {
+        let outcome = self.controls.event(event, ctx);
+        self.finish_event(outcome, event, ctx)
+    }
+
+    fn dispatch_event(
+        &mut self,
+        route: &EventRoute,
+        event: &TuiEvent,
+        ctx: &mut EventCtx<AppMsg>,
+    ) -> EventOutcome {
+        let outcome = self.controls.dispatch_event(route, event, ctx);
+        self.finish_event(outcome, event, ctx)
+    }
+
+    fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<AppMsg>) {
+        self.controls.dispatch_focus(target, focused, ctx);
+    }
+
+    fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
+        self.controls.tick(dt, settings)
+    }
+
+    fn init(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
+        self.controls.init(ctx);
+    }
+
+    fn mount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
+        self.controls.mount(ctx);
+    }
+
+    fn unmount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
+        self.controls.unmount(ctx);
+    }
+
+    fn destroy(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
+        self.controls.destroy(ctx);
+    }
+}
+
 struct TaskWorkspace {
     context: AppContext,
     layout: TaskWorkspaceLayout,
     task_view: TaskView,
     pending_task_view: TaskViewChange,
     active_task_view: ActiveTaskView,
+    project_filter: Option<String>,
+    active_project_filter: ActiveProjectFilter,
     label_filter: Vec<String>,
     active_label_filter: ActiveLabelFilter,
     known_task_ids: Vec<String>,
@@ -1497,11 +1936,30 @@ struct TaskDetailSync {
 }
 
 impl TaskWorkspace {
+    #[cfg(test)]
     fn new(context: AppContext) -> Self {
+        Self::new_with_filters(
+            context,
+            Rc::new(RefCell::new(None)),
+            Rc::new(RefCell::new(Vec::new())),
+        )
+    }
+
+    fn new_with_filters(
+        context: AppContext,
+        active_project_filter: ActiveProjectFilter,
+        active_label_filter: ActiveLabelFilter,
+    ) -> Self {
         let task_view = TaskView::Active;
         let state = context.store.borrow().state().clone();
-        let label_filter = Vec::new();
-        let rows = task_rows_for_view(&state.tasks, task_view, &label_filter);
+        let project_filter = active_project_filter.borrow().clone();
+        let label_filter = active_label_filter.borrow().clone();
+        let rows = task_rows_for_view(
+            &state.tasks,
+            task_view,
+            project_filter.as_deref(),
+            &label_filter,
+        );
         let selected_task_id = rows.first().map(|task| task.id.clone());
         let visible_task_ids = rows.iter().map(|task| task.id.clone()).collect();
         if let Some(task_id) = selected_task_id.as_ref()
@@ -1515,15 +1973,14 @@ impl TaskWorkspace {
 
         let pending_task_view = Rc::new(RefCell::new(None));
         let active_task_view = Rc::new(RefCell::new(task_view));
-        let active_label_filter = Rc::new(RefCell::new(label_filter.clone()));
         let visible_selection = Rc::new(RefCell::new(selected_task_id.clone()));
-        let toolbar = task_toolbar(
-            Rc::clone(&pending_task_view),
-            Rc::clone(&active_task_view),
-            &state.tags,
-            Rc::clone(&active_label_filter),
+        let toolbar = task_toolbar(Rc::clone(&pending_task_view), Rc::clone(&active_task_view));
+        let pane = task_split(
+            &context.store,
+            task_view,
+            project_filter.as_deref(),
+            &label_filter,
         );
-        let pane = task_split(&context.store, task_view, &label_filter);
         let layout =
             Split::vertical(toolbar, pane).constraints(Constraint::Length(1), Constraint::Min(1));
         let observed_version = context.store.borrow().state().version;
@@ -1534,6 +1991,8 @@ impl TaskWorkspace {
             task_view,
             pending_task_view,
             active_task_view,
+            project_filter,
+            active_project_filter,
             label_filter,
             active_label_filter,
             known_task_ids: state.tasks.iter().map(|task| task.id.clone()).collect(),
@@ -1623,8 +2082,13 @@ impl TaskWorkspace {
                     .position(|visible_id| visible_id == id)
             })
         });
-        self.sync_label_filter_tags(&state.tags);
-        let rows = task_rows_for_view(&state.tasks, self.task_view, &self.label_filter);
+        self.sync_filter_options(&state.projects, &state.tags);
+        let rows = task_rows_for_view(
+            &state.tasks,
+            self.task_view,
+            self.project_filter.as_deref(),
+            &self.label_filter,
+        );
         let empty_state = task_empty_state(&state.tasks, self.task_view);
         let contains_id = |id: &str| rows.iter().any(|task| task.id == id);
         let selected_task_id = if select_first {
@@ -1676,11 +2140,15 @@ impl TaskWorkspace {
         let detail_identity_changed = self.detail().task_id.as_deref()
             != selected_task_id.as_deref()
             || self.detail().task_state != selected_task.map(|task| task.state);
-        let detail_content_changed = self.detail().task_snapshot.as_ref() != selected_task
-            || self.detail().people_snapshot != state.people
+        let detail_options_changed = self.detail().people_snapshot != state.people
             || self.detail().projects_snapshot != state.projects
             || self.detail().tags_snapshot != state.tags;
-        if detail_identity_changed || (refresh_detail && detail_content_changed) {
+        let detail_content_changed =
+            self.detail().task_snapshot.as_ref() != selected_task || detail_options_changed;
+        if detail_identity_changed
+            || (!external_refresh && detail_options_changed)
+            || (refresh_detail && detail_content_changed)
+        {
             self.detail_mut().set_task(
                 selected_task,
                 &state.people,
@@ -1734,7 +2202,27 @@ impl TaskWorkspace {
         true
     }
 
-    fn sync_label_filter_tags(&mut self, tags: &[Tag]) {
+    fn sync_project_filter_change(&mut self) -> bool {
+        let next_filter = self.active_project_filter.borrow().clone();
+        if next_filter == self.project_filter {
+            return false;
+        }
+        self.table_mut().clear_search();
+        self.project_filter = next_filter;
+        let state = self.context.store.borrow().state().clone();
+        self.refresh_from_state(&state, true, false, false);
+        true
+    }
+
+    fn sync_filter_options(&mut self, projects: &[Project], tags: &[Tag]) {
+        if self
+            .project_filter
+            .as_ref()
+            .is_some_and(|id| !projects.iter().any(|project| project.id == *id))
+        {
+            self.project_filter = None;
+            *self.active_project_filter.borrow_mut() = None;
+        }
         let known_tags = tags
             .iter()
             .map(|tag| (tag.id.clone(), tag.label.clone()))
@@ -1747,15 +2235,6 @@ impl TaskWorkspace {
         self.active_label_filter
             .borrow_mut()
             .retain(|id| tag_ids.contains(id));
-        self.layout
-            .first_mut()
-            .replace(
-                "labels",
-                label_filter_dropdown(tags, Rc::clone(&self.active_label_filter)),
-                FlexItem::content(),
-                &mut EventCtx::default(),
-            )
-            .expect("task toolbar should contain label filter");
         self.known_tags = known_tags;
     }
 
@@ -1916,6 +2395,9 @@ impl TaskWorkspace {
         event: &TuiEvent,
         ctx: &mut EventCtx<AppMsg>,
     ) -> EventOutcome {
+        if ctx.propagation() == Propagation::Stopped && ctx.focus_request().is_some() {
+            return outcome;
+        }
         if detail_escape(event) {
             focus_task_table(ctx);
             return EventOutcome::Handled;
@@ -2068,22 +2550,28 @@ impl TaskWorkspace {
         if sequence != &keys::TASK_AGENT_YANK.hotkey() {
             return None;
         }
-        let task_title = self
+        let command = self
             .visible_selection
             .borrow()
             .as_ref()
             .and_then(|task_id| {
-                self.context
-                    .store
-                    .borrow()
-                    .state()
-                    .tasks
-                    .iter()
-                    .find(|task| task.id == *task_id)
-                    .map(|task| task.title.clone())
+                let store = self.context.store.borrow();
+                let state = store.state();
+                let task = state.tasks.iter().find(|task| task.id == *task_id)?;
+                let number = task_number(&task.id)?;
+                let project_key = task.project_id.as_deref().and_then(|project_id| {
+                    state
+                        .projects
+                        .iter()
+                        .find(|project| project.id == project_id)
+                        .map(|project| project.key.as_str())
+                });
+                let identifier = task_identifier(number, project_key);
+                let title = task.title.replace('\\', "\\\\").replace('"', "\\\"");
+                Some(format!("Tuido execute {identifier} \"{title}\""))
             });
-        if let Some(task_title) = task_title {
-            ctx.copy_to_clipboard(format!("Tuido execute \"{task_title}\""));
+        if let Some(command) = command {
+            ctx.copy_to_clipboard(command);
         }
         ctx.stop_propagation();
         Some(EventOutcome::Handled)
@@ -2093,6 +2581,8 @@ impl TaskWorkspace {
 impl TuiNode<AppMsg> for TaskWorkspace {
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
         self.sync_store_version();
+        self.sync_project_filter_change();
+        self.sync_label_filter_change();
         self.layout.layout(area, ctx)
     }
 
@@ -2107,13 +2597,18 @@ impl TuiNode<AppMsg> for TaskWorkspace {
         }
         let outcome = self.layout.event(event, ctx);
         let view_changed = self.sync_task_view_change();
+        let project_filter_changed = self.sync_project_filter_change();
         let label_filter_changed = self.sync_label_filter_change();
         let detail_sync = self.sync_detail_changes();
-        if view_changed || label_filter_changed || detail_sync.changed {
+        if view_changed || project_filter_changed || label_filter_changed || detail_sync.changed {
             ctx.request_layout();
             ctx.request_redraw();
         }
-        if view_changed || label_filter_changed || detail_sync.selected_task_changed {
+        if view_changed
+            || project_filter_changed
+            || label_filter_changed
+            || detail_sync.selected_task_changed
+        {
             ctx.focus(initial_task_table_focus_request());
         }
         self.sync_table_events(ctx);
@@ -2137,13 +2632,18 @@ impl TuiNode<AppMsg> for TaskWorkspace {
         }
         let outcome = self.layout.dispatch_event(route, event, ctx);
         let view_changed = self.sync_task_view_change();
+        let project_filter_changed = self.sync_project_filter_change();
         let label_filter_changed = self.sync_label_filter_change();
         let detail_sync = self.sync_detail_changes();
-        if view_changed || label_filter_changed || detail_sync.changed {
+        if view_changed || project_filter_changed || label_filter_changed || detail_sync.changed {
             ctx.request_layout();
             ctx.request_redraw();
         }
-        if view_changed || label_filter_changed || detail_sync.selected_task_changed {
+        if view_changed
+            || project_filter_changed
+            || label_filter_changed
+            || detail_sync.selected_task_changed
+        {
             ctx.focus(initial_task_table_focus_request());
         }
         self.sync_table_events(ctx);

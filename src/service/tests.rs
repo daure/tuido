@@ -24,11 +24,9 @@ fn task_create(title: &str) -> TaskCreate {
         size: "small".into(),
         state: "todo".into(),
         priority: "medium".into(),
-        start_date: None,
-        due_date: None,
         snoozed_until: None,
         people_ids: Vec::new(),
-        project_ids: Vec::new(),
+        project_id: None,
         tag_ids: Vec::new(),
         links: Vec::new(),
     }
@@ -42,6 +40,57 @@ fn omitted_task_state_defaults_to_backlog() {
     .unwrap();
 
     assert_eq!(input.state, "backlog");
+}
+
+#[test]
+fn task_ids_are_sequential_and_use_the_project_key_prefix() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let service = test_service().await;
+        for key in ["A", "ABCDEF", "A B", " AB", "AB "] {
+            assert!(matches!(
+                service
+                    .create_project(ProjectInput {
+                        key: key.into(),
+                        name: "Invalid".into(),
+                        description: String::new(),
+                        lead_person_id: None,
+                    })
+                    .await,
+                Err(ServiceError::Invalid(_))
+            ));
+        }
+        let project = service
+            .create_project(ProjectInput {
+                key: "core".into(),
+                name: "Core".into(),
+                description: String::new(),
+                lead_person_id: None,
+            })
+            .await
+            .unwrap();
+        let mut first = task_create("First");
+        first.project_id = Some(project.value.id);
+
+        let first = service.create_task(first).await.unwrap();
+        let second = service.create_task(task_create("Second")).await.unwrap();
+
+        assert_eq!(first.value.id, "CORE-1");
+        assert_eq!(second.value.id, "2");
+        let rows = sqlx::query("SELECT id FROM tasks ORDER BY id")
+            .fetch_all(&service.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.try_get::<i64, _>("id").unwrap())
+                .collect::<Vec<_>>(),
+            [1, 2]
+        );
+    });
 }
 
 #[test]
@@ -146,6 +195,82 @@ fn app_settings_are_persisted_and_replace_previous_values() {
 }
 
 #[test]
+fn default_project_is_applied_to_new_tasks_and_can_be_unset() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let service = test_service().await;
+        let project = service
+            .create_project(ProjectInput {
+                key: "DEF".into(),
+                name: "Default".into(),
+                description: String::new(),
+                lead_person_id: None,
+            })
+            .await
+            .unwrap();
+
+        service
+            .set_app_setting(crate::domain::DEFAULT_PROJECT_SETTING, &project.value.id)
+            .await
+            .unwrap();
+        let defaulted = service.create_task(task_create("Defaulted")).await.unwrap();
+        assert_eq!(defaulted.value.project_id, Some(project.value.id.clone()));
+
+        service
+            .set_app_setting(crate::domain::DEFAULT_PROJECT_SETTING, "")
+            .await
+            .unwrap();
+        let unset = service.create_task(task_create("Unset")).await.unwrap();
+        assert_eq!(unset.value.project_id, None);
+    });
+}
+
+#[test]
+fn task_project_relation_rejects_a_second_project() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let service = test_service().await;
+        let first = service
+            .create_project(ProjectInput {
+                key: "ONE".into(),
+                name: "One".into(),
+                description: String::new(),
+                lead_person_id: None,
+            })
+            .await
+            .unwrap();
+        let second = service
+            .create_project(ProjectInput {
+                key: "TWO".into(),
+                name: "Two".into(),
+                description: String::new(),
+                lead_person_id: None,
+            })
+            .await
+            .unwrap();
+        let mut input = task_create("Single project");
+        input.project_id = Some(first.value.id);
+        let task = service.create_task(input).await.unwrap();
+
+        let duplicate = sqlx::query(
+            "INSERT INTO task_projects (task_id, project_id, sort_order) VALUES (?, ?, 1)",
+        )
+        .bind(task.value.id)
+        .bind(second.value.id)
+        .execute(&service.pool)
+        .await;
+
+        assert!(duplicate.is_err());
+    });
+}
+
+#[test]
 fn explicit_expiry_processing_unsnoozes_due_tasks() {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -159,11 +284,9 @@ fn explicit_expiry_processing_unsnoozes_due_tasks() {
             size: "small".into(),
             state: "snoozed".into(),
             priority: "medium".into(),
-            start_date: None,
-            due_date: None,
             snoozed_until: Some(snoozed_until.into()),
             people_ids: Vec::new(),
-            project_ids: Vec::new(),
+            project_id: None,
             tag_ids: Vec::new(),
             links: Vec::new(),
         };
@@ -229,11 +352,9 @@ fn backlog_tasks_round_trip_through_persistence() {
                 size: "small".into(),
                 state: "backlog".into(),
                 priority: "medium".into(),
-                start_date: None,
-                due_date: None,
                 snoozed_until: None,
                 people_ids: Vec::new(),
-                project_ids: Vec::new(),
+                project_id: None,
                 tag_ids: Vec::new(),
                 links: Vec::new(),
             })
@@ -267,11 +388,9 @@ fn task_tags_by_label_reuse_create_replace_clear_and_rollback_atomically() {
                 size: "small".into(),
                 state: "todo".into(),
                 priority: "medium".into(),
-                start_date: None,
-                due_date: None,
                 snoozed_until: None,
                 people_ids: Vec::new(),
-                project_ids: Vec::new(),
+                project_id: None,
                 tag_ids: Vec::new(),
                 links: Vec::new(),
             })
@@ -369,7 +488,7 @@ fn filtered_workspace_filters_tasks_and_returns_complete_entity_catalogs() {
             .unwrap();
         let project = service
             .create_project(ProjectInput {
-                key: "LAUNCH".into(),
+                key: "LNCH".into(),
                 name: "Launch".into(),
                 description: String::new(),
                 lead_person_id: Some(person.value.id.clone()),
@@ -402,11 +521,9 @@ fn filtered_workspace_filters_tasks_and_returns_complete_entity_catalogs() {
                 size: "small".into(),
                 state: "todo".into(),
                 priority: "high".into(),
-                start_date: None,
-                due_date: Some("2026-07-30".into()),
                 snoozed_until: None,
                 people_ids: Vec::new(),
-                project_ids: vec![project.value.id.clone()],
+                project_id: Some(project.value.id.clone()),
                 tag_ids: vec![tag.value.id.clone()],
                 links: Vec::new(),
             })
@@ -419,11 +536,9 @@ fn filtered_workspace_filters_tasks_and_returns_complete_entity_catalogs() {
                 size: "medium".into(),
                 state: "done".into(),
                 priority: "medium".into(),
-                start_date: None,
-                due_date: None,
                 snoozed_until: None,
                 people_ids: Vec::new(),
-                project_ids: Vec::new(),
+                project_id: None,
                 tag_ids: Vec::new(),
                 links: Vec::new(),
             })
@@ -437,8 +552,6 @@ fn filtered_workspace_filters_tasks_and_returns_complete_entity_catalogs() {
                 sizes: vec!["small".into()],
                 project_ids: vec![project.value.id.clone()],
                 tag_ids: vec![tag.value.id.clone()],
-                due_before: Some("2026-08-01".into()),
-                due_after: Some("2026-07-01".into()),
                 query: Some("selection".into()),
                 ..WorkspaceFilter::default()
             })
@@ -511,11 +624,9 @@ fn public_task_inputs_reject_legacy_state_aliases() {
                     size: "small".into(),
                     state: alias.into(),
                     priority: "medium".into(),
-                    start_date: None,
-                    due_date: None,
                     snoozed_until: None,
                     people_ids: Vec::new(),
-                    project_ids: Vec::new(),
+                    project_id: None,
                     tag_ids: Vec::new(),
                     links: Vec::new(),
                 })
@@ -538,11 +649,9 @@ fn public_task_inputs_reject_legacy_state_aliases() {
                 size: "small".into(),
                 state: "todo".into(),
                 priority: "medium".into(),
-                start_date: None,
-                due_date: None,
                 snoozed_until: None,
                 people_ids: Vec::new(),
-                project_ids: Vec::new(),
+                project_id: None,
                 tag_ids: Vec::new(),
                 links: Vec::new(),
             })
@@ -556,11 +665,9 @@ fn public_task_inputs_reject_legacy_state_aliases() {
                 state: "doing".into(),
                 size: "small".into(),
                 priority: "medium".into(),
-                start_date: None,
-                due_date: None,
                 snoozed_until: None,
                 people_ids: Vec::new(),
-                project_ids: Vec::new(),
+                project_id: None,
                 tag_ids: Vec::new(),
                 links: Vec::new(),
                 description: String::new(),
@@ -586,7 +693,7 @@ fn stale_task_write_returns_typed_conflict_and_preserves_winner() {
         sqlx::migrate!().run(&pool).await.unwrap();
         let service = TuidoService::from_parts(pool, SqlDialect::Sqlite);
         let task = Task::quick_capture(
-            "task".into(),
+            "1".into(),
             "Original".into(),
             String::new(),
             TaskSize::Small,
@@ -594,11 +701,11 @@ fn stale_task_write_returns_typed_conflict_and_preserves_winner() {
         service.create_task_entity(task).await.unwrap();
 
         service
-            .patch_task("task".into(), 1, TaskPatch::State(TaskState::Done))
+            .patch_task("1".into(), 1, TaskPatch::State(TaskState::Done))
             .await
             .unwrap();
         let error = service
-            .patch_task("task".into(), 1, TaskPatch::State(TaskState::Rejected))
+            .patch_task("1".into(), 1, TaskPatch::State(TaskState::Rejected))
             .await
             .unwrap_err();
 
@@ -610,7 +717,7 @@ fn stale_task_write_returns_typed_conflict_and_preserves_winner() {
                 ..
             }
         ));
-        assert_eq!(service.get_task("task").await.unwrap().value.state, "done");
+        assert_eq!(service.get_task("1").await.unwrap().value.state, "done");
         assert_eq!(service.workspace_revision().await.unwrap(), 3);
     });
 }
@@ -636,7 +743,7 @@ fn failed_relation_replacement_rolls_back_entity_and_workspace_revisions() {
         let service = TuidoService::from_parts(pool, SqlDialect::Sqlite);
         service
             .create_task_entity(Task::quick_capture(
-                "task".into(),
+                "1".into(),
                 "Task".into(),
                 String::new(),
                 TaskSize::Small,
@@ -646,12 +753,12 @@ fn failed_relation_replacement_rolls_back_entity_and_workspace_revisions() {
 
         assert!(
             service
-                .patch_task("task".into(), 1, TaskPatch::People(vec!["missing".into()]))
+                .patch_task("1".into(), 1, TaskPatch::People(vec!["missing".into()]))
                 .await
                 .is_err()
         );
 
-        assert_eq!(service.get_task("task").await.unwrap().revision, 1);
+        assert_eq!(service.get_task("1").await.unwrap().revision, 1);
         assert_eq!(service.workspace_revision().await.unwrap(), 2);
     });
 }
@@ -666,7 +773,7 @@ fn malformed_task_snooze_update_is_rejected_without_poisoning_workspace() {
         let service = test_service().await;
         service
             .create_task_entity(Task::quick_capture(
-                "task".into(),
+                "1".into(),
                 "Original".into(),
                 String::new(),
                 TaskSize::Small,
@@ -676,17 +783,15 @@ fn malformed_task_snooze_update_is_rejected_without_poisoning_workspace() {
 
         let error = service
             .update_task(TaskUpdate {
-                id: "task".into(),
+                id: "1".into(),
                 expected_revision: 1,
                 title: "Changed".into(),
                 state: "todo".into(),
                 size: "small".into(),
                 priority: "medium".into(),
-                start_date: None,
-                due_date: None,
                 snoozed_until: Some("not-a-date".into()),
                 people_ids: Vec::new(),
-                project_ids: Vec::new(),
+                project_id: None,
                 tag_ids: Vec::new(),
                 links: Vec::new(),
                 description: String::new(),
@@ -695,7 +800,7 @@ fn malformed_task_snooze_update_is_rejected_without_poisoning_workspace() {
             .unwrap_err();
 
         assert!(matches!(error, ServiceError::Invalid(_)));
-        let task = service.get_task("task").await.unwrap();
+        let task = service.get_task("1").await.unwrap();
         assert_eq!(task.revision, 1);
         assert_eq!(task.value.title, "Original");
         assert!(service.workspace().await.is_ok());
@@ -703,25 +808,13 @@ fn malformed_task_snooze_update_is_rejected_without_poisoning_workspace() {
 }
 
 #[test]
-fn task_temporal_fields_and_snooze_invariants_are_enforced() {
+fn task_snooze_invariants_are_enforced() {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
     runtime.block_on(async {
         let service = test_service().await;
-        let mut invalid_date = Task::quick_capture(
-            "invalid-date".into(),
-            "Invalid date".into(),
-            String::new(),
-            TaskSize::Small,
-        );
-        invalid_date.start_date = Some("2026-02-30".into());
-        assert!(matches!(
-            service.create_task_entity(invalid_date).await,
-            Err(ServiceError::Invalid(_))
-        ));
-
         let mut missing_until = Task::quick_capture(
             "missing-until".into(),
             "Missing until".into(),
@@ -757,25 +850,25 @@ fn state_patch_clears_snooze_timestamp_and_snoozed_state_requires_snooze_action(
     runtime.block_on(async {
         let service = test_service().await;
         let mut task =
-            Task::quick_capture("task".into(), "Task".into(), String::new(), TaskSize::Small);
+            Task::quick_capture("1".into(), "Task".into(), String::new(), TaskSize::Small);
         task.state = TaskState::Snoozed;
         task.snoozed_until = Some(time::macros::datetime!(2026-07-25 08:00));
         service.create_task_entity(task).await.unwrap();
 
         service
-            .patch_task("task".into(), 1, TaskPatch::State(TaskState::Done))
+            .patch_task("1".into(), 1, TaskPatch::State(TaskState::Done))
             .await
             .unwrap();
-        let completed = service.get_task("task").await.unwrap();
+        let completed = service.get_task("1").await.unwrap();
         assert_eq!(completed.value.state, "done");
         assert_eq!(completed.value.snoozed_until, None);
 
         let error = service
-            .patch_task("task".into(), 2, TaskPatch::State(TaskState::Snoozed))
+            .patch_task("1".into(), 2, TaskPatch::State(TaskState::Snoozed))
             .await
             .unwrap_err();
         assert!(matches!(error, ServiceError::Invalid(_)));
-        assert_eq!(service.get_task("task").await.unwrap().revision, 2);
+        assert_eq!(service.get_task("1").await.unwrap().revision, 2);
     });
 }
 
@@ -801,15 +894,19 @@ fn cascade_deletes_increment_every_affected_revision() {
             .create_tag_entity(Tag::new("tag".into(), "api".into()))
             .await
             .unwrap();
-        let mut task =
-            Task::quick_capture("task".into(), "Task".into(), String::new(), TaskSize::Small);
+        let mut task = Task::quick_capture(
+            "CORE-1".into(),
+            "Task".into(),
+            String::new(),
+            TaskSize::Small,
+        );
         task.people_ids = vec!["person".into()];
-        task.project_ids = vec!["project".into()];
+        task.project_id = Some("project".into());
         task.tag_ids = vec!["tag".into()];
         service.create_task_entity(task).await.unwrap();
 
         service.delete_person("person", 1).await.unwrap();
-        assert_eq!(service.get_task("task").await.unwrap().revision, 2);
+        assert_eq!(service.get_task("CORE-1").await.unwrap().revision, 2);
         let project = service
             .workspace()
             .await
@@ -831,12 +928,12 @@ fn cascade_deletes_increment_every_affected_revision() {
         ));
 
         service.delete_project("project", 2).await.unwrap();
-        assert_eq!(service.get_task("task").await.unwrap().revision, 3);
+        assert_eq!(service.get_task("CORE-1").await.unwrap().revision, 3);
         service.delete_tag("tag", 1).await.unwrap();
-        assert_eq!(service.get_task("task").await.unwrap().revision, 4);
+        assert_eq!(service.get_task("CORE-1").await.unwrap().revision, 4);
         assert!(matches!(
             service
-                .patch_task("task".into(), 1, TaskPatch::Title("Stale".into()))
+                .patch_task("CORE-1".into(), 1, TaskPatch::Title("Stale".into()))
                 .await,
             Err(ServiceError::Conflict {
                 actual: Some(4),
@@ -878,18 +975,55 @@ fn empty_management_updates_are_rejected() {
                 .await,
             Err(ServiceError::Invalid(_))
         ));
-        assert!(matches!(
-            service
-                .patch_project("project".into(), 1, ProjectPatch::Key(String::new()))
-                .await,
-            Err(ServiceError::Invalid(_))
-        ));
+        for key in ["A", "ABCDEF", "A B", " AB", "AB "] {
+            assert!(matches!(
+                service
+                    .patch_project("project".into(), 1, ProjectPatch::Key(key.into()))
+                    .await,
+                Err(ServiceError::Invalid(_))
+            ));
+        }
         assert!(matches!(
             service
                 .patch_tag("tag".into(), 1, TagPatch::Label("\t".into()))
                 .await,
             Err(ServiceError::Invalid(_))
         ));
+    });
+}
+
+#[test]
+fn project_key_can_be_edited_when_valid() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let service = test_service().await;
+        let project = service
+            .create_project(ProjectInput {
+                key: "CORE".into(),
+                name: "Core".into(),
+                description: String::new(),
+                lead_person_id: None,
+            })
+            .await
+            .unwrap();
+
+        service
+            .patch_project(project.value.id.clone(), 1, ProjectPatch::Key("api".into()))
+            .await
+            .unwrap();
+
+        let project = service
+            .workspace()
+            .await
+            .unwrap()
+            .projects
+            .into_iter()
+            .find(|candidate| candidate.value.id == project.value.id)
+            .unwrap();
+        assert_eq!(project.value.key, "API");
     });
 }
 
@@ -917,7 +1051,7 @@ fn concurrent_workspace_reads_return_matching_values_and_revisions() {
         let service = TuidoService::from_parts(pool.clone(), SqlDialect::Sqlite);
         service
             .create_task_entity(Task::quick_capture(
-                "task".into(),
+                "1".into(),
                 "v0".into(),
                 String::new(),
                 TaskSize::Small,
@@ -930,7 +1064,7 @@ fn concurrent_workspace_reads_return_matching_values_and_revisions() {
                 for revision in 1..=20 {
                     service
                         .patch_task(
-                            "task".into(),
+                            "1".into(),
                             revision,
                             TaskPatch::Title(format!("v{revision}")),
                         )

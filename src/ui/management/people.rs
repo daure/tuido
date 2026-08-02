@@ -12,7 +12,9 @@ use tuicore::{
 };
 
 use super::ManagementDialogKind;
-use super::common::{ManagementPane, active_choices, dropdown_single, management_empty_state};
+use super::common::{
+    ManagementPane, RequiredTextInput, active_choices, dropdown_single, management_empty_state,
+};
 use crate::{
     app::{AppContext, AppMsg},
     app_keymap::{self, keys},
@@ -472,18 +474,22 @@ fn person_detail_form(
         .child("save-status", status, FlexItem::content())
         .child(
             "name",
-            TextInput::new()
-                .value(person.name.clone())
-                .placeholder("Person name")
-                .panel("Name")
-                .hotkey(keys::PERSON_NAME_FIELD.hotkey())
-                .on_edit_end({
+            RequiredTextInput::new(
+                TextInput::new()
+                    .value(person.name.clone())
+                    .placeholder("Person name")
+                    .panel("Name")
+                    .hotkey(keys::PERSON_NAME_FIELD.hotkey()),
+                "Invalid person name",
+                {
                     let patches = Rc::clone(&patches);
                     move |value| {
-                        patches.borrow_mut().push(PersonPatch::Name(value));
-                        AppMsg::Noop
+                        patches
+                            .borrow_mut()
+                            .push(PersonPatch::Name(value.to_string()));
                     }
-                }),
+                },
+            ),
             FlexItem::fixed(3),
         )
         .child(

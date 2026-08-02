@@ -30,6 +30,11 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend, layout::Rect};
     use tuicore::{LayoutCtx, RenderCtx, TuiNode};
 
+    type ManagementNode = Box<dyn TuiNode<AppMsg>>;
+    type ExpectedLabels = &'static [&'static str];
+    type ManagementCase = (ManagementNode, ExpectedLabels);
+    type EmptyManagementCase = (ManagementNode, &'static str, ExpectedLabels);
+
     #[test]
     fn narrow_management_workspaces_render_table_detail_and_controls() {
         let person = Person::new("person-1".into(), "Ada".into(), "ada@example.com".into());
@@ -46,7 +51,7 @@ mod tests {
             projects: vec![project],
             tags: vec![Tag::new("tag-1".into(), "api".into())],
         });
-        let cases: Vec<(Box<dyn TuiNode<AppMsg>>, &[&str])> = vec![
+        let cases: Vec<ManagementCase> = vec![
             (
                 Box::new(people::dialog(context.clone())),
                 &["Ada", "Email", "Active", "New"],
@@ -87,7 +92,7 @@ mod tests {
             projects: vec![],
             tags: vec![],
         });
-        let cases: Vec<(Box<dyn TuiNode<AppMsg>>, &str, &[&str])> = vec![
+        let cases: Vec<EmptyManagementCase> = vec![
             (
                 Box::new(people::dialog(context.clone())),
                 "No people yet",

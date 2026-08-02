@@ -12,6 +12,8 @@ use uuid::Uuid;
 use super::{AppMsg, PatchSink};
 use crate::{app_keymap::keys, domain::Task, domain::TaskPatch, task_link};
 
+type OpenLink = Rc<dyn Fn(&str) -> Result<(), String>>;
+
 #[derive(Clone)]
 struct TaskLinkRow {
     id: String,
@@ -22,7 +24,7 @@ pub(super) struct TaskLinksInput {
     input: ListControl<TaskLinkRow, String, AppMsg>,
     committed: Vec<TaskLinkRow>,
     patch_sink: PatchSink,
-    open_link: Rc<dyn Fn(&str) -> Result<(), String>>,
+    open_link: OpenLink,
 }
 
 impl TaskLinksInput {

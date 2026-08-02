@@ -3,9 +3,9 @@ use std::time::Duration;
 use ratatui::{Frame, layout::Rect};
 use tuicore::{
     AnimationSettings, Button, ChildKey, Dropdown, DropdownCommitMode, DropdownSearchMode,
-    EventCtx, EventOutcome, EventRoute, FocusCtx, FocusRequest, FocusTarget, LayoutCtx,
-    LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, RenderCtx, SeasonalEmptyState,
-    TickResult, TreePath, TuiEvent, TuiNode,
+    EventCtx, EventOutcome, EventRoute, FocusCtx, FocusRequest, FocusTarget, Key, KeyEvent,
+    KeyModifiers, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, RenderCtx,
+    SeasonalEmptyState, TextInput, TickResult, TreePath, TuiEvent, TuiNode,
 };
 
 use crate::{
@@ -16,6 +16,97 @@ use crate::{
 };
 
 const CREATE_BUTTON: &str = "new";
+
+type RequiredTextCommit = Box<dyn Fn(&str)>;
+
+pub(super) struct RequiredTextInput {
+    input: TextInput<AppMsg>,
+    committed_value: String,
+    invalid_title: &'static str,
+    on_commit: RequiredTextCommit,
+}
+
+impl RequiredTextInput {
+    pub(super) fn new(
+        input: TextInput<AppMsg>,
+        invalid_title: &'static str,
+        on_commit: impl Fn(&str) + 'static,
+    ) -> Self {
+        let committed_value = input.current_value().to_string();
+        Self {
+            input,
+            committed_value,
+            invalid_title,
+            on_commit: Box::new(on_commit),
+        }
+    }
+}
+
+impl TuiNode<AppMsg> for RequiredTextInput {
+    fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
+        self.input.measure(proposal)
+    }
+
+    fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
+        self.input.layout(area, ctx)
+    }
+
+    fn render<'a>(&'a self, frame: &mut Frame, area: Rect, ctx: &mut RenderCtx<'a>) {
+        <TextInput<AppMsg> as TuiNode<AppMsg>>::render(&self.input, frame, area, ctx);
+    }
+
+    fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<AppMsg>) -> EventOutcome {
+        let commit = self.input.insert_mode()
+            && matches!(
+                event,
+                TuiEvent::Key(KeyEvent {
+                    code: Key::Enter,
+                    modifiers: KeyModifiers::NONE,
+                })
+            );
+        let outcome = self.input.event(event, ctx);
+        if commit {
+            let value = self.input.current_value().trim().to_string();
+            if value.is_empty() {
+                self.input.set_value(self.committed_value.clone());
+                ctx.notify(tuicore::Notification::warning(
+                    self.invalid_title,
+                    "Name cannot be empty.",
+                ));
+                ctx.request_redraw();
+            } else {
+                self.committed_value.clone_from(&value);
+                self.input.set_value(value);
+                (self.on_commit)(&self.committed_value);
+            }
+        }
+        outcome
+    }
+
+    fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<AppMsg>) {
+        self.input.dispatch_focus(target, focused, ctx);
+    }
+
+    fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
+        self.input.tick(dt, settings)
+    }
+
+    fn init(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
+        self.input.init(ctx);
+    }
+
+    fn mount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
+        self.input.mount(ctx);
+    }
+
+    fn unmount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
+        self.input.unmount(ctx);
+    }
+
+    fn destroy(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
+        self.input.destroy(ctx);
+    }
+}
 
 pub(super) fn management_empty_state(
     kind: ManagementDialogKind,
@@ -269,4 +360,48 @@ pub(super) fn person_choices(people: &[Person]) -> Vec<Choice> {
             label: person.name.clone(),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{cell::RefCell, rc::Rc};
+
+    use super::*;
+
+    #[test]
+    fn required_text_commit_restores_original_and_notifies_when_empty() {
+        let commits = Rc::new(RefCell::new(Vec::new()));
+        let mut input = RequiredTextInput::new(
+            TextInput::new().value("Ada").focused(true),
+            "Invalid person name",
+            {
+                let commits = Rc::clone(&commits);
+                move |value| commits.borrow_mut().push(value.to_string())
+            },
+        );
+        input.event(
+            &TuiEvent::Key(KeyEvent::from(Key::Enter)),
+            &mut EventCtx::default(),
+        );
+        for _ in 0..3 {
+            input.event(
+                &TuiEvent::Key(KeyEvent::from(Key::Backspace)),
+                &mut EventCtx::default(),
+            );
+        }
+        let mut ctx = EventCtx::default();
+
+        let outcome = input.event(&TuiEvent::Key(KeyEvent::from(Key::Enter)), &mut ctx);
+        let effects = tuicore::DispatchEffects::from_event_ctx(outcome, ctx);
+
+        assert_eq!(input.input.current_value(), "Ada");
+        assert!(commits.borrow().is_empty());
+        assert_eq!(
+            effects.notifications,
+            vec![tuicore::Notification::warning(
+                "Invalid person name",
+                "Name cannot be empty.",
+            )]
+        );
+    }
 }

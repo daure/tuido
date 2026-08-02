@@ -1,16 +1,17 @@
-use std::time::Duration as StdDuration;
+use std::{cell::RefCell, rc::Rc, time::Duration as StdDuration};
 
-use ratatui::{Frame, layout::Rect};
+use ratatui::{Frame, layout::Rect, widgets::Clear};
 use time::{Date, Duration, OffsetDateTime, PrimitiveDateTime};
 use tuicore::{
     AnimationSettings, Calendar, CalendarEntryRole, CalendarKeyBindings, CalendarSpan,
     CalendarTypedEvent, CalendarView, ChildKey, EventCtx, EventOutcome, EventRoute, FocusCtx,
     FocusId, FocusRequest, FocusTarget, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint,
-    LifecycleCtx, RenderCtx, TickResult, TuiEvent, TuiNode,
+    LifecycleCtx, RenderCtx, SeasonalEmptyState, TickResult, TuiEvent, TuiNode,
 };
 
 use crate::app::{
-    AppContext, AppMsg, persist_task_order, task_detail::detail_escape, task_ids_at_snooze_time,
+    ActiveLabelFilter, ActiveProjectFilter, AppContext, AppMsg, persist_task_order,
+    task_detail::detail_escape, task_ids_at_snooze_time,
 };
 use crate::app_keymap::keys;
 use crate::domain::{Task, TaskState};
@@ -21,6 +22,37 @@ use crate::ui::task_detail::TaskDetailForm;
 
 const SNOOZE_ICON: char = '󰒲';
 pub(crate) const SHOW_WEEKENDS_SETTING: &str = "calendar.show_weekends";
+
+#[derive(Clone)]
+pub(crate) struct CalendarCreateContext {
+    selected_date: Rc<RefCell<Date>>,
+    pending_task_id: Rc<RefCell<Option<String>>>,
+}
+
+impl CalendarCreateContext {
+    pub(crate) fn new() -> Self {
+        Self {
+            selected_date: Rc::new(RefCell::new(current_date())),
+            pending_task_id: Rc::new(RefCell::new(None)),
+        }
+    }
+
+    pub(crate) fn selected_date(&self) -> Date {
+        *self.selected_date.borrow()
+    }
+
+    pub(crate) fn select_created_task(&self, task_id: String) {
+        *self.pending_task_id.borrow_mut() = Some(task_id);
+    }
+
+    fn set_selected_date(&self, date: Date) {
+        *self.selected_date.borrow_mut() = date;
+    }
+
+    fn take_created_task(&self) -> Option<String> {
+        self.pending_task_id.borrow_mut().take()
+    }
+}
 
 #[derive(Clone)]
 struct SnoozedTaskEntry {
@@ -35,21 +67,58 @@ type CalendarPane = ResponsiveSplit<TaskCalendar, TaskDetailForm>;
 
 pub(crate) struct CalendarWorkspace {
     context: AppContext,
+    create_context: CalendarCreateContext,
     pane: CalendarPane,
+    empty_state: SeasonalEmptyState,
     observed_version: u64,
     setting_status: SaveStatusLine,
     today: Date,
     reordering: bool,
+    project_filter: Option<String>,
+    label_filter: Vec<String>,
+    active_project_filter: ActiveProjectFilter,
+    active_label_filter: ActiveLabelFilter,
 }
 
 impl CalendarWorkspace {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn new(context: AppContext, show_weekends: bool) -> Self {
+        Self::new_with_create_context(context, show_weekends, CalendarCreateContext::new())
+    }
+
+    pub(crate) fn new_with_create_context(
+        context: AppContext,
+        show_weekends: bool,
+        create_context: CalendarCreateContext,
+    ) -> Self {
+        Self::new_with_create_context_and_filters(
+            context,
+            show_weekends,
+            create_context,
+            Rc::new(RefCell::new(None)),
+            Rc::new(RefCell::new(Vec::new())),
+        )
+    }
+
+    pub(crate) fn new_with_create_context_and_filters(
+        context: AppContext,
+        show_weekends: bool,
+        create_context: CalendarCreateContext,
+        active_project_filter: ActiveProjectFilter,
+        active_label_filter: ActiveLabelFilter,
+    ) -> Self {
         let state = context.store.borrow();
         let observed_version = state.state().version;
         let today = current_date();
-        let calendar = task_calendar(snoozed_task_entries(&state.state().tasks))
-            .today(today)
-            .show_weekends(show_weekends);
+        let project_filter = active_project_filter.borrow().clone();
+        let label_filter = active_label_filter.borrow().clone();
+        let calendar = task_calendar(filtered_snoozed_task_entries(
+            &state.state().tasks,
+            project_filter.as_deref(),
+            &label_filter,
+        ))
+        .today(today)
+        .show_weekends(show_weekends);
         let detail = TaskDetailForm::new(
             None,
             &state.state().people,
@@ -60,22 +129,34 @@ impl CalendarWorkspace {
         drop(state);
         Self {
             context,
+            create_context,
             pane: ResponsiveSplit::master_detail(calendar, detail).second_visible(false),
+            empty_state: SeasonalEmptyState::new("No tasks scheduled for this day"),
             observed_version,
             setting_status: SaveStatusLine::new(None),
             today,
             reordering: false,
+            project_filter,
+            label_filter,
+            active_project_filter,
+            active_label_filter,
         }
     }
 
     fn sync_store_version(&mut self) {
         let state = self.context.store.borrow().state().clone();
-        if self.observed_version == state.version {
+        let filter_options_changed = self.sync_filter_options(&state);
+        if self.observed_version == state.version && !filter_options_changed {
             return;
         }
         self.observed_version = state.version;
-        self.calendar_mut()
-            .set_entries(snoozed_task_entries(&state.tasks));
+        let entries = filtered_snoozed_task_entries(
+            &state.tasks,
+            self.project_filter.as_deref(),
+            &self.label_filter,
+        );
+        self.calendar_mut().set_entries(entries);
+        self.select_created_task();
         if let Some(value) = state.app_setting_values.get(SHOW_WEEKENDS_SETTING)
             && let Ok(show) = parse_show_weekends_setting(Some(value))
         {
@@ -88,6 +169,97 @@ impl CalendarWorkspace {
                 .map(String::as_str),
         );
         self.sync_detail(&state, &mut EventCtx::default());
+    }
+
+    fn sync_filter_options(&mut self, state: &crate::domain::AppState) -> bool {
+        let mut changed = false;
+        if self
+            .project_filter
+            .as_ref()
+            .is_some_and(|id| !state.projects.iter().any(|project| project.id == *id))
+        {
+            self.project_filter = None;
+            *self.active_project_filter.borrow_mut() = None;
+            changed = true;
+        }
+        let previous_labels = self.label_filter.len();
+        self.label_filter
+            .retain(|id| state.tags.iter().any(|tag| tag.id == *id));
+        if self.label_filter.len() != previous_labels {
+            *self.active_label_filter.borrow_mut() = self.label_filter.clone();
+            changed = true;
+        }
+        changed
+    }
+
+    fn sync_filter_change(&mut self) -> bool {
+        let project_filter = self.active_project_filter.borrow().clone();
+        let label_filter = self.active_label_filter.borrow().clone();
+        if project_filter == self.project_filter && label_filter == self.label_filter {
+            return false;
+        }
+        self.project_filter = project_filter;
+        self.label_filter = label_filter;
+        let state = self.context.store.borrow().state().clone();
+        let entries = filtered_snoozed_task_entries(
+            &state.tasks,
+            self.project_filter.as_deref(),
+            &self.label_filter,
+        );
+        self.calendar_mut().set_entries(entries);
+        self.sync_detail(&state, &mut EventCtx::default());
+        true
+    }
+
+    fn select_created_task(&mut self) {
+        let Some(task_id) = self.create_context.take_created_task() else {
+            return;
+        };
+        let task_is_visible = self
+            .context
+            .store
+            .borrow()
+            .state()
+            .tasks
+            .iter()
+            .find(|task| task.id == task_id)
+            .is_some_and(|task| {
+                task_matches_filters(task, self.project_filter.as_deref(), &self.label_filter)
+            });
+        if !task_is_visible {
+            return;
+        }
+        self.calendar_mut().on_key(tuicore::Key::Char('d'));
+        let entry_count = self
+            .context
+            .store
+            .borrow()
+            .state()
+            .tasks
+            .iter()
+            .filter(|task| {
+                task.state == TaskState::Snoozed
+                    && task_matches_filters(
+                        task,
+                        self.project_filter.as_deref(),
+                        &self.label_filter,
+                    )
+                    && task
+                        .snoozed_until
+                        .is_some_and(|until| until.date() == self.calendar().cursor_date())
+            })
+            .count();
+        for _ in 0..entry_count {
+            if self.calendar().highlighted_entry_id().as_deref() == Some(task_id.as_str()) {
+                break;
+            }
+            self.calendar_mut().on_key(tuicore::Key::Down);
+        }
+    }
+
+    fn sync_selected_date(&self) {
+        self.create_context
+            .set_selected_date(self.calendar().cursor_date());
     }
 
     fn persist_weekend_visibility_change(&self, previous: bool) {
@@ -123,6 +295,43 @@ impl CalendarWorkspace {
 
     fn detail_mut(&mut self) -> &mut TaskDetailForm {
         self.pane.second_mut()
+    }
+
+    fn day_is_empty(&self) -> bool {
+        if self.calendar().current_view() != CalendarView::Day {
+            return false;
+        }
+        let date = self.calendar().cursor_date();
+        !self
+            .context
+            .store
+            .borrow()
+            .state()
+            .tasks
+            .iter()
+            .any(|task| {
+                task.state == TaskState::Snoozed
+                    && task_matches_filters(
+                        task,
+                        self.project_filter.as_deref(),
+                        &self.label_filter,
+                    )
+                    && task
+                        .snoozed_until
+                        .is_some_and(|snoozed_until| snoozed_until.date() == date)
+            })
+    }
+
+    fn empty_day_message(&self) -> &'static str {
+        if self.calendar().cursor_date() == self.today {
+            "No tasks scheduled for today"
+        } else {
+            "No tasks scheduled for this day"
+        }
+    }
+
+    fn sync_empty_day_message(&mut self) {
+        self.empty_state.set_message(self.empty_day_message());
     }
 
     fn highlighted_task_id(&self) -> Option<String> {
@@ -300,6 +509,21 @@ impl CalendarWorkspace {
         Some(EventOutcome::Handled)
     }
 
+    fn handle_month_escape(
+        &mut self,
+        event: &TuiEvent,
+        ctx: &mut EventCtx<AppMsg>,
+    ) -> Option<EventOutcome> {
+        if self.calendar().current_view() != CalendarView::Month || !detail_escape(event) {
+            return None;
+        }
+        self.calendar_mut().on_key(tuicore::Key::Char('t'));
+        self.sync_selected_date();
+        ctx.request_redraw();
+        ctx.stop_propagation();
+        Some(EventOutcome::Handled)
+    }
+
     fn move_highlighted_task(&mut self, direction: isize) -> bool {
         let Some(task_id) = self.highlighted_task_id() else {
             return false;
@@ -357,18 +581,41 @@ pub(crate) fn parse_show_weekends_setting(value: Option<&str>) -> Result<bool, S
     }
 }
 
+#[cfg(test)]
 fn snoozed_task_entries(tasks: &[Task]) -> Vec<SnoozedTaskEntry> {
+    tasks.iter().filter_map(snoozed_task_entry).collect()
+}
+
+fn filtered_snoozed_task_entries(
+    tasks: &[Task],
+    project_filter: Option<&str>,
+    label_filter: &[String],
+) -> Vec<SnoozedTaskEntry> {
     tasks
         .iter()
-        .filter_map(|task| {
-            (task.state == TaskState::Snoozed).then_some(SnoozedTaskEntry {
-                id: task.id.clone(),
-                title: task.title.clone(),
-                until: task.snoozed_until?,
-                rank: task.rank,
-            })
-        })
+        .filter(|task| task_matches_filters(task, project_filter, label_filter))
+        .filter_map(snoozed_task_entry)
         .collect()
+}
+
+fn snoozed_task_entry(task: &Task) -> Option<SnoozedTaskEntry> {
+    (task.state == TaskState::Snoozed).then_some(SnoozedTaskEntry {
+        id: task.id.clone(),
+        title: task.title.clone(),
+        until: task.snoozed_until?,
+        rank: task.rank,
+    })
+}
+
+fn task_matches_filters(
+    task: &Task,
+    project_filter: Option<&str>,
+    label_filter: &[String],
+) -> bool {
+    project_filter.is_none_or(|project_id| task.project_id.as_deref() == Some(project_id))
+        && label_filter
+            .iter()
+            .all(|tag_id| task.tag_ids.contains(tag_id))
 }
 
 fn task_calendar(entries: Vec<SnoozedTaskEntry>) -> TaskCalendar {
@@ -415,6 +662,15 @@ fn calendar_move_direction(event: &TuiEvent) -> Option<isize> {
     }
 }
 
+fn unbordered_calendar_content_area(area: Rect) -> Rect {
+    Rect::new(
+        area.x,
+        area.y.saturating_add(1),
+        area.width,
+        area.height.saturating_sub(1),
+    )
+}
+
 impl TuiNode<AppMsg> for CalendarWorkspace {
     fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
         self.pane.measure(proposal)
@@ -422,6 +678,7 @@ impl TuiNode<AppMsg> for CalendarWorkspace {
 
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
         self.sync_store_version();
+        self.sync_filter_change();
         let has_error = self
             .context
             .store
@@ -436,6 +693,14 @@ impl TuiNode<AppMsg> for CalendarWorkspace {
             area.height.saturating_sub(u16::from(has_error)),
         );
         self.pane.layout(calendar_area, ctx);
+        if self.day_is_empty() {
+            self.sync_empty_day_message();
+            <SeasonalEmptyState as TuiNode<AppMsg>>::layout(
+                &mut self.empty_state,
+                unbordered_calendar_content_area(calendar_area),
+                ctx,
+            );
+        }
         if has_error && area.height > 0 {
             self.setting_status.layout(
                 Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
@@ -460,6 +725,16 @@ impl TuiNode<AppMsg> for CalendarWorkspace {
             area.height.saturating_sub(u16::from(has_error)),
         );
         self.pane.render(frame, calendar_area, ctx);
+        if self.day_is_empty() {
+            let empty_area = unbordered_calendar_content_area(calendar_area);
+            frame.render_widget(Clear, empty_area);
+            <SeasonalEmptyState as TuiNode<AppMsg>>::render(
+                &self.empty_state,
+                frame,
+                empty_area,
+                ctx,
+            );
+        }
         if has_error && area.height > 0 {
             self.setting_status.render(
                 frame,
@@ -470,11 +745,16 @@ impl TuiNode<AppMsg> for CalendarWorkspace {
     }
 
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<AppMsg>) -> EventOutcome {
+        if let Some(outcome) = self.handle_month_escape(event, ctx) {
+            return outcome;
+        }
         if let Some(outcome) = self.handle_move_mode(event, ctx) {
             return outcome;
         }
         let previous = self.calendar().is_showing_weekends();
         let outcome = self.calendar_mut().event(event, ctx);
+        self.sync_selected_date();
+        self.sync_empty_day_message();
         self.persist_weekend_visibility_change(previous);
         self.sync_after_event(true, ctx);
         self.handle_task_shortcut(outcome, event, None, ctx)
@@ -486,6 +766,9 @@ impl TuiNode<AppMsg> for CalendarWorkspace {
         event: &TuiEvent,
         ctx: &mut EventCtx<AppMsg>,
     ) -> EventOutcome {
+        if let Some(outcome) = self.handle_month_escape(event, ctx) {
+            return outcome;
+        }
         if let Some(outcome) = self.handle_move_mode(event, ctx) {
             return outcome;
         }
@@ -497,6 +780,8 @@ impl TuiNode<AppMsg> for CalendarWorkspace {
         } else {
             self.pane.dispatch_event(route, event, ctx)
         };
+        self.sync_selected_date();
+        self.sync_empty_day_message();
         self.persist_weekend_visibility_change(previous);
         self.sync_after_event(calendar_event, ctx);
         if detail_route && detail_escape(event) {
@@ -512,7 +797,16 @@ impl TuiNode<AppMsg> for CalendarWorkspace {
 
     fn tick(&mut self, dt: StdDuration, settings: AnimationSettings) -> TickResult {
         let mut result = self.pane.tick(dt, settings);
+        if self.day_is_empty() {
+            result = result.merge(<SeasonalEmptyState as TuiNode<AppMsg>>::tick(
+                &mut self.empty_state,
+                dt,
+                settings,
+            ));
+        }
         if self.sync_today(current_date()) {
+            self.sync_selected_date();
+            self.sync_empty_day_message();
             result = result.merge(TickResult {
                 changed: true,
                 layout: false,
@@ -544,10 +838,12 @@ impl TuiNode<AppMsg> for CalendarWorkspace {
 mod tests {
     use super::*;
     use crate::app::tests::{rendered_text, test_context};
-    use crate::domain::{AppEvent, TaskPriority, TaskSize, WorkspaceSnapshot};
+    use crate::domain::{AppEvent, Project, Tag, TaskPriority, TaskSize, WorkspaceSnapshot};
     use ratatui::{Terminal, backend::TestBackend};
     use time::{Date, Month, Time};
-    use tuicore::{AnimationSettings, FocusRequest, Key, KeyEvent, KeyModifiers, TreeDispatcher};
+    use tuicore::{
+        AnimationSettings, FocusRequest, Key, KeyEvent, KeyModifiers, Propagation, TreeDispatcher,
+    };
 
     fn task(id: &str, title: &str, state: TaskState, until: Option<PrimitiveDateTime>) -> Task {
         Task {
@@ -559,11 +855,9 @@ mod tests {
             state,
             size: TaskSize::Small,
             priority: TaskPriority::Medium,
-            start_date: None,
-            due_date: None,
             snoozed_until: until,
             people_ids: Vec::new(),
-            project_ids: Vec::new(),
+            project_id: None,
             tag_ids: Vec::new(),
             checklist: Vec::new(),
             links: Vec::new(),
@@ -592,6 +886,146 @@ mod tests {
     }
 
     #[test]
+    fn calendar_applies_shared_project_and_label_filters() {
+        let until = current_date().with_time(Time::from_hms(8, 0, 0).unwrap());
+        let mut matching = task("matching", "Matching", TaskState::Snoozed, Some(until));
+        matching.project_id = Some("project-2".into());
+        matching.tag_ids = vec!["api".into(), "urgent".into()];
+        let mut wrong_labels = task(
+            "wrong-labels",
+            "Wrong labels",
+            TaskState::Snoozed,
+            Some(until),
+        );
+        wrong_labels.project_id = Some("project-2".into());
+        wrong_labels.tag_ids = vec!["api".into()];
+        let mut wrong_project = task(
+            "wrong-project",
+            "Wrong project",
+            TaskState::Snoozed,
+            Some(until),
+        );
+        wrong_project.project_id = Some("project-1".into());
+        wrong_project.tag_ids = vec!["api".into(), "urgent".into()];
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks: vec![matching, wrong_labels, wrong_project],
+            people: Vec::new(),
+            projects: vec![
+                Project::new(
+                    "project-1".into(),
+                    "ONE".into(),
+                    "One".into(),
+                    String::new(),
+                ),
+                Project::new(
+                    "project-2".into(),
+                    "TWO".into(),
+                    "Two".into(),
+                    String::new(),
+                ),
+            ],
+            tags: vec![
+                Tag::new("api".into(), "API".into()),
+                Tag::new("urgent".into(), "Urgent".into()),
+            ],
+        });
+        let project_filter = Rc::new(RefCell::new(Some("project-2".into())));
+        let label_filter = Rc::new(RefCell::new(vec!["api".into(), "urgent".into()]));
+        let mut workspace = CalendarWorkspace::new_with_create_context_and_filters(
+            context,
+            true,
+            CalendarCreateContext::new(),
+            Rc::clone(&project_filter),
+            Rc::clone(&label_filter),
+        );
+        workspace.calendar_mut().on_key(Key::Char('d'));
+        let area = Rect::new(0, 0, 80, 20);
+        workspace.layout(area, &mut LayoutCtx::new());
+
+        let filtered = rendered_text(&workspace, area);
+        assert!(filtered.contains("Matching"));
+        assert!(!filtered.contains("Wrong labels"));
+        assert!(!filtered.contains("Wrong project"));
+
+        *project_filter.borrow_mut() = None;
+        label_filter.borrow_mut().clear();
+        assert!(workspace.sync_filter_change());
+        let unfiltered = rendered_text(&workspace, area);
+        assert!(unfiltered.contains("Matching"));
+        assert!(unfiltered.contains("Wrong labels"));
+        assert!(unfiltered.contains("Wrong project"));
+    }
+
+    #[test]
+    fn empty_day_shows_scheduled_task_empty_state_without_hiding_calendar() {
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks: Vec::new(),
+            people: Vec::new(),
+            projects: Vec::new(),
+            tags: Vec::new(),
+        });
+        let mut workspace = CalendarWorkspace::new(context, true);
+        let area = Rect::new(0, 0, 80, 20);
+        workspace.calendar_mut().on_key(Key::Char('d'));
+        workspace.layout(area, &mut LayoutCtx::new());
+
+        let text = rendered_text(&workspace, area);
+
+        assert!(text.contains(&workspace.today.to_string()));
+        assert!(text.contains("Day |d| · Week |w| · Month |m|"));
+        assert!(text.contains("No tasks scheduled for today"));
+        assert!(!text.contains("No entries"));
+
+        workspace.event(&TuiEvent::Key(Key::Left.into()), &mut EventCtx::default());
+        let previous_day_text = rendered_text(&workspace, area);
+        assert!(previous_day_text.contains("No tasks scheduled for this day"));
+
+        workspace.event(&TuiEvent::Key(Key::Right.into()), &mut EventCtx::default());
+        let today_text = rendered_text(&workspace, area);
+        assert!(today_text.contains("No tasks scheduled for today"));
+
+        workspace.calendar_mut().on_key(Key::Char('m'));
+        let month_text = rendered_text(&workspace, area);
+        assert!(!month_text.contains("No tasks scheduled for today"));
+        assert!(!month_text.contains("No tasks scheduled for this day"));
+    }
+
+    #[test]
+    fn created_calendar_task_opens_day_view_and_becomes_highlighted() {
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks: Vec::new(),
+            people: Vec::new(),
+            projects: Vec::new(),
+            tags: Vec::new(),
+        });
+        let create_context = CalendarCreateContext::new();
+        let mut workspace = CalendarWorkspace::new_with_create_context(
+            context.clone(),
+            true,
+            create_context.clone(),
+        );
+        workspace.event(&TuiEvent::Key(Key::Right.into()), &mut EventCtx::default());
+        let selected_date = create_context.selected_date();
+        let until = selected_date.with_time(Time::from_hms(8, 0, 0).unwrap());
+        let created = task("created", "Created", TaskState::Snoozed, Some(until));
+        create_context.select_created_task(created.id.clone());
+        context
+            .store
+            .borrow_mut()
+            .dispatch(AppEvent::TaskCreated(created));
+
+        workspace.sync_store_version();
+
+        assert_eq!(workspace.calendar().current_view(), CalendarView::Day);
+        assert_eq!(workspace.calendar().cursor_date(), selected_date);
+        assert_eq!(
+            workspace.calendar().highlighted_entry_id().as_deref(),
+            Some("created")
+        );
+        assert_eq!(workspace.pane.second().task_id.as_deref(), Some("created"));
+    }
+
+    #[test]
     fn calendar_workspace_updates_today_without_recreation() {
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
             tasks: Vec::new(),
@@ -611,6 +1045,37 @@ mod tests {
     fn calendar_preference_defaults_and_rejects_invalid_values() {
         for (value, expected) in [(None, Ok(true)), (Some("weekdays"), Err(()))] {
             assert_eq!(parse_show_weekends_setting(value).map_err(|_| ()), expected);
+        }
+    }
+
+    #[test]
+    fn escape_in_month_view_returns_to_today_without_unfocusing_calendar() {
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks: Vec::new(),
+            people: Vec::new(),
+            projects: Vec::new(),
+            tags: Vec::new(),
+        });
+        let mut workspace = CalendarWorkspace::new(context, true);
+        let close_keys = [
+            KeyEvent::from(Key::Esc),
+            KeyEvent {
+                code: Key::Char('['),
+                modifiers: KeyModifiers::CONTROL,
+            },
+        ];
+
+        for key in close_keys {
+            workspace.calendar_mut().on_key(Key::Right);
+            assert_ne!(workspace.calendar().cursor_date(), workspace.today);
+            let mut ctx = EventCtx::default();
+
+            let outcome = workspace.event(&TuiEvent::Key(key), &mut ctx);
+
+            assert!(outcome.handled());
+            assert_eq!(workspace.calendar().current_view(), CalendarView::Month);
+            assert_eq!(workspace.calendar().cursor_date(), workspace.today);
+            assert_eq!(ctx.propagation(), Propagation::Stopped);
         }
     }
 
@@ -865,6 +1330,11 @@ mod tests {
         workspace.sync_calendar_detail(&mut EventCtx::default());
         let mut layout = LayoutCtx::new();
         workspace.layout(Rect::new(0, 0, 120, 30), &mut layout);
+        assert!(layout.focus_targets().iter().any(|target| {
+            target
+                .hotkey_sequences
+                .contains(&keys::TASK_TAGS_FIELD.hotkey())
+        }));
         let detail_path = layout
             .focus_targets()
             .iter()

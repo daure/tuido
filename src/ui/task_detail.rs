@@ -24,6 +24,7 @@ pub(crate) struct TaskDetailForm {
     pub(crate) projects_snapshot: Vec<Project>,
     pub(crate) tags_snapshot: Vec<Tag>,
     pub(crate) patches: PatchSink,
+    checklist_highlighted_id: Rc<RefCell<Option<String>>>,
     save_status: SaveStatusLine,
 }
 
@@ -36,6 +37,7 @@ impl TaskDetailForm {
         save_error: Option<&str>,
     ) -> Self {
         let patches = Rc::new(RefCell::new(Vec::new()));
+        let checklist_highlighted_id = Rc::new(RefCell::new(None));
         let save_status = SaveStatusLine::new(save_error);
         Self {
             root: Flex::column().child(
@@ -46,6 +48,7 @@ impl TaskDetailForm {
                     projects,
                     tags,
                     Rc::clone(&patches),
+                    Rc::clone(&checklist_highlighted_id),
                     save_status.clone(),
                 ),
                 FlexItem::content(),
@@ -57,6 +60,7 @@ impl TaskDetailForm {
             projects_snapshot: projects.to_vec(),
             tags_snapshot: tags.to_vec(),
             patches,
+            checklist_highlighted_id,
             save_status,
         }
     }
@@ -82,6 +86,9 @@ impl TaskDetailForm {
         save_error: Option<&str>,
         ctx: &mut EventCtx<AppMsg>,
     ) {
+        if self.task_id.as_deref() != task.map(|task| task.id.as_str()) {
+            *self.checklist_highlighted_id.borrow_mut() = None;
+        }
         self.patches = Rc::new(RefCell::new(Vec::new()));
         self.task_id = task.map(|task| task.id.clone());
         self.task_state = task.map(|task| task.state);
@@ -99,6 +106,7 @@ impl TaskDetailForm {
                     projects,
                     tags,
                     Rc::clone(&self.patches),
+                    Rc::clone(&self.checklist_highlighted_id),
                     self.save_status.clone(),
                 ),
                 FlexItem::content(),

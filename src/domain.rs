@@ -3,6 +3,8 @@ use std::collections::HashMap;
 use time::PrimitiveDateTime;
 use tuicore::{ChipColorRole, DispatchOutcome};
 
+pub(crate) const DEFAULT_PROJECT_SETTING: &str = "tasks.default_project";
+
 #[derive(Debug, Clone)]
 pub struct WorkspaceSnapshot {
     pub tasks: Vec<Task>,
@@ -127,9 +129,13 @@ impl AppState {
             task_ids: self
                 .tasks
                 .iter()
-                .filter(|task| task.project_ids.iter().any(|id| id == project_id))
+                .filter(|task| task.project_id.as_deref() == Some(project_id))
                 .map(|task| task.id.clone())
                 .collect(),
+            was_default: self
+                .app_setting_values
+                .get(DEFAULT_PROJECT_SETTING)
+                .is_some_and(|value| value == project_id),
         })
     }
 
@@ -433,7 +439,22 @@ pub fn reduce_app_state(state: &mut AppState, event: AppEvent) -> DispatchOutcom
                     .map(|project| project.id.clone());
             }
             for task in &mut state.tasks {
-                task.project_ids.retain(|id| id != &project_id);
+                if task.project_id.as_deref() == Some(&project_id) {
+                    task.project_id = None;
+                }
+            }
+            if state
+                .app_setting_values
+                .get(DEFAULT_PROJECT_SETTING)
+                .is_some_and(|value| value == &project_id)
+            {
+                for values in [
+                    &mut state.app_setting_values,
+                    &mut state.app_setting_confirmed_values,
+                    &mut state.app_setting_desired_values,
+                ] {
+                    values.insert(DEFAULT_PROJECT_SETTING.to_string(), String::new());
+                }
             }
             state.version += 1;
             DispatchOutcome::layout()
@@ -443,8 +464,17 @@ pub fn reduce_app_state(state: &mut AppState, event: AppEvent) -> DispatchOutcom
             state.selected_project_id = Some(project_id.clone());
             state.projects.push(deletion.project);
             for task in &mut state.tasks {
-                if deletion.task_ids.contains(&task.id) && !task.project_ids.contains(&project_id) {
-                    task.project_ids.push(project_id.clone());
+                if deletion.task_ids.contains(&task.id) {
+                    task.project_id = Some(project_id.clone());
+                }
+            }
+            if deletion.was_default {
+                for values in [
+                    &mut state.app_setting_values,
+                    &mut state.app_setting_confirmed_values,
+                    &mut state.app_setting_desired_values,
+                ] {
+                    values.insert(DEFAULT_PROJECT_SETTING.to_string(), project_id.clone());
                 }
             }
             state.version += 1;
@@ -713,11 +743,9 @@ pub struct Task {
     pub state: TaskState,
     pub size: TaskSize,
     pub priority: TaskPriority,
-    pub start_date: Option<String>,
-    pub due_date: Option<String>,
     pub snoozed_until: Option<PrimitiveDateTime>,
     pub people_ids: Vec<String>,
-    pub project_ids: Vec<String>,
+    pub project_id: Option<String>,
     pub tag_ids: Vec<String>,
     pub checklist: Vec<ChecklistItem>,
     pub links: Vec<String>,
@@ -735,17 +763,33 @@ impl Task {
             state: TaskState::Backlog,
             size,
             priority: TaskPriority::Medium,
-            start_date: None,
-            due_date: None,
             snoozed_until: None,
             people_ids: Vec::new(),
-            project_ids: Vec::new(),
+            project_id: None,
             tag_ids: Vec::new(),
             checklist: Vec::new(),
             links: Vec::new(),
             description,
         }
     }
+}
+
+pub(crate) fn task_identifier(number: i64, project_key: Option<&str>) -> String {
+    project_key
+        .filter(|key| !key.is_empty())
+        .map_or_else(|| number.to_string(), |key| format!("{key}-{number}"))
+}
+
+pub(crate) fn task_number(identifier: &str) -> Option<i64> {
+    if identifier.starts_with("pending-") {
+        return None;
+    }
+    identifier
+        .rsplit_once('-')
+        .map_or(identifier, |(_, number)| number)
+        .parse::<i64>()
+        .ok()
+        .filter(|number| *number > 0)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -817,7 +861,12 @@ impl Project {
     }
 
     pub(crate) fn normalize_key(key: &str) -> String {
-        key.trim().to_uppercase()
+        key.to_uppercase()
+    }
+
+    pub(crate) fn is_valid_key(key: &str) -> bool {
+        let length = key.chars().count();
+        (2..=5).contains(&length) && !key.chars().any(char::is_whitespace)
     }
 }
 
@@ -825,6 +874,7 @@ impl Project {
 pub struct ProjectDeletion {
     pub project: Project,
     pub task_ids: Vec<String>,
+    pub was_default: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -855,8 +905,6 @@ pub enum TaskField {
     State,
     Size,
     Priority,
-    StartDate,
-    EndDate,
     People,
     Projects,
     Tags,
@@ -893,10 +941,8 @@ pub enum TaskPatch {
     State(TaskState),
     Size(TaskSize),
     Priority(TaskPriority),
-    StartDate(Option<String>),
-    EndDate(Option<String>),
     People(Vec<String>),
-    Projects(Vec<String>),
+    Project(Option<String>),
     Tags(Vec<Tag>),
     Checklist(Vec<ChecklistItem>),
     Links(Vec<String>),
@@ -915,10 +961,8 @@ impl TaskPatch {
             Self::State(_) => TaskField::State,
             Self::Size(_) => TaskField::Size,
             Self::Priority(_) => TaskField::Priority,
-            Self::StartDate(_) => TaskField::StartDate,
-            Self::EndDate(_) => TaskField::EndDate,
             Self::People(_) => TaskField::People,
-            Self::Projects(_) => TaskField::Projects,
+            Self::Project(_) => TaskField::Projects,
             Self::Tags(_) => TaskField::Tags,
             Self::Checklist(_) => TaskField::Checklist,
             Self::Links(_) => TaskField::Links,
@@ -1134,20 +1178,12 @@ fn apply_task_patch(task: &mut Task, available_tags: &mut Vec<Tag>, patch: &Task
             task.priority = *value;
             true
         }
-        TaskPatch::StartDate(value) if task.start_date != *value => {
-            task.start_date = value.clone();
-            true
-        }
-        TaskPatch::EndDate(value) if task.due_date != *value => {
-            task.due_date = value.clone();
-            true
-        }
         TaskPatch::People(ids) if task.people_ids != *ids => {
             task.people_ids = ids.clone();
             true
         }
-        TaskPatch::Projects(ids) if task.project_ids != *ids => {
-            task.project_ids = ids.clone();
+        TaskPatch::Project(id) if task.project_id != *id => {
+            task.project_id = id.clone();
             true
         }
         TaskPatch::Tags(tags) => {
@@ -1238,7 +1274,7 @@ fn apply_person_patch(person: &mut Person, patch: &PersonPatch) -> bool {
 fn apply_project_patch(project: &mut Project, patch: &ProjectPatch) -> bool {
     match patch {
         ProjectPatch::Key(key)
-            if project.key != Project::normalize_key(key) && !key.trim().is_empty() =>
+            if Project::is_valid_key(key) && project.key != Project::normalize_key(key) =>
         {
             project.key = Project::normalize_key(key);
             true
@@ -1629,30 +1665,19 @@ mod tests {
     }
 
     #[test]
-    fn project_keys_are_uppercase_after_creation_and_editing() {
+    fn project_keys_are_uppercase_after_creation() {
         let project = Project::new(
             "project-1".into(),
-            " core ".into(),
+            "core".into(),
             "Core".into(),
             String::new(),
         );
         assert_eq!(project.key, "CORE");
-
-        let mut state = AppState::from_snapshot(WorkspaceSnapshot {
-            tasks: Vec::new(),
-            people: Vec::new(),
-            projects: vec![project],
-            tags: Vec::new(),
-        });
-        reduce_app_state(
-            &mut state,
-            AppEvent::PatchProject {
-                project_id: "project-1".into(),
-                patch: ProjectPatch::Key(" api ".into()),
-            },
-        );
-
-        assert_eq!(state.projects[0].key, "API");
+        assert!(Project::is_valid_key("AB"));
+        assert!(Project::is_valid_key("ABCDE"));
+        for invalid in ["A", "ABCDEF", "A B", " AB", "AB "] {
+            assert!(!Project::is_valid_key(invalid), "accepted {invalid:?}");
+        }
     }
 
     #[test]

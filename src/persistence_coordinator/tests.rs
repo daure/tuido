@@ -88,18 +88,19 @@ fn settle(coordinator: &mut PersistenceCoordinator) {
 #[test]
 fn create_finishes_before_queued_patch() {
     let (runtime, pool) = test_database();
-    let task = test_task("task-1");
+    let task = test_task("pending-1");
     let mut coordinator = test_coordinator(&runtime, &pool, test_store(vec![task.clone()]));
 
     coordinator.submit(PersistenceCommand::CreateTask(task));
     coordinator.submit(PersistenceCommand::PatchTask(
-        "task-1".to_string(),
+        "pending-1".to_string(),
         TaskPatch::Title("Patched".to_string()),
     ));
 
     assert!(coordinator.drain(Duration::from_secs(2)));
+    assert_eq!(coordinator.store.borrow().state().tasks[0].id, "1");
     let title: String = runtime
-        .block_on(sqlx::query("SELECT title FROM tasks WHERE id = 'task-1'").fetch_one(&pool))
+        .block_on(sqlx::query("SELECT title FROM tasks WHERE id = 1").fetch_one(&pool))
         .expect("task reloads")
         .try_get("title")
         .expect("title decodes");
@@ -197,7 +198,7 @@ fn unchanged_revision_poll_reloads_when_a_local_snooze_expires() {
     assert_eq!(state.workspace_revision, 3);
     assert_eq!(state.tasks[0].state, TaskState::Todo);
     assert_eq!(state.tasks[0].snoozed_until, None);
-    assert_eq!(state.entity_revisions["task:task-1"], 2);
+    assert_eq!(state.entity_revisions["task:1"], 2);
 }
 
 #[test]
@@ -243,7 +244,7 @@ fn stale_patch_reloads_authoritative_task_after_pending_write_drains() {
     let state = store.borrow();
     assert_eq!(state.state().tasks[0].title, "External winner");
     assert!(state.state().task_save_error("task-1").is_some());
-    assert_eq!(state.state().entity_revisions["task:task-1"], 2);
+    assert_eq!(state.state().entity_revisions["task:1"], 2);
 }
 
 #[test]
@@ -489,10 +490,7 @@ fn latest_queued_same_field_patch_keeps_other_field_order() {
 
     assert!(coordinator.drain(Duration::from_secs(2)));
     let row = runtime
-        .block_on(
-            sqlx::query("SELECT title, description FROM tasks WHERE id = 'task-1'")
-                .fetch_one(&pool),
-        )
+        .block_on(sqlx::query("SELECT title, description FROM tasks WHERE id = 1").fetch_one(&pool))
         .expect("task reloads");
     assert_eq!(row.try_get::<String, _>("title").unwrap(), "Latest");
     assert_eq!(row.try_get::<String, _>("description").unwrap(), "Details");
@@ -530,6 +528,7 @@ fn failed_active_patch_defers_completion_to_successful_queued_patch() {
         ),
         error: Some("active title failure".to_string()),
         related_revisions: HashMap::new(),
+        created_task: None,
     }));
     assert!(coordinator.drain(Duration::from_secs(2)));
 
@@ -574,12 +573,13 @@ fn custom_snooze_then_state_then_quick_keeps_latest_workflow() {
         command: PersistenceCommand::PatchTask("task-1".into(), TaskPatch::Title("active".into())),
         error: None,
         related_revisions: HashMap::new(),
+        created_task: None,
     });
     assert!(coordinator.drain(Duration::from_secs(2)));
 
     let row = runtime
         .block_on(
-            sqlx::query("SELECT workflow_state, snoozed_until FROM tasks WHERE id = 'task-1'")
+            sqlx::query("SELECT workflow_state, snoozed_until FROM tasks WHERE id = 1")
                 .fetch_one(&pool),
         )
         .unwrap();
@@ -641,12 +641,11 @@ fn custom_snooze_replaced_before_execution_preserves_remembered_value() {
         ),
         error: None,
         related_revisions: HashMap::new(),
+        created_task: None,
     });
     assert!(coordinator.drain(Duration::from_secs(2)));
     let task_row = runtime
-        .block_on(
-            sqlx::query("SELECT snoozed_until FROM tasks WHERE id = 'task-1'").fetch_one(&pool),
-        )
+        .block_on(sqlx::query("SELECT snoozed_until FROM tasks WHERE id = 1").fetch_one(&pool))
         .unwrap();
     assert_eq!(
         task_row.try_get::<String, _>("snoozed_until").unwrap(),
@@ -664,8 +663,8 @@ fn custom_snooze_replaced_before_execution_preserves_remembered_value() {
 #[test]
 fn other_task_custom_blocks_same_task_quick_from_reordering_global_last() {
     let (runtime, pool) = test_database();
-    let task_a = test_task("task-a");
-    let task_b = test_task("task-b");
+    let task_a = test_task("1");
+    let task_b = test_task("2");
     for task in [task_a.clone(), task_b.clone()] {
         persist_task(&runtime, &pool, task);
     }
@@ -677,21 +676,21 @@ fn other_task_custom_blocks_same_task_quick_from_reordering_global_last() {
     let quick_a = time::macros::datetime!(2026-09-10 8:00);
 
     coordinator.submit(PersistenceCommand::PatchTask(
-        "task-a".into(),
+        "1".into(),
         TaskPatch::Snooze {
             until: custom_a,
             remember_custom: Some(custom_a),
         },
     ));
     coordinator.submit(PersistenceCommand::PatchTask(
-        "task-b".into(),
+        "2".into(),
         TaskPatch::Snooze {
             until: custom_b,
             remember_custom: Some(custom_b),
         },
     ));
     coordinator.submit(PersistenceCommand::PatchTask(
-        "task-a".into(),
+        "1".into(),
         TaskPatch::Snooze {
             until: quick_a,
             remember_custom: None,
@@ -708,7 +707,7 @@ fn other_task_custom_blocks_same_task_quick_from_reordering_global_last() {
                 until,
                 remember_custom: Some(remembered)
             }
-        ) if id == "task-a" && until == custom_a && remembered == custom_a
+        ) if id == "1" && until == custom_a && remembered == custom_a
     ));
     assert!(matches!(
         queue[1],
@@ -718,7 +717,7 @@ fn other_task_custom_blocks_same_task_quick_from_reordering_global_last() {
                 until,
                 remember_custom: Some(remembered)
             }
-        ) if id == "task-b" && until == custom_b && remembered == custom_b
+        ) if id == "2" && until == custom_b && remembered == custom_b
     ));
     assert!(matches!(
         queue[2],
@@ -728,7 +727,7 @@ fn other_task_custom_blocks_same_task_quick_from_reordering_global_last() {
                 until,
                 remember_custom: None
             }
-        ) if id == "task-a" && until == quick_a
+        ) if id == "1" && until == quick_a
     ));
 
     coordinator.finish(Completion {
@@ -740,13 +739,12 @@ fn other_task_custom_blocks_same_task_quick_from_reordering_global_last() {
         ),
         error: None,
         related_revisions: HashMap::new(),
+        created_task: None,
     });
     assert!(coordinator.drain(Duration::from_secs(2)));
 
     let task_a_until: String = runtime
-        .block_on(
-            sqlx::query("SELECT snoozed_until FROM tasks WHERE id = 'task-a'").fetch_one(&pool),
-        )
+        .block_on(sqlx::query("SELECT snoozed_until FROM tasks WHERE id = 1").fetch_one(&pool))
         .unwrap()
         .try_get("snoozed_until")
         .unwrap();
@@ -791,12 +789,13 @@ fn custom_snooze_then_unsnooze_keeps_workflow_without_persisting_last() {
         ),
         error: None,
         related_revisions: HashMap::new(),
+        created_task: None,
     });
     assert!(coordinator.drain(Duration::from_secs(2)));
 
     let row = runtime
         .block_on(
-            sqlx::query("SELECT workflow_state, snoozed_until FROM tasks WHERE id = 'task-1'")
+            sqlx::query("SELECT workflow_state, snoozed_until FROM tasks WHERE id = 1")
                 .fetch_one(&pool),
         )
         .unwrap();
@@ -841,6 +840,7 @@ fn failed_active_custom_snooze_is_not_suppressed_by_queued_state() {
         ),
         error: Some("custom snooze failed".into()),
         related_revisions: HashMap::new(),
+        created_task: None,
     }));
     assert!(coordinator.drain(Duration::from_secs(2)));
 
@@ -884,13 +884,12 @@ fn failed_active_custom_merges_into_queued_quick_compound_snooze() {
         ),
         error: Some("custom snooze failed".into()),
         related_revisions: HashMap::new(),
+        created_task: None,
     }));
     assert!(coordinator.drain(Duration::from_secs(2)));
 
     let row = runtime
-        .block_on(
-            sqlx::query("SELECT snoozed_until FROM tasks WHERE id = 'task-1'").fetch_one(&pool),
-        )
+        .block_on(sqlx::query("SELECT snoozed_until FROM tasks WHERE id = 1").fetch_one(&pool))
         .unwrap();
     assert_eq!(
         row.try_get::<String, _>("snoozed_until").unwrap(),
@@ -933,6 +932,7 @@ fn successful_active_patch_defers_completion_to_failed_queued_patch() {
         ),
         error: None,
         related_revisions: HashMap::new(),
+        created_task: None,
     }));
     assert!(store.borrow().state().save_errors.contains_key(&target));
     assert_eq!(store.borrow().state().version, initial_version);
@@ -1014,6 +1014,7 @@ fn management_entity_creates_and_queued_deletes_drain_to_absent() {
     coordinator.submit(PersistenceCommand::DeleteProject(ProjectDeletion {
         project,
         task_ids: Vec::new(),
+        was_default: false,
     }));
     coordinator.submit(PersistenceCommand::CreateTag(tag.clone()));
     coordinator.submit(PersistenceCommand::DeleteTag(TagDeletion {
@@ -1059,6 +1060,7 @@ fn failed_management_entity_deletes_restore_optimistic_state() {
             String::new(),
         ),
         task_ids: Vec::new(),
+        was_default: false,
     }));
     coordinator.submit(PersistenceCommand::DeleteTag(TagDeletion {
         tag: Tag::new("tag-1".into(), "api".into()),

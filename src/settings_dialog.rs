@@ -1,21 +1,33 @@
-use std::time::Duration;
+use std::{cell::RefCell, rc::Rc, time::Duration};
 
 use ratatui::{Frame, layout::Rect};
 use time::Time;
 use tuicore::{
-    AnimationSettings, EventCtx, EventOutcome, EventRoute, Flex, FlexItem, FocusCtx, FocusTarget,
-    LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, RenderCtx, TickResult,
-    TimePicker, Toggle, TuiEvent, TuiNode,
+    AnimationSettings, Dropdown, DropdownCommitMode, DropdownSearchMode, EventCtx, EventOutcome,
+    EventRoute, Flex, FlexItem, FocusCtx, FocusTarget, LayoutCtx, LayoutProposal, LayoutResult,
+    LayoutSizeHint, LifecycleCtx, RenderCtx, TickResult, TimePicker, Toggle, TuiEvent, TuiNode,
 };
 
-use crate::app::AppMsg;
+use crate::{app::AppMsg, domain::Project};
+
+#[derive(Clone)]
+struct ProjectChoice {
+    id: String,
+    label: String,
+}
 
 pub(crate) struct SettingsDialog {
     root: Flex<AppMsg>,
+    default_project_changes: Rc<RefCell<Vec<Option<String>>>>,
 }
 
 impl SettingsDialog {
-    pub(crate) fn new(show_calendar_weekends: bool, default_snooze_time: Time) -> Self {
+    pub(crate) fn new(
+        show_calendar_weekends: bool,
+        default_snooze_time: Time,
+        projects: &[Project],
+        default_project_id: Option<&str>,
+    ) -> Self {
         let calendar_view = Toggle::new("Show weekends in calendar")
             .checked(show_calendar_weekends)
             .focused(true)
@@ -24,11 +36,44 @@ impl SettingsDialog {
             .panel("Default snooze time")
             .value(default_snooze_time)
             .on_select(AppMsg::SetDefaultSnoozeTime);
+        let project_choices = projects
+            .iter()
+            .map(|project| ProjectChoice {
+                id: project.id.clone(),
+                label: project.name.clone(),
+            })
+            .collect::<Vec<_>>();
+        let default_project_changes = Rc::new(RefCell::new(Vec::new()));
+        let change_sink = Rc::clone(&default_project_changes);
+        let default_project = Dropdown::single(
+            project_choices,
+            |choice| choice.id.clone(),
+            |choice| choice.label.clone(),
+        )
+        .label("Default project")
+        .placeholder("Unset")
+        .no_selection_text("Unset")
+        .selected(default_project_id.into_iter().map(str::to_string))
+        .search_mode(DropdownSearchMode::Contains)
+        .commit_mode(DropdownCommitMode::Explicit)
+        .on_select(move |ids| {
+            change_sink.borrow_mut().push(ids.into_iter().next());
+        });
         let root = Flex::column()
-            .gap(1)
+            .gap(0)
             .child("calendar-view", calendar_view, FlexItem::content())
-            .child("snooze-time", snooze_time, FlexItem::fixed(3));
-        Self { root }
+            .child("snooze-time", snooze_time, FlexItem::fixed(3))
+            .child("default-project", default_project, FlexItem::content());
+        Self {
+            root,
+            default_project_changes,
+        }
+    }
+
+    fn emit_default_project_changes(&self, ctx: &mut EventCtx<AppMsg>) {
+        for project_id in self.default_project_changes.borrow_mut().drain(..) {
+            ctx.emit(AppMsg::SetDefaultProject(project_id));
+        }
     }
 }
 
@@ -46,7 +91,9 @@ impl TuiNode<AppMsg> for SettingsDialog {
     }
 
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<AppMsg>) -> EventOutcome {
-        self.root.event(event, ctx)
+        let outcome = self.root.event(event, ctx);
+        self.emit_default_project_changes(ctx);
+        outcome
     }
 
     fn dispatch_event(
@@ -55,7 +102,9 @@ impl TuiNode<AppMsg> for SettingsDialog {
         event: &TuiEvent,
         ctx: &mut EventCtx<AppMsg>,
     ) -> EventOutcome {
-        self.root.dispatch_event(route, event, ctx)
+        let outcome = self.root.dispatch_event(route, event, ctx);
+        self.emit_default_project_changes(ctx);
+        outcome
     }
 
     fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<AppMsg>) {
@@ -89,9 +138,18 @@ mod tests {
     use time::macros::time;
     use tuicore::{Key, KeyEvent};
 
+    fn project() -> Project {
+        Project::new(
+            "project-1".into(),
+            "ONE".into(),
+            "Project one".into(),
+            String::new(),
+        )
+    }
+
     #[test]
     fn settings_emit_changes_for_immediate_persistence() {
-        let mut dialog = SettingsDialog::new(false, time!(8:15));
+        let mut dialog = SettingsDialog::new(false, time!(8:15), &[], None);
         let area = Rect::new(0, 0, 40, 5);
         let mut layout = LayoutCtx::new();
         dialog.layout(area, &mut layout);
@@ -113,7 +171,7 @@ mod tests {
 
     #[test]
     fn completing_time_selection_emits_configured_snooze_default() {
-        let mut dialog = SettingsDialog::new(true, time!(8:15));
+        let mut dialog = SettingsDialog::new(true, time!(8:15), &[], None);
         let area = Rect::new(0, 0, 40, 5);
         let mut layout = LayoutCtx::new();
         dialog.layout(area, &mut layout);
@@ -133,5 +191,31 @@ mod tests {
             ctx.messages(),
             [AppMsg::SetDefaultSnoozeTime(value)] if *value == time!(8:15)
         ));
+    }
+
+    #[test]
+    fn settings_include_default_project_dropdown() {
+        let project = project();
+        let mut dialog = SettingsDialog::new(
+            true,
+            time!(8:15),
+            std::slice::from_ref(&project),
+            Some(&project.id),
+        );
+        let mut layout = LayoutCtx::new();
+        dialog.layout(Rect::new(0, 0, 40, 8), &mut layout);
+        let dropdown = layout
+            .focus_targets()
+            .iter()
+            .find(|target| {
+                target
+                    .path
+                    .keys()
+                    .iter()
+                    .any(|key| key.as_str() == "default-project")
+            })
+            .expect("default project dropdown should be focusable");
+
+        assert!(dropdown.area.width > 0);
     }
 }

@@ -8,7 +8,8 @@ use sqlx::{
 };
 
 use crate::domain::{
-    ChecklistItem, Person, Project, Tag, Task, TaskPriority, TaskSize, TaskState, WorkspaceSnapshot,
+    ChecklistItem, Person, Project, Tag, Task, TaskPriority, TaskSize, TaskState,
+    WorkspaceSnapshot, task_identifier,
 };
 use crate::snooze::parse_datetime;
 
@@ -173,21 +174,25 @@ async fn load_workspace(
     let tags = load_tags(pool).await?;
     let mut tasks = Vec::new();
     let rows = sqlx::query(
-        "SELECT id, rank, created_at, updated_at, title, state, workflow_state, CAST(CASE WHEN rejected THEN 1 ELSE 0 END AS BIGINT) AS rejected, size, priority, start_date, due_date, snoozed_until, description FROM tasks ORDER BY rank, id",
+        "SELECT id, key_prefix, rank, created_at, updated_at, title, state, workflow_state, CAST(CASE WHEN rejected THEN 1 ELSE 0 END AS BIGINT) AS rejected, size, priority, snoozed_until, description FROM tasks ORDER BY rank, id",
     )
     .fetch_all(pool)
     .await?;
 
     for row in rows {
-        let id: String = row.try_get("id")?;
-        let people_ids = load_task_people(pool, dialect, &id).await?;
-        let project_ids = load_task_projects(pool, dialect, &id).await?;
-        let tag_ids = load_task_tags(pool, dialect, &id).await?;
-        let checklist = load_task_checklist(pool, dialect, &id).await?;
-        let links = load_task_links(pool, dialect, &id).await?;
+        let number: i64 = row.try_get("id")?;
+        let people_ids = load_task_people(pool, dialect, number).await?;
+        let project_id = load_task_projects(pool, dialect, number)
+            .await?
+            .into_iter()
+            .next();
+        let tag_ids = load_task_tags(pool, dialect, number).await?;
+        let checklist = load_task_checklist(pool, dialect, number).await?;
+        let links = load_task_links(pool, dialect, number).await?;
+        let key_prefix = row.try_get::<String, _>("key_prefix")?;
 
         let task = Task {
-            id,
+            id: task_identifier(number, Some(&key_prefix)),
             rank: row.try_get("rank")?,
             created_at: row.try_get("created_at")?,
             updated_at: row.try_get("updated_at")?,
@@ -202,14 +207,12 @@ async fn load_workspace(
             },
             size: parse_size(row.try_get::<String, _>("size")?)?,
             priority: parse_priority(row.try_get::<String, _>("priority")?)?,
-            start_date: row.try_get("start_date")?,
-            due_date: row.try_get("due_date")?,
             snoozed_until: row
                 .try_get::<Option<String>, _>("snoozed_until")?
                 .map(|value| parse_datetime(&value))
                 .transpose()?,
             people_ids,
-            project_ids,
+            project_id,
             tag_ids,
             checklist,
             links,
@@ -229,7 +232,7 @@ async fn load_workspace(
 async fn load_task_checklist(
     pool: &AnyPool,
     dialect: SqlDialect,
-    task_id: &str,
+    task_id: i64,
 ) -> Result<Vec<ChecklistItem>, Box<dyn std::error::Error>> {
     let query = format!(
         "SELECT id, parent_id, text, CAST(CASE WHEN checked THEN 1 ELSE 0 END AS BIGINT) AS checked FROM task_checklist_items WHERE task_id = {} ORDER BY position, id",
@@ -299,7 +302,7 @@ async fn load_projects(pool: &AnyPool) -> Result<Vec<Project>, Box<dyn std::erro
 async fn load_task_people(
     pool: &AnyPool,
     dialect: SqlDialect,
-    task_id: &str,
+    task_id: i64,
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let query = format!(
         "SELECT person_id FROM task_people WHERE task_id = {} ORDER BY sort_order, person_id",
@@ -317,7 +320,7 @@ async fn load_task_people(
 async fn load_task_projects(
     pool: &AnyPool,
     dialect: SqlDialect,
-    task_id: &str,
+    task_id: i64,
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let query = format!(
         "SELECT project_id FROM task_projects WHERE task_id = {} ORDER BY sort_order, project_id",
@@ -349,7 +352,7 @@ async fn load_tags(pool: &AnyPool) -> Result<Vec<Tag>, Box<dyn std::error::Error
 async fn load_task_tags(
     pool: &AnyPool,
     dialect: SqlDialect,
-    task_id: &str,
+    task_id: i64,
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let query = format!(
         "SELECT tag_id FROM task_tags WHERE task_id = {} ORDER BY sort_order, tag_id",
@@ -367,7 +370,7 @@ async fn load_task_tags(
 async fn load_task_links(
     pool: &AnyPool,
     dialect: SqlDialect,
-    task_id: &str,
+    task_id: i64,
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let query = format!(
         "SELECT url FROM task_links WHERE task_id = {}",
@@ -550,10 +553,10 @@ mod tests {
                     .unwrap();
                 MIGRATOR.run(&pool).await.unwrap();
                 for (id, title, created_at, rank) in [
-                    ("z-first", "First", "2026-07-25T10:00:00", 1_i64),
-                    ("a-second", "Second", "2026-07-25T10:01:00", 2_i64),
+                    (1_i64, "First", "2026-07-25T10:00:00", 1_i64),
+                    (2_i64, "Second", "2026-07-25T10:01:00", 2_i64),
                 ] {
-                    sqlx::query("INSERT INTO tasks (id, rank, title, state, workflow_state, size, priority, created_at, updated_at) VALUES (?, ?, ?, 'next', 'todo', 'small', 'medium', ?, ?)")
+                    sqlx::query("INSERT INTO tasks (id, key_prefix, rank, title, state, workflow_state, size, priority, created_at, updated_at) VALUES (?, '', ?, ?, 'next', 'todo', 'small', 'medium', ?, ?)")
                         .bind(id)
                         .bind(rank)
                         .bind(title)
@@ -572,7 +575,7 @@ mod tests {
                         .iter()
                         .map(|task| task.id.as_str())
                         .collect::<Vec<_>>(),
-                    ["z-first", "a-second"]
+                    ["1", "2"]
                 );
             });
     }

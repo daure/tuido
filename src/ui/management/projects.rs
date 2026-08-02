@@ -14,7 +14,8 @@ use tuicore::{
 
 use super::ManagementDialogKind;
 use super::common::{
-    ManagementPane, dropdown_single_optional, management_empty_state, person_choices,
+    ManagementPane, RequiredTextInput, dropdown_single_optional, management_empty_state,
+    person_choices,
 };
 use crate::{
     app::{AppContext, AppMsg},
@@ -520,16 +521,23 @@ fn project_table(rows: Vec<Project>, people: &[Person], selected: Option<&str>) 
     table
 }
 
+type ProjectKeyCommit = Box<dyn Fn(&str)>;
+
 pub(crate) struct ProjectKeyInput {
     input: TextInput<AppMsg>,
-    on_commit: Option<Box<dyn Fn(&str)>>,
+    committed_value: String,
+    on_commit: Option<ProjectKeyCommit>,
+    on_invalid: Option<ProjectKeyCommit>,
 }
 
 impl ProjectKeyInput {
     pub(crate) fn new(input: TextInput<AppMsg>) -> Self {
+        let committed_value = input.current_value().to_string();
         Self {
             input,
+            committed_value,
             on_commit: None,
+            on_invalid: None,
         }
     }
 
@@ -538,9 +546,9 @@ impl ProjectKeyInput {
         self
     }
 
-    fn normalize(&mut self) {
-        self.input
-            .set_value(self.input.current_value().to_uppercase());
+    pub(crate) fn on_invalid(mut self, handler: impl Fn(&str) + 'static) -> Self {
+        self.on_invalid = Some(Box::new(handler));
+        self
     }
 }
 
@@ -568,9 +576,23 @@ impl TuiNode<AppMsg> for ProjectKeyInput {
             );
         let outcome = self.input.event(event, ctx);
         if commit {
-            self.normalize();
-            if let Some(on_commit) = &self.on_commit {
-                on_commit(self.input.current_value());
+            let value = self.input.current_value().to_string();
+            if Project::is_valid_key(&value) {
+                self.committed_value = Project::normalize_key(&value);
+                self.input.set_value(self.committed_value.clone());
+                if let Some(on_commit) = &self.on_commit {
+                    on_commit(&self.committed_value);
+                }
+            } else {
+                self.input.set_value(self.committed_value.clone());
+                if let Some(on_invalid) = &self.on_invalid {
+                    on_invalid(&self.committed_value);
+                }
+                ctx.notify(tuicore::Notification::warning(
+                    "Invalid project key",
+                    "Use 2-5 characters without spaces.",
+                ));
+                ctx.request_redraw();
             }
         }
         outcome
@@ -620,6 +642,7 @@ fn project_detail_form(
                     .value(project.key.clone())
                     .placeholder("Project key")
                     .panel("Key")
+                    .max_len(5)
                     .hotkey(keys::PROJECT_KEY_FIELD.hotkey()),
             )
             .on_commit({
@@ -634,18 +657,22 @@ fn project_detail_form(
         )
         .child(
             "name",
-            TextInput::new()
-                .value(project.name.clone())
-                .placeholder("Project name")
-                .panel("Name")
-                .hotkey(keys::PROJECT_NAME_FIELD.hotkey())
-                .on_edit_end({
+            RequiredTextInput::new(
+                TextInput::new()
+                    .value(project.name.clone())
+                    .placeholder("Project name")
+                    .panel("Name")
+                    .hotkey(keys::PROJECT_NAME_FIELD.hotkey()),
+                "Invalid project name",
+                {
                     let patches = Rc::clone(&patches);
                     move |value| {
-                        patches.borrow_mut().push(ProjectPatch::Name(value));
-                        AppMsg::Noop
+                        patches
+                            .borrow_mut()
+                            .push(ProjectPatch::Name(value.to_string()));
                     }
-                }),
+                },
+            ),
             FlexItem::fixed(3),
         )
         .child(
@@ -691,56 +718,38 @@ mod tests {
     use tuicore::{FocusRequest, HotkeyEvent, Key, KeyEvent, KeyModifiers};
 
     #[test]
-    fn project_key_input_becomes_uppercase_after_pressing_enter() {
-        let commits = Rc::new(RefCell::new(Vec::new()));
-        let mut input = ProjectKeyInput::new(TextInput::new().focused(true)).on_commit({
-            let commits = Rc::clone(&commits);
-            move |value| commits.borrow_mut().push(value.to_string())
-        });
-
+    fn invalid_project_key_commit_restores_original_and_notifies() {
+        let reverted = Rc::new(RefCell::new(None));
+        let mut input =
+            ProjectKeyInput::new(TextInput::new().value("CORE").focused(true).max_len(5))
+                .on_invalid({
+                    let reverted = Rc::clone(&reverted);
+                    move |value| *reverted.borrow_mut() = Some(value.to_string())
+                });
         input.event(
             &TuiEvent::Key(KeyEvent::from(Key::Enter)),
             &mut EventCtx::default(),
         );
-        assert!(input.input.insert_mode());
-        input.event(
-            &TuiEvent::Key(KeyEvent::from(Key::Char('c'))),
-            &mut EventCtx::default(),
-        );
-        assert_eq!(input.input.current_value(), "c");
+        for _ in 0..3 {
+            input.event(
+                &TuiEvent::Key(KeyEvent::from(Key::Backspace)),
+                &mut EventCtx::default(),
+            );
+        }
+        let mut ctx = EventCtx::default();
 
-        input.event(
-            &TuiEvent::Key(KeyEvent::from(Key::Enter)),
-            &mut EventCtx::default(),
-        );
+        let outcome = input.event(&TuiEvent::Key(KeyEvent::from(Key::Enter)), &mut ctx);
+        let effects = tuicore::DispatchEffects::from_event_ctx(outcome, ctx);
 
-        assert_eq!(input.input.current_value(), "C");
-        assert_eq!(*commits.borrow(), vec!["C"]);
-    }
-
-    #[test]
-    fn project_key_input_does_not_commit_on_escape() {
-        let commits = Rc::new(RefCell::new(Vec::new()));
-        let mut input = ProjectKeyInput::new(TextInput::new().focused(true)).on_commit({
-            let commits = Rc::clone(&commits);
-            move |value| commits.borrow_mut().push(value.to_string())
-        });
-        input.event(
-            &TuiEvent::Key(KeyEvent::from(Key::Enter)),
-            &mut EventCtx::default(),
+        assert_eq!(input.input.current_value(), "CORE");
+        assert_eq!(reverted.borrow().as_deref(), Some("CORE"));
+        assert_eq!(
+            effects.notifications,
+            vec![tuicore::Notification::warning(
+                "Invalid project key",
+                "Use 2-5 characters without spaces.",
+            )]
         );
-        input.event(
-            &TuiEvent::Key(KeyEvent::from(Key::Char('c'))),
-            &mut EventCtx::default(),
-        );
-
-        input.event(
-            &TuiEvent::Key(KeyEvent::from(Key::Esc)),
-            &mut EventCtx::default(),
-        );
-
-        assert_eq!(input.input.current_value(), "c");
-        assert!(commits.borrow().is_empty());
     }
 
     #[test]

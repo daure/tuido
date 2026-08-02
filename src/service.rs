@@ -12,7 +12,7 @@ use uuid::Uuid;
 use crate::{
     domain::{
         ChecklistItem, Person, PersonPatch, Project, ProjectPatch, Tag, TagPatch, Task, TaskPatch,
-        TaskRank, WorkspaceSnapshot,
+        TaskRank, WorkspaceSnapshot, task_identifier, task_number,
     },
     storage::{self, SqlDialect, Storage},
 };
@@ -21,8 +21,9 @@ mod settings;
 mod validation;
 
 use validation::{
-    task_matches_workspace_filter, validate_required, validate_task_checklist, validate_task_patch,
-    validate_task_temporal_fields, validate_task_update, validate_workspace_filter,
+    task_matches_workspace_filter, validate_project_key, validate_required,
+    validate_task_checklist, validate_task_patch, validate_task_temporal_fields,
+    validate_task_update, validate_workspace_filter,
 };
 
 pub type ServiceResult<T> = Result<T, ServiceError>;
@@ -123,13 +124,12 @@ pub struct WorkspaceFilter {
     pub person_ids: Vec<String>,
     pub project_ids: Vec<String>,
     pub tag_ids: Vec<String>,
-    pub due_before: Option<String>,
-    pub due_after: Option<String>,
     pub query: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct TaskView {
+    /// Stable task ID formatted as PROJECT_KEY-number, or number when no project was set at creation.
     pub id: String,
     /// Creation time as Unix epoch nanoseconds.
     pub created_at: String,
@@ -140,13 +140,11 @@ pub struct TaskView {
     pub state: String,
     pub size: String,
     pub priority: String,
-    pub start_date: Option<String>,
-    pub due_date: Option<String>,
     pub snoozed_until: Option<String>,
     /// People involved in this task besides the workspace owner. These are related people, not
     /// assignees or owners.
     pub people_ids: Vec<String>,
-    pub project_ids: Vec<String>,
+    pub project_id: Option<String>,
     pub tag_ids: Vec<String>,
     /// Ordered checklist tree. Children are ordered as shown in the task detail view.
     pub checklist: Vec<ChecklistItemView>,
@@ -211,14 +209,11 @@ pub struct TaskCreate {
     #[serde(default = "default_priority")]
     #[schemars(extend("enum" = ["low", "medium", "high"]))]
     pub priority: String,
-    pub start_date: Option<String>,
-    pub due_date: Option<String>,
     pub snoozed_until: Option<String>,
     #[serde(default)]
     /// People involved in this task besides the workspace owner; not assignees or owners.
     pub people_ids: Vec<String>,
-    #[serde(default)]
-    pub project_ids: Vec<String>,
+    pub project_id: Option<String>,
     #[serde(default)]
     pub tag_ids: Vec<String>,
     #[serde(default)]
@@ -237,6 +232,7 @@ fn default_priority() -> String {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct TaskUpdate {
+    /// Task ID formatted as PROJECT_KEY-number, or number for an unprefixed task.
     pub id: String,
     #[schemars(schema_with = "revision_schema")]
     pub expected_revision: u64,
@@ -248,14 +244,11 @@ pub struct TaskUpdate {
     pub size: String,
     #[schemars(extend("enum" = ["low", "medium", "high"]))]
     pub priority: String,
-    pub start_date: Option<String>,
-    pub due_date: Option<String>,
     pub snoozed_until: Option<String>,
     #[serde(default)]
     /// People involved in this task besides the workspace owner; not assignees or owners.
     pub people_ids: Vec<String>,
-    #[serde(default)]
-    pub project_ids: Vec<String>,
+    pub project_id: Option<String>,
     #[serde(default)]
     pub tag_ids: Vec<String>,
     #[serde(default)]
@@ -281,6 +274,8 @@ fn default_true() -> bool {
 }
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct ProjectInput {
+    /// Project code used as the prefix for new task IDs. Must be 2-5 characters without whitespace.
+    #[schemars(extend("minLength" = 2, "maxLength" = 5, "pattern" = "^\\S+$"))]
     pub key: String,
     pub name: String,
     #[serde(default)]
@@ -368,7 +363,7 @@ impl TuidoService {
         for row in due {
             let result = sqlx::query(AssertSqlSafe(update.as_str()))
                 .bind(now_text())
-                .bind(row.try_get::<String, _>("id").map_err(storage_error)?)
+                .bind(row.try_get::<i64, _>("id").map_err(storage_error)?)
                 .bind(row.try_get::<i64, _>("revision").map_err(storage_error)?)
                 .bind(&cutoff)
                 .execute(&mut *tx)
@@ -494,8 +489,21 @@ impl TuidoService {
 
     async fn revisions(&self) -> ServiceResult<HashMap<String, u64>> {
         let mut result = HashMap::new();
+        let task_rows = sqlx::query("SELECT id, revision, key_prefix FROM tasks")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(storage_error)?;
+        for row in task_rows {
+            let number = row.try_get::<i64, _>("id").map_err(storage_error)?;
+            let key_prefix = row
+                .try_get::<String, _>("key_prefix")
+                .map_err(storage_error)?;
+            result.insert(
+                format!("task:{}", task_identifier(number, Some(&key_prefix))),
+                row.try_get::<i64, _>("revision").map_err(storage_error)? as u64,
+            );
+        }
         for (kind, table) in [
-            ("task", "tasks"),
             ("person", "people"),
             ("project", "projects"),
             ("tag", "tags"),
@@ -525,18 +533,17 @@ impl TuidoService {
         if task.title.trim().is_empty() {
             return Err(ServiceError::Invalid("task title is required".into()));
         }
-        validate_task_temporal_fields(
-            task.state,
-            task.start_date.as_deref(),
-            task.due_date.as_deref(),
-            task.snoozed_until.is_some(),
-        )?;
+        validate_task_temporal_fields(task.state, task.snoozed_until.is_some())?;
         normalize_task_links(&mut task.links);
         normalize_task_checklist(&mut task.checklist);
         validation::validate_task_links(&task.links)?;
         validate_task_checklist(&task.checklist)?;
+        if task.project_id.is_none() {
+            task.project_id = self.default_project_id().await?;
+        }
+        let project_key = self.project_key(task.project_id.as_deref()).await?;
         let sql = format!(
-            "INSERT INTO tasks (id, rank, title, state, workflow_state, rejected, size, priority, start_date, due_date, snoozed_until, description, created_at, updated_at) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
+            "INSERT INTO tasks (id, key_prefix, rank, title, state, workflow_state, rejected, size, priority, snoozed_until, description, created_at, updated_at) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
             self.dialect.placeholder(1),
             self.dialect.placeholder(2),
             self.dialect.placeholder(3),
@@ -549,13 +556,14 @@ impl TuidoService {
             self.dialect.placeholder(10),
             self.dialect.placeholder(11),
             self.dialect.placeholder(12),
-            self.dialect.placeholder(13),
-            self.dialect.placeholder(14)
+            self.dialect.placeholder(13)
         );
         let now = now_text();
         task.created_at.clone_from(&now);
         task.updated_at.clone_from(&now);
         let mut tx = self.pool.begin().await.map_err(storage_error)?;
+        let number = self.next_task_number(&mut tx).await?;
+        task.id = task_identifier(number, project_key.as_deref());
         bump_workspace(&mut tx, self.dialect).await?;
         let row = sqlx::query("SELECT COALESCE(MAX(rank), 0) + 1 AS rank FROM tasks")
             .fetch_one(&mut *tx)
@@ -563,7 +571,8 @@ impl TuidoService {
             .map_err(storage_error)?;
         task.rank = row.try_get("rank").map_err(storage_error)?;
         sqlx::query(AssertSqlSafe(sql.as_str()))
-            .bind(&task.id)
+            .bind(number)
+            .bind(project_key.as_deref().unwrap_or_default())
             .bind(task.rank)
             .bind(&task.title)
             .bind(storage_legacy_state(task.state.id()))
@@ -571,8 +580,6 @@ impl TuidoService {
             .bind(task.state == crate::domain::TaskState::Rejected)
             .bind(task.size.id())
             .bind(task.priority.id())
-            .bind(&task.start_date)
-            .bind(&task.due_date)
             .bind(task.snoozed_until.map(crate::snooze::format_datetime))
             .bind(&task.description)
             .bind(&now)
@@ -588,14 +595,8 @@ impl TuidoService {
             &task.people_ids,
         )
         .await?;
-        self.replace_links(
-            &mut tx,
-            "task_projects",
-            "project_id",
-            &task.id,
-            &task.project_ids,
-        )
-        .await?;
+        self.replace_task_project(&mut tx, &task.id, task.project_id.as_deref())
+            .await?;
         self.replace_links(&mut tx, "task_tags", "tag_id", &task.id, &task.tag_ids)
             .await?;
         self.replace_task_links(&mut tx, &task.id, &task.links)
@@ -623,7 +624,7 @@ impl TuidoService {
             .transpose()
             .map_err(|e| ServiceError::Invalid(e.to_string()))?;
         self.create_task_entity(Task {
-            id: Uuid::new_v4().to_string(),
+            id: String::new(),
             rank: 0,
             created_at: String::new(),
             updated_at: String::new(),
@@ -631,11 +632,9 @@ impl TuidoService {
             state,
             size,
             priority,
-            start_date: input.start_date,
-            due_date: input.due_date,
             snoozed_until,
             people_ids: input.people_ids,
-            project_ids: input.project_ids,
+            project_id: input.project_id,
             tag_ids: input.tag_ids,
             checklist: Vec::new(),
             links: input.links,
@@ -655,10 +654,11 @@ impl TuidoService {
             .map_err(|error| ServiceError::Invalid(error.to_string()))?
             .map(crate::snooze::format_datetime);
         let mut tx = self.pool.begin().await.map_err(storage_error)?;
-        self.claim(&mut tx, "tasks", "task", &input.id, input.expected_revision)
+        let number = parse_task_number(&input.id)?;
+        self.claim_task(&mut tx, &input.id, input.expected_revision)
             .await?;
         let sql = format!(
-            "UPDATE tasks SET title = {}, state = {}, workflow_state = {}, rejected = {}, size = {}, priority = {}, start_date = {}, due_date = {}, snoozed_until = {}, description = {}, updated_at = {} WHERE id = {}",
+            "UPDATE tasks SET title = {}, state = {}, workflow_state = {}, rejected = {}, size = {}, priority = {}, snoozed_until = {}, description = {}, updated_at = {} WHERE id = {}",
             self.dialect.placeholder(1),
             self.dialect.placeholder(2),
             self.dialect.placeholder(3),
@@ -668,9 +668,7 @@ impl TuidoService {
             self.dialect.placeholder(7),
             self.dialect.placeholder(8),
             self.dialect.placeholder(9),
-            self.dialect.placeholder(10),
-            self.dialect.placeholder(11),
-            self.dialect.placeholder(12)
+            self.dialect.placeholder(10)
         );
         sqlx::query(AssertSqlSafe(sql.as_str()))
             .bind(input.title.trim())
@@ -679,12 +677,10 @@ impl TuidoService {
             .bind(input.state == "rejected")
             .bind(&input.size)
             .bind(&input.priority)
-            .bind(&input.start_date)
-            .bind(&input.due_date)
             .bind(&snoozed_until)
             .bind(&input.description)
             .bind(now_text())
-            .bind(&input.id)
+            .bind(number)
             .execute(&mut *tx)
             .await
             .map_err(storage_error)?;
@@ -696,14 +692,8 @@ impl TuidoService {
             &input.people_ids,
         )
         .await?;
-        self.replace_links(
-            &mut tx,
-            "task_projects",
-            "project_id",
-            &input.id,
-            &input.project_ids,
-        )
-        .await?;
+        self.replace_task_project(&mut tx, &input.id, input.project_id.as_deref())
+            .await?;
         self.replace_links(&mut tx, "task_tags", "tag_id", &input.id, &input.tag_ids)
             .await?;
         self.replace_task_links(&mut tx, &input.id, &input.links)
@@ -727,15 +717,16 @@ impl TuidoService {
         }
         validate_task_patch(&patch)?;
         let mut tx = self.pool.begin().await.map_err(storage_error)?;
-        self.claim(&mut tx, "tasks", "task", &id, expected).await?;
+        let number = parse_task_number(&id)?;
+        self.claim_task(&mut tx, &id, expected).await?;
         let mut related_revisions = HashMap::new();
         match patch {
             TaskPatch::People(ids) => {
                 self.replace_links(&mut tx, "task_people", "person_id", &id, &ids)
                     .await?
             }
-            TaskPatch::Projects(ids) => {
-                self.replace_links(&mut tx, "task_projects", "project_id", &id, &ids)
+            TaskPatch::Project(project_id) => {
+                self.replace_task_project(&mut tx, &id, project_id.as_deref())
                     .await?
             }
             TaskPatch::Tags(tags) => {
@@ -785,7 +776,7 @@ impl TuidoService {
         );
         sqlx::query(AssertSqlSafe(touch.as_str()))
             .bind(now_text())
-            .bind(&id)
+            .bind(number)
             .execute(&mut *tx)
             .await
             .map_err(storage_error)?;
@@ -843,20 +834,15 @@ impl TuidoService {
         let mut revisions = HashMap::new();
         let mut current_ranks = HashSet::new();
         for update in &updates {
-            self.claim(
-                &mut tx,
-                "tasks",
-                "task",
-                &update.rank.id,
-                update.expected_revision,
-            )
-            .await?;
+            let number = parse_task_number(&update.rank.id)?;
+            self.claim_task(&mut tx, &update.rank.id, update.expected_revision)
+                .await?;
             let select = format!(
                 "SELECT rank FROM tasks WHERE id = {}",
                 self.dialect.placeholder(1)
             );
             let row = sqlx::query(AssertSqlSafe(select.as_str()))
-                .bind(&update.rank.id)
+                .bind(number)
                 .fetch_one(&mut *tx)
                 .await
                 .map_err(storage_error)?;
@@ -868,6 +854,7 @@ impl TuidoService {
             ));
         }
         for update in &updates {
+            let number = parse_task_number(&update.rank.id)?;
             let sql = format!(
                 "UPDATE tasks SET rank = {}, updated_at = {} WHERE id = {}",
                 self.dialect.placeholder(1),
@@ -877,7 +864,7 @@ impl TuidoService {
             sqlx::query(AssertSqlSafe(sql.as_str()))
                 .bind(update.rank.rank)
                 .bind(now_text())
-                .bind(&update.rank.id)
+                .bind(number)
                 .execute(&mut *tx)
                 .await
                 .map_err(storage_error)?;
@@ -912,14 +899,39 @@ impl TuidoService {
     }
 
     pub async fn delete_task(&self, id: &str, expected: u64) -> ServiceResult<()> {
-        self.delete("tasks", "task", id, expected).await
+        let mut tx = self.pool.begin().await.map_err(storage_error)?;
+        let number = parse_task_number(id)?;
+        self.claim_task(&mut tx, id, expected).await?;
+        let sql = format!(
+            "DELETE FROM tasks WHERE id = {} AND revision = {}",
+            self.dialect.placeholder(1),
+            self.dialect.placeholder(2)
+        );
+        let rows = sqlx::query(AssertSqlSafe(sql.as_str()))
+            .bind(number)
+            .bind((expected + 1) as i64)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage_error)?
+            .rows_affected();
+        if rows != 1 {
+            return Err(ServiceError::Conflict {
+                entity: "task",
+                id: id.into(),
+                expected,
+                actual: self.actual_task_revision(&mut tx, number).await?,
+            });
+        }
+        bump_workspace(&mut tx, self.dialect).await?;
+        tx.commit().await.map_err(storage_error)
     }
     pub async fn get_task(&self, id: &str) -> ServiceResult<Versioned<TaskView>> {
+        let number = parse_task_number(id)?;
         self.workspace()
             .await?
             .tasks
             .into_iter()
-            .find(|v| v.value.id == id)
+            .find(|task| task_number(&task.value.id) == Some(number))
             .ok_or_else(|| ServiceError::NotFound {
                 entity: "task",
                 id: id.into(),
@@ -1044,7 +1056,12 @@ impl TuidoService {
         &self,
         project: Project,
     ) -> ServiceResult<Versioned<ProjectView>> {
-        if project.key.is_empty() || project.name.is_empty() {
+        if !Project::is_valid_key(&project.key) {
+            return Err(ServiceError::Invalid(
+                "project key must be 2-5 characters without spaces".into(),
+            ));
+        }
+        if project.name.is_empty() {
             return Err(ServiceError::Invalid(
                 "project key and name are required".into(),
             ));
@@ -1086,7 +1103,7 @@ impl TuidoService {
         expected: u64,
         input: ProjectInput,
     ) -> ServiceResult<Versioned<ProjectView>> {
-        validate_required("project key", &input.key)?;
+        validate_project_key(&input.key)?;
         validate_required("project name", &input.name)?;
         self.update_simple(
             "projects",
@@ -1118,7 +1135,7 @@ impl TuidoService {
         patch: ProjectPatch,
     ) -> ServiceResult<u64> {
         match &patch {
-            ProjectPatch::Key(value) => validate_required("project key", value)?,
+            ProjectPatch::Key(value) => validate_project_key(value)?,
             ProjectPatch::Name(value) => validate_required("project name", value)?,
             ProjectPatch::Description(_) | ProjectPatch::LeadPerson(_) => {}
         }
@@ -1132,6 +1149,7 @@ impl TuidoService {
             .await?;
         Ok(expected + 1)
     }
+
     pub async fn delete_project(&self, id: &str, expected: u64) -> ServiceResult<()> {
         self.delete("projects", "project", id, expected).await
     }
@@ -1213,6 +1231,88 @@ impl TuidoService {
         self.delete("tags", "tag", id, expected).await
     }
 
+    async fn project_key(&self, project_id: Option<&str>) -> ServiceResult<Option<String>> {
+        let Some(project_id) = project_id else {
+            return Ok(None);
+        };
+        let sql = format!(
+            "SELECT key FROM projects WHERE id = {}",
+            self.dialect.placeholder(1)
+        );
+        sqlx::query(AssertSqlSafe(sql.as_str()))
+            .bind(project_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(storage_error)?
+            .map(|row| row.try_get("key").map_err(storage_error))
+            .transpose()
+    }
+
+    async fn next_task_number(&self, tx: &mut Transaction<'_, Any>) -> ServiceResult<i64> {
+        let row = sqlx::query(
+            "UPDATE task_id_sequence SET next_id = next_id + 1 WHERE singleton = 1 RETURNING next_id - 1 AS id",
+        )
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(storage_error)?;
+        row.try_get("id").map_err(storage_error)
+    }
+
+    async fn claim_task(
+        &self,
+        tx: &mut Transaction<'_, Any>,
+        identifier: &str,
+        expected: u64,
+    ) -> ServiceResult<()> {
+        let number = parse_task_number(identifier)?;
+        let sql = format!(
+            "UPDATE tasks SET revision = revision + 1 WHERE id = {} AND revision = {}",
+            self.dialect.placeholder(1),
+            self.dialect.placeholder(2)
+        );
+        let rows = sqlx::query(AssertSqlSafe(sql.as_str()))
+            .bind(number)
+            .bind(expected as i64)
+            .execute(&mut **tx)
+            .await
+            .map_err(storage_error)?
+            .rows_affected();
+        if rows == 1 {
+            return Ok(());
+        }
+        let actual = self.actual_task_revision(tx, number).await?;
+        Err(if actual.is_none() {
+            ServiceError::NotFound {
+                entity: "task",
+                id: identifier.into(),
+            }
+        } else {
+            ServiceError::Conflict {
+                entity: "task",
+                id: identifier.into(),
+                expected,
+                actual,
+            }
+        })
+    }
+
+    async fn actual_task_revision(
+        &self,
+        tx: &mut Transaction<'_, Any>,
+        number: i64,
+    ) -> ServiceResult<Option<u64>> {
+        let sql = format!(
+            "SELECT revision FROM tasks WHERE id = {}",
+            self.dialect.placeholder(1)
+        );
+        Ok(sqlx::query(AssertSqlSafe(sql.as_str()))
+            .bind(number)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(storage_error)?
+            .map(|row| row.get::<i64, _>("revision") as u64))
+    }
+
     async fn claim(
         &self,
         tx: &mut Transaction<'_, Any>,
@@ -1276,12 +1376,13 @@ impl TuidoService {
         task_id: &str,
         ids: &[String],
     ) -> ServiceResult<()> {
+        let task_number = parse_task_number(task_id)?;
         let del = format!(
             "DELETE FROM {table} WHERE task_id = {}",
             self.dialect.placeholder(1)
         );
         sqlx::query(AssertSqlSafe(del.as_str()))
-            .bind(task_id)
+            .bind(task_number)
             .execute(&mut **tx)
             .await
             .map_err(storage_error)?;
@@ -1293,9 +1394,41 @@ impl TuidoService {
         );
         for (index, id) in ids.iter().enumerate() {
             sqlx::query(AssertSqlSafe(ins.as_str()))
-                .bind(task_id)
+                .bind(task_number)
                 .bind(id)
                 .bind(index as i64)
+                .execute(&mut **tx)
+                .await
+                .map_err(storage_error)?;
+        }
+        Ok(())
+    }
+
+    async fn replace_task_project(
+        &self,
+        tx: &mut Transaction<'_, Any>,
+        task_id: &str,
+        project_id: Option<&str>,
+    ) -> ServiceResult<()> {
+        let task_number = parse_task_number(task_id)?;
+        let delete = format!(
+            "DELETE FROM task_projects WHERE task_id = {}",
+            self.dialect.placeholder(1)
+        );
+        sqlx::query(AssertSqlSafe(delete.as_str()))
+            .bind(task_number)
+            .execute(&mut **tx)
+            .await
+            .map_err(storage_error)?;
+        if let Some(project_id) = project_id {
+            let insert = format!(
+                "INSERT INTO task_projects (task_id, project_id, sort_order) VALUES ({}, {}, 0)",
+                self.dialect.placeholder(1),
+                self.dialect.placeholder(2)
+            );
+            sqlx::query(AssertSqlSafe(insert.as_str()))
+                .bind(task_number)
+                .bind(project_id)
                 .execute(&mut **tx)
                 .await
                 .map_err(storage_error)?;
@@ -1308,12 +1441,13 @@ impl TuidoService {
         task_id: &str,
         links: &[String],
     ) -> ServiceResult<()> {
+        let task_number = parse_task_number(task_id)?;
         let delete = format!(
             "DELETE FROM task_links WHERE task_id = {}",
             self.dialect.placeholder(1)
         );
         sqlx::query(AssertSqlSafe(delete.as_str()))
-            .bind(task_id)
+            .bind(task_number)
             .execute(&mut **tx)
             .await
             .map_err(storage_error)?;
@@ -1324,7 +1458,7 @@ impl TuidoService {
         );
         for link in links {
             sqlx::query(AssertSqlSafe(insert.as_str()))
-                .bind(task_id)
+                .bind(task_number)
                 .bind(link)
                 .execute(&mut **tx)
                 .await
@@ -1338,12 +1472,13 @@ impl TuidoService {
         task_id: &str,
         items: &[ChecklistItem],
     ) -> ServiceResult<()> {
+        let task_number = parse_task_number(task_id)?;
         let delete = format!(
             "DELETE FROM task_checklist_items WHERE task_id = {}",
             self.dialect.placeholder(1)
         );
         sqlx::query(AssertSqlSafe(delete.as_str()))
-            .bind(task_id)
+            .bind(task_number)
             .execute(&mut **tx)
             .await
             .map_err(storage_error)?;
@@ -1358,7 +1493,7 @@ impl TuidoService {
         for (position, item) in items.iter().enumerate() {
             sqlx::query(AssertSqlSafe(insert.as_str()))
                 .bind(&item.id)
-                .bind(task_id)
+                .bind(task_number)
                 .bind(position as i64)
                 .bind(&item.text)
                 .bind(item.checked)
@@ -1376,7 +1511,7 @@ impl TuidoService {
             sqlx::query(AssertSqlSafe(update_parent.as_str()))
                 .bind(&item.parent_id)
                 .bind(&item.id)
-                .bind(task_id)
+                .bind(task_number)
                 .execute(&mut **tx)
                 .await
                 .map_err(storage_error)?;
@@ -1398,7 +1533,10 @@ impl TuidoService {
                 "DELETE FROM task_people WHERE person_id = ",
                 "UPDATE projects SET lead_person_id = NULL WHERE lead_person_id = ",
             ],
-            "projects" => vec!["DELETE FROM task_projects WHERE project_id = "],
+            "projects" => vec![
+                "DELETE FROM task_projects WHERE project_id = ",
+                "DELETE FROM app_settings WHERE key = 'tasks.default_project' AND value = ",
+            ],
             "tags" => vec!["DELETE FROM task_tags WHERE tag_id = "],
             _ => Vec::new(),
         };
@@ -1532,11 +1670,9 @@ fn task_view(v: Task) -> TaskView {
         state: v.state.id().into(),
         size: v.size.id().into(),
         priority: v.priority.id().into(),
-        start_date: v.start_date,
-        due_date: v.due_date,
         snoozed_until: v.snoozed_until.map(crate::snooze::format_datetime),
         people_ids: v.people_ids,
-        project_ids: v.project_ids,
+        project_id: v.project_id,
         tag_ids: v.tag_ids,
         checklist,
         links: v.links,
@@ -1603,6 +1739,13 @@ fn storage_legacy_state(v: &str) -> &str {
         _ => "next",
     }
 }
+fn parse_task_number(identifier: &str) -> ServiceResult<i64> {
+    task_number(identifier).ok_or_else(|| {
+        ServiceError::Invalid(format!(
+            "task id must end with a positive integer: {identifier}"
+        ))
+    })
+}
 fn now_text() -> String {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1633,6 +1776,7 @@ async fn apply_task_patch(
     id: &str,
     patch: TaskPatch,
 ) -> ServiceResult<()> {
+    let number = parse_task_number(id)?;
     let (columns, values): (Vec<&str>, Vec<Value>) = match patch {
         TaskPatch::Title(v) => (vec!["title"], vec![Value::Text(v.trim().into())]),
         TaskPatch::Description(v) => (vec!["description"], vec![Value::Text(v)]),
@@ -1647,8 +1791,6 @@ async fn apply_task_patch(
         ),
         TaskPatch::Size(v) => (vec!["size"], vec![Value::Text(v.id().into())]),
         TaskPatch::Priority(v) => (vec!["priority"], vec![Value::Text(v.id().into())]),
-        TaskPatch::StartDate(v) => (vec!["start_date"], vec![Value::Optional(v)]),
-        TaskPatch::EndDate(v) => (vec!["due_date"], vec![Value::Optional(v)]),
         TaskPatch::Snooze { until, .. } => (
             vec!["state", "workflow_state", "rejected", "snoozed_until"],
             vec![
@@ -1668,7 +1810,7 @@ async fn apply_task_patch(
             ],
         ),
         TaskPatch::People(_)
-        | TaskPatch::Projects(_)
+        | TaskPatch::Project(_)
         | TaskPatch::Tags(_)
         | TaskPatch::Checklist(_)
         | TaskPatch::Links(_) => {
@@ -1685,9 +1827,9 @@ async fn apply_task_patch(
         );
         let q = sqlx::query(AssertSqlSafe(sql.as_str()));
         match value {
-            Value::Text(v) => q.bind(v).bind(id).execute(&mut **tx).await,
-            Value::Bool(v) => q.bind(v).bind(id).execute(&mut **tx).await,
-            Value::Optional(v) => q.bind(v).bind(id).execute(&mut **tx).await,
+            Value::Text(v) => q.bind(v).bind(number).execute(&mut **tx).await,
+            Value::Bool(v) => q.bind(v).bind(number).execute(&mut **tx).await,
+            Value::Optional(v) => q.bind(v).bind(number).execute(&mut **tx).await,
         }
         .map_err(storage_error)?;
     }

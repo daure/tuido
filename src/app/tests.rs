@@ -16,11 +16,9 @@ fn test_task() -> Task {
         state: TaskState::InProgress,
         size: TaskSize::Small,
         priority: TaskPriority::Medium,
-        start_date: None,
-        due_date: None,
         snoozed_until: None,
         people_ids: Vec::new(),
-        project_ids: Vec::new(),
+        project_id: None,
         tag_ids: Vec::new(),
         checklist: Vec::new(),
         links: Vec::new(),
@@ -331,6 +329,37 @@ fn identical_workspace_refresh_does_not_rebuild_selected_task_detail() {
     assert!(Rc::ptr_eq(&original_patches, &workspace.detail().patches));
 }
 
+#[test]
+fn new_people_and_projects_refresh_focused_task_detail_options() {
+    let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+        tasks: vec![test_task()],
+        people: vec![],
+        projects: vec![],
+        tags: vec![],
+    });
+    let mut workspace = TaskWorkspace::new(context);
+    let original_patches = Rc::clone(&workspace.detail().patches);
+    let person = Person::new("person-1".into(), "Ada".into(), String::new());
+    let project = Project::new(
+        "project-1".into(),
+        "CORE".into(),
+        "Core".into(),
+        String::new(),
+    );
+    store
+        .borrow_mut()
+        .dispatch(AppEvent::PersonCreated(person.clone()));
+    store
+        .borrow_mut()
+        .dispatch(AppEvent::ProjectCreated(project.clone()));
+
+    workspace.layout(Rect::new(0, 0, 100, 30), &mut LayoutCtx::new());
+
+    assert!(!Rc::ptr_eq(&original_patches, &workspace.detail().patches));
+    assert_eq!(workspace.detail().people_snapshot, vec![person]);
+    assert_eq!(workspace.detail().projects_snapshot, vec![project]);
+}
+
 fn rendered_area_has_focus_style(node: &impl TuiNode<AppMsg>, canvas: Rect, area: Rect) -> bool {
     let mut terminal = Terminal::new(TestBackend::new(canvas.width, canvas.height))
         .expect("terminal should build");
@@ -348,7 +377,7 @@ fn rendered_area_has_focus_style(node: &impl TuiNode<AppMsg>, canvas: Rect, area
 }
 
 #[test]
-fn task_toolbar_shows_icon_view_label_and_new_binding() {
+fn task_header_shows_filters_to_the_left_of_new() {
     assert_eq!(
         TaskView::OPTIONS,
         [
@@ -370,25 +399,39 @@ fn task_toolbar_shows_icon_view_label_and_new_binding() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
-        projects: Vec::new(),
+        projects: vec![Project::new(
+            "project-1".into(),
+            "APP".into(),
+            "Application".into(),
+            String::new(),
+        )],
         tags: Vec::new(),
     });
-    let mut workspace = TaskWorkspace::new(context);
+    let mut app = App::new(context.store, context.coordinator);
     let area = Rect::new(0, 0, 80, 40);
 
-    workspace.layout(area, &mut LayoutCtx::new());
-    let text = rendered_text(&workspace, area);
+    app.layout(area, &mut LayoutCtx::new());
+    let text = rendered_text(&app, area);
 
     for expected in [
         " Active",
         &keys::TASK_VIEW_MENU.label(),
         &keys::TASK_LABEL_FILTER.label(),
-        &keys::TASK_QUICK_CREATE.label(),
+        "󰲋 Project",
         " Labels",
         "New",
     ] {
-        assert!(text.contains(expected), "missing toolbar text: {expected}");
+        assert!(
+            text.contains(expected),
+            "missing header text: {expected}; rendered: {text:?}"
+        );
     }
+    let project = text
+        .find("󰲋 Project")
+        .expect("project filter should render");
+    let labels = text.find(" Labels").expect("label filter should render");
+    let new = text.find("New").expect("new button should render");
+    assert!(project < labels && labels < new);
     assert!(!text.contains("View:"));
     assert!(!text.contains("Resolve"));
     assert!(!text.contains("Permanently"));
@@ -405,8 +448,8 @@ fn task_label_filter_uses_and_logic_after_state_filtering() {
     let tasks = [active_both, active_one, backlog_both];
     let labels = ["api".to_string(), "urgent".to_string()];
 
-    let active = task_rows_for_view(&tasks, TaskView::Active, &labels);
-    let backlog = task_rows_for_view(&tasks, TaskView::Backlog, &labels);
+    let active = task_rows_for_view(&tasks, TaskView::Active, None, &labels);
+    let backlog = task_rows_for_view(&tasks, TaskView::Backlog, None, &labels);
 
     assert_eq!(
         active
@@ -454,6 +497,50 @@ fn committed_label_filter_refreshes_workspace_rows() {
         ["both"]
     );
     assert_eq!(workspace.detail().task_id.as_deref(), Some("both"));
+}
+
+#[test]
+fn committed_project_filter_selects_one_project_or_none() {
+    let mut first = task_with("first", "First project", TaskState::Todo);
+    first.project_id = Some("project-1".into());
+    let mut second = task_with("second", "Second project", TaskState::Todo);
+    second.project_id = Some("project-2".into());
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![first, second],
+        people: Vec::new(),
+        projects: vec![
+            Project::new(
+                "project-1".into(),
+                "ONE".into(),
+                "One".into(),
+                String::new(),
+            ),
+            Project::new(
+                "project-2".into(),
+                "TWO".into(),
+                "Two".into(),
+                String::new(),
+            ),
+        ],
+        tags: Vec::new(),
+    });
+    let mut workspace = TaskWorkspace::new(context);
+    *workspace.active_project_filter.borrow_mut() = Some("project-2".into());
+
+    assert!(workspace.sync_project_filter_change());
+    assert_eq!(
+        workspace
+            .table()
+            .rows()
+            .iter()
+            .map(|task| task.id.as_str())
+            .collect::<Vec<_>>(),
+        ["second"]
+    );
+
+    *workspace.active_project_filter.borrow_mut() = None;
+    assert!(workspace.sync_project_filter_change());
+    assert_eq!(workspace.table().rows().len(), 2);
 }
 
 #[test]
@@ -584,6 +671,7 @@ fn task_table_uses_persisted_rank_order() {
     let rows = task_rows_for_view(
         &[older_medium, high, newer_medium, low],
         TaskView::Active,
+        None,
         &[],
     );
     let mut table = task_table(rows, None);
@@ -648,14 +736,12 @@ fn yanking_highlighted_task_copies_pretty_resolved_agent_json() {
     highlighted.description = "Full detail\nwith context".into();
     highlighted.size = TaskSize::Big;
     highlighted.priority = TaskPriority::High;
-    highlighted.start_date = None;
-    highlighted.due_date = Some("2026-08-04".into());
     highlighted.snoozed_until = Some(PrimitiveDateTime::new(
         Date::from_calendar_date(2026, time::Month::August, 3).unwrap(),
         time::Time::from_hms(9, 8, 7).unwrap(),
     ));
     highlighted.people_ids = vec![grace.id.clone(), ada.id.clone()];
-    highlighted.project_ids = vec![project_beta.id.clone(), project_alpha.id.clone()];
+    highlighted.project_id = Some(project_alpha.id.clone());
     highlighted.tag_ids = vec![backend.id.clone(), urgent.id.clone()];
     highlighted.links = vec![
         "www.example.com/work".into(),
@@ -688,8 +774,6 @@ fn yanking_highlighted_task_copies_pretty_resolved_agent_json() {
     assert_eq!(json["state"], "snoozed");
     assert_eq!(json["size"], "big");
     assert_eq!(json["priority"], "high");
-    assert!(json["start_date"].is_null());
-    assert_eq!(json["due_date"], "2026-08-04");
     assert_eq!(json["snoozed_until"], "2026-08-03T09:08:07");
     assert_eq!(
         json["people"],
@@ -699,11 +783,8 @@ fn yanking_highlighted_task_copies_pretty_resolved_agent_json() {
         ])
     );
     assert_eq!(
-        json["projects"],
-        serde_json::json!([
-            {"id": "project-beta", "key": "BETA", "name": "Beta", "description": "", "lead": null},
-            {"id": "project-alpha", "key": "ALPHA", "name": "Alpha", "description": "First project", "lead": {"id": "person-grace", "name": "Grace Hopper", "email": "grace@example.com", "active": false}}
-        ])
+        json["project"],
+        serde_json::json!({"id": "project-alpha", "key": "ALPHA", "name": "Alpha", "description": "First project", "lead": {"id": "person-grace", "name": "Grace Hopper", "email": "grace@example.com", "active": false}})
     );
     assert_eq!(
         json["tags"],
@@ -722,7 +803,7 @@ fn yanking_highlighted_task_copies_pretty_resolved_agent_json() {
     for excluded in [
         "revision",
         "people_ids",
-        "project_ids",
+        "project_id",
         "tag_ids",
         "workspace_revision",
         "selected_task_id",
@@ -766,8 +847,8 @@ fn yanking_task_with_missing_relation_copies_descriptive_json_error() {
 }
 
 #[test]
-fn agent_yank_copies_plain_tuido_task_title_command() {
-    let task_id = "d3265cf8-2ca6-4633-855f-1b5102e1231a";
+fn agent_yank_copies_unprojected_numeric_task_command() {
+    let task_id = "1234";
     let task_title = "Add yank agent hotkey";
     let task = task_with(task_id, task_title, TaskState::Todo);
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
@@ -784,7 +865,7 @@ fn agent_yank_copies_plain_tuido_task_title_command() {
         &mut ctx,
     );
     let effects = tuicore::DispatchEffects::from_event_ctx(outcome, ctx);
-    let expected = format!("Tuido execute \"{task_title}\"");
+    let expected = format!("Tuido execute 1234 \"{task_title}\"");
 
     assert_eq!(effects.clipboard.as_deref(), Some(expected.as_str()));
     assert_eq!(
@@ -793,6 +874,37 @@ fn agent_yank_copies_plain_tuido_task_title_command() {
             "Copied to clipboard",
             format!("\"{expected}\"")
         )]
+    );
+}
+
+#[test]
+fn agent_yank_copies_project_key_task_command() {
+    let project = Project::new(
+        "project-1".into(),
+        "proj".into(),
+        "Project".into(),
+        String::new(),
+    );
+    let mut task = task_with("OLD-1234", "Project task", TaskState::Todo);
+    task.project_id = Some(project.id.clone());
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![task],
+        people: Vec::new(),
+        projects: vec![project],
+        tags: Vec::new(),
+    });
+    let mut workspace = TaskWorkspace::new(context);
+
+    let mut ctx = EventCtx::default();
+    let outcome = workspace.event(
+        &TuiEvent::Hotkey(HotkeyEvent::Commit(keys::TASK_AGENT_YANK.hotkey())),
+        &mut ctx,
+    );
+    let effects = tuicore::DispatchEffects::from_event_ctx(outcome, ctx);
+
+    assert_eq!(
+        effects.clipboard.as_deref(),
+        Some("Tuido execute PROJ-1234 \"Project task\"")
     );
 }
 
@@ -1003,45 +1115,94 @@ fn ctrl_x_removes_highlighted_task_link() {
 }
 
 #[test]
-fn task_toolbar_new_button_emits_create_action() {
-    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+fn app_header_new_button_emits_create_action() {
+    let (_runtime, context, store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
         projects: Vec::new(),
         tags: Vec::new(),
     });
-    let mut workspace = TaskWorkspace::new(context);
+    let mut app = App::new(store, Rc::clone(&context.coordinator));
     let mut layout = LayoutCtx::new();
-    workspace.layout(Rect::new(0, 0, 80, 40), &mut layout);
-    let button_path = layout
+    let area = Rect::new(0, 0, 80, 40);
+    app.layout(area, &mut layout);
+    let button = layout
         .focus_targets()
         .iter()
         .find(|target| target.path.keys().iter().any(|part| part.as_str() == "new"))
-        .expect("missing new task toolbar button")
-        .path
-        .clone();
+        .expect("missing app header new button");
+    assert_eq!(button.area.right(), area.right().saturating_sub(1));
+    let button_path = button.path.clone();
 
     let mut create_ctx = EventCtx::default();
-    let create = workspace.dispatch_event(
+    let create = app.dispatch_event(
         &EventRoute::new(button_path.clone()),
         &TuiEvent::Key(Key::Enter.into()),
         &mut create_ctx,
     );
     assert!(create.handled());
-    assert!(matches!(create_ctx.messages(), [AppMsg::OpenCreateTask]));
+    assert!(matches!(
+        create_ctx.messages(),
+        [AppMsg::OpenCreateTask {
+            calendar_date: None
+        }]
+    ));
 
     let mut hotkey_ctx = EventCtx::default();
-    let hotkey = workspace.dispatch_event(
+    let hotkey = app.dispatch_event(
         &EventRoute::new(button_path),
         &TuiEvent::Hotkey(HotkeyEvent::Commit(keys::TASK_QUICK_CREATE.hotkey())),
         &mut hotkey_ctx,
     );
     assert!(hotkey.handled());
-    assert!(matches!(hotkey_ctx.messages(), [AppMsg::OpenCreateTask]));
+    assert!(matches!(
+        hotkey_ctx.messages(),
+        [AppMsg::OpenCreateTask {
+            calendar_date: None
+        }]
+    ));
 }
 
 #[test]
-fn escape_from_task_toolbar_controls_focuses_data_view() {
+fn escape_from_app_header_new_button_focuses_tabs() {
+    let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+        tasks: vec![test_task()],
+        people: Vec::new(),
+        projects: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(store, Rc::clone(&context.coordinator));
+    let mut layout = LayoutCtx::new();
+    app.layout(Rect::new(0, 0, 80, 40), &mut layout);
+    let button_path = layout
+        .focus_targets()
+        .iter()
+        .find(|target| target.path.keys().iter().any(|part| part.as_str() == "new"))
+        .expect("new button should be focusable")
+        .path
+        .clone();
+
+    for key in [
+        KeyEvent::from(Key::Esc),
+        KeyEvent {
+            code: Key::Char('['),
+            modifiers: KeyModifiers::CONTROL,
+        },
+    ] {
+        let mut ctx = EventCtx::default();
+        let outcome = app.dispatch_event(
+            &EventRoute::new(button_path.clone()),
+            &TuiEvent::Key(key),
+            &mut ctx,
+        );
+
+        assert!(outcome.handled());
+        assert_eq!(ctx.focus_request(), Some(&app_tabs_focus_request()));
+    }
+}
+
+#[test]
+fn escape_from_task_toolbar_filters_focuses_data_view() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
@@ -1051,26 +1212,17 @@ fn escape_from_task_toolbar_controls_focuses_data_view() {
     let mut workspace = TaskWorkspace::new(context);
     let mut layout = LayoutCtx::new();
     workspace.layout(Rect::new(0, 0, 80, 40), &mut layout);
-    let toolbar_paths = [
-        layout
-            .focus_targets()
-            .iter()
-            .find(|target| target.path.keys().iter().any(|part| part.as_str() == "new"))
-            .expect("new task button should be focusable")
-            .path
-            .clone(),
-        layout
-            .focus_targets()
-            .iter()
-            .find(|target| {
-                let path = target.path.keys();
-                path.iter().any(|part| part.as_str() == "view")
-                    && path.iter().any(|part| part.as_str() == "trigger")
-            })
-            .expect("task filter button should be focusable")
-            .path
-            .clone(),
-    ];
+    let toolbar_path = layout
+        .focus_targets()
+        .iter()
+        .find(|target| {
+            let path = target.path.keys();
+            path.iter().any(|part| part.as_str() == "view")
+                && path.iter().any(|part| part.as_str() == "trigger")
+        })
+        .expect("task filter button should be focusable")
+        .path
+        .clone();
     let close_keys = [
         KeyEvent::from(Key::Esc),
         KeyEvent {
@@ -1079,22 +1231,149 @@ fn escape_from_task_toolbar_controls_focuses_data_view() {
         },
     ];
 
-    for path in toolbar_paths {
-        for key in close_keys {
-            let mut ctx = EventCtx::default();
-            let outcome = workspace.dispatch_event(
-                &EventRoute::new(path.clone()),
-                &TuiEvent::Key(key),
-                &mut ctx,
-            );
+    for key in close_keys {
+        let mut ctx = EventCtx::default();
+        let outcome = workspace.dispatch_event(
+            &EventRoute::new(toolbar_path.clone()),
+            &TuiEvent::Key(key),
+            &mut ctx,
+        );
 
-            assert!(outcome.handled());
-            assert_eq!(
-                ctx.focus_request(),
-                Some(&initial_task_table_focus_request())
-            );
+        assert!(outcome.handled());
+        assert_eq!(
+            ctx.focus_request(),
+            Some(&initial_task_table_focus_request())
+        );
+    }
+}
+
+#[test]
+fn escape_from_global_filters_focuses_active_tab_content() {
+    let close_keys = [
+        KeyEvent::from(Key::Esc),
+        KeyEvent {
+            code: Key::Char('['),
+            modifiers: KeyModifiers::CONTROL,
+        },
+    ];
+
+    for (active_tab, expected_focus) in [
+        (0, initial_task_table_focus_request()),
+        (CALENDAR_TAB_INDEX, initial_calendar_focus_request()),
+    ] {
+        for component in ["project", "labels"] {
+            for key in close_keys {
+                let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+                    tasks: vec![test_task()],
+                    people: Vec::new(),
+                    projects: vec![Project::new(
+                        "project-1".into(),
+                        "APP".into(),
+                        "Application".into(),
+                        String::new(),
+                    )],
+                    tags: vec![Tag::new("tag-1".into(), "Tag".into())],
+                });
+                let mut filters = TaskFilterControls::new(
+                    context,
+                    Rc::new(RefCell::new(None)),
+                    Rc::new(RefCell::new(Vec::new())),
+                    Rc::new(Cell::new(active_tab)),
+                );
+                let mut layout = LayoutCtx::new();
+                filters.layout(Rect::new(0, 0, 60, 1), &mut layout);
+                let target = layout
+                    .focus_targets()
+                    .iter()
+                    .find(|target| {
+                        let path = target.path.keys();
+                        path.iter().any(|part| part.as_str() == component)
+                            && target.id.as_str() == "field"
+                    })
+                    .expect("global filter should be focusable");
+                if component == "project" {
+                    assert_eq!(target.hotkey_sequences, ["r"]);
+                }
+                let mut ctx = EventCtx::default();
+
+                let outcome = filters.dispatch_event(
+                    &EventRoute::new(target.path.clone()),
+                    &TuiEvent::Key(key),
+                    &mut ctx,
+                );
+
+                assert!(outcome.handled());
+                assert_eq!(ctx.focus_request(), Some(&expected_focus));
+                assert_eq!(ctx.propagation(), Propagation::Stopped);
+            }
         }
     }
+}
+
+#[test]
+fn escape_from_global_filter_focuses_real_calendar_target() {
+    let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+        tasks: vec![test_task()],
+        people: Vec::new(),
+        projects: vec![Project::new(
+            "project-1".into(),
+            "APP".into(),
+            "Application".into(),
+            String::new(),
+        )],
+        tags: Vec::new(),
+    });
+    let mut app = App::new(store, context.coordinator);
+    let area = Rect::new(0, 0, 100, 40);
+    let mut task_layout = LayoutCtx::new();
+    app.layout(area, &mut task_layout);
+    let task_path = task_layout
+        .focus_targets()
+        .iter()
+        .find(|target| target.id.as_str() == "data-view")
+        .expect("task table should be focusable")
+        .path
+        .clone();
+    app.dispatch_event(
+        &EventRoute::new(task_path),
+        &TuiEvent::Key(Key::Char(']').into()),
+        &mut EventCtx::default(),
+    );
+    let mut calendar_layout = LayoutCtx::new();
+    app.layout(area, &mut calendar_layout);
+    let calendar = calendar_layout
+        .focus_targets()
+        .iter()
+        .find(|target| target.id.as_str() == "calendar")
+        .expect("calendar should be focusable");
+    let project = calendar_layout
+        .focus_targets()
+        .iter()
+        .find(|target| {
+            target.id.as_str() == "field"
+                && target
+                    .path
+                    .keys()
+                    .iter()
+                    .any(|part| part.as_str() == "project")
+        })
+        .expect("project filter should be focusable");
+    let mut ctx = EventCtx::default();
+
+    let outcome = app.dispatch_event(
+        &EventRoute::new(project.path.clone()),
+        &TuiEvent::Key(Key::Esc.into()),
+        &mut ctx,
+    );
+
+    assert!(outcome.handled());
+    assert_eq!(
+        ctx.focus_request(),
+        Some(&FocusRequest::TargetAt {
+            path: calendar.path.clone(),
+            id: calendar.id.clone(),
+        })
+    );
 }
 
 #[test]

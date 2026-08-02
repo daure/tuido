@@ -1,10 +1,10 @@
-use std::{collections::HashSet, time::Duration};
+use std::{cell::RefCell, rc::Rc, time::Duration};
 
 use ratatui::{Frame, layout::Rect};
 use tuicore::{
-    AnimationSettings, Checklist, EventCtx, EventOutcome, EventRoute, FocusCtx, FocusTarget,
-    LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, ListControl,
-    ListControlEvent, RenderCtx, TickResult, TreeAdapter, TuiEvent, TuiNode,
+    AnimationSettings, CheckState, Checklist, EventCtx, EventOutcome, EventRoute, FocusCtx,
+    FocusTarget, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx,
+    ListControl, ListControlEvent, RenderCtx, TickResult, TreeAdapter, TuiEvent, TuiNode,
 };
 use uuid::Uuid;
 
@@ -18,14 +18,24 @@ pub(super) struct TaskChecklistInput {
     input: Checklist<ChecklistItem, String, AppMsg>,
     committed: Vec<ChecklistItem>,
     patch_sink: PatchSink,
+    highlighted_id: Rc<RefCell<Option<String>>>,
 }
 
 impl TaskChecklistInput {
-    pub(super) fn new(task: &Task, patch_sink: PatchSink) -> Self {
+    pub(super) fn new(
+        task: &Task,
+        patch_sink: PatchSink,
+        highlighted_id: Rc<RefCell<Option<String>>>,
+    ) -> Self {
         let rows = task.checklist.clone();
         let checked = rows
             .iter()
-            .filter(|item| item.checked)
+            .filter(|candidate| {
+                candidate.checked
+                    && !rows
+                        .iter()
+                        .any(|item| item.parent_id.as_ref() == Some(&candidate.id))
+            })
             .map(|item| item.id.clone())
             .collect::<Vec<_>>();
         let expanded = rows
@@ -60,14 +70,23 @@ impl TaskChecklistInput {
         .hotkey(keys::TASK_CHECKLIST_FIELD.hotkey())
         .empty_message("No checklist items")
         .max_rows(6);
+        let mut input = Checklist::from_list_control(control)
+            .cascade_descendants(true)
+            .checked(checked);
+        if let Some(id) = highlighted_id.borrow().as_ref() {
+            input.list_control_mut().data_view_mut().highlight_id(id);
+        }
+        *highlighted_id.borrow_mut() = input.list_control().data_view().highlighted_id();
         Self {
-            input: Checklist::from_list_control(control).checked(checked),
+            input,
             committed: rows,
             patch_sink,
+            highlighted_id,
         }
     }
 
     fn sync_events(&mut self, ctx: &mut EventCtx<AppMsg>) {
+        *self.highlighted_id.borrow_mut() = self.input.list_control().data_view().highlighted_id();
         let changed = self.input.take_events().into_iter().any(|event| {
             matches!(
                 event,
@@ -83,10 +102,9 @@ impl TaskChecklistInput {
         if !changed {
             return;
         }
-        let checked = self.input.checked_ids().into_iter().collect::<HashSet<_>>();
         let mut items = self.input.items().to_vec();
         for item in &mut items {
-            item.checked = checked.contains(&item.id);
+            item.checked = self.input.check_state(&item.id) == CheckState::Checked;
         }
         if items != self.committed {
             self.committed = items.clone();
@@ -102,8 +120,8 @@ impl TaskChecklistInput {
 impl TuiNode<AppMsg> for TaskChecklistInput {
     fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
         let mut hint = self.input.measure(proposal);
-        hint.min.height = 4;
-        hint.preferred.height = hint.preferred.height.clamp(4, 8);
+        hint.min.height = 3;
+        hint.preferred.height = hint.preferred.height.clamp(3, 8);
         hint
     }
 
@@ -181,17 +199,26 @@ mod tests {
     }
 
     #[test]
-    fn checklist_shows_between_two_and_six_item_rows_plus_border() {
+    fn checklist_shows_between_one_and_six_item_rows_plus_border() {
         let patches = Rc::new(RefCell::new(Vec::new()));
-        let empty = TaskChecklistInput::new(&task_with_items(0), Rc::clone(&patches));
-        let three = TaskChecklistInput::new(&task_with_items(3), Rc::clone(&patches));
-        let many = TaskChecklistInput::new(&task_with_items(8), patches);
+        let empty = TaskChecklistInput::new(
+            &task_with_items(0),
+            Rc::clone(&patches),
+            Rc::new(RefCell::new(None)),
+        );
+        let three = TaskChecklistInput::new(
+            &task_with_items(3),
+            Rc::clone(&patches),
+            Rc::new(RefCell::new(None)),
+        );
+        let many =
+            TaskChecklistInput::new(&task_with_items(8), patches, Rc::new(RefCell::new(None)));
 
         let empty_height = empty.measure(LayoutProposal::unbounded()).preferred.height;
         let three_height = three.measure(LayoutProposal::unbounded()).preferred.height;
         let many_height = many.measure(LayoutProposal::unbounded()).preferred.height;
 
-        assert_eq!(empty_height, 4);
+        assert_eq!(empty_height, 3);
         assert_eq!(three_height, 5);
         assert_eq!(many_height, 8);
     }
@@ -199,7 +226,11 @@ mod tests {
     #[test]
     fn checking_an_item_emits_complete_checklist_patch() {
         let patches = Rc::new(RefCell::new(Vec::new()));
-        let mut input = TaskChecklistInput::new(&task_with_items(1), Rc::clone(&patches));
+        let mut input = TaskChecklistInput::new(
+            &task_with_items(1),
+            Rc::clone(&patches),
+            Rc::new(RefCell::new(None)),
+        );
         input
             .input
             .list_control_mut()
@@ -217,5 +248,105 @@ mod tests {
             patches.borrow().as_slice(),
             [TaskPatch::Checklist(items)] if items.len() == 1 && items[0].checked
         ));
+    }
+
+    #[test]
+    fn selection_toggle_rebuild_preserves_highlighted_item() {
+        let mut task = task_with_items(3);
+        let highlighted_id = Rc::new(RefCell::new(None));
+        let patches = Rc::new(RefCell::new(Vec::new()));
+        let mut input =
+            TaskChecklistInput::new(&task, Rc::clone(&patches), Rc::clone(&highlighted_id));
+        input
+            .input
+            .list_control_mut()
+            .data_view_mut()
+            .highlight_id(&"item-1".into());
+        input
+            .input
+            .list_control_mut()
+            .data_view_mut()
+            .on_key(Key::Enter, Rect::new(0, 0, 40, 5));
+        input.sync_events(&mut EventCtx::default());
+        let TaskPatch::Checklist(checklist) = patches.borrow()[0].clone() else {
+            panic!("selection toggle should emit a checklist patch");
+        };
+        task.checklist = checklist;
+
+        let rebuilt =
+            TaskChecklistInput::new(&task, Rc::new(RefCell::new(Vec::new())), highlighted_id);
+
+        assert_eq!(
+            rebuilt.input.list_control().data_view().highlighted_id(),
+            Some("item-1".into())
+        );
+    }
+
+    #[test]
+    fn mixed_child_checks_make_parent_indeterminate() {
+        let mut task = task_with_items(3);
+        task.checklist[1].parent_id = Some("item-0".into());
+        task.checklist[1].checked = true;
+        task.checklist[2].parent_id = Some("item-0".into());
+
+        let input = TaskChecklistInput::new(
+            &task,
+            Rc::new(RefCell::new(Vec::new())),
+            Rc::new(RefCell::new(None)),
+        );
+
+        assert_eq!(
+            input.input.check_state(&"item-0".into()),
+            CheckState::Indeterminate
+        );
+    }
+
+    #[test]
+    fn dedent_and_indent_recompute_parent_check_state() {
+        let mut task = task_with_items(3);
+        task.checklist[1].parent_id = Some("item-0".into());
+        task.checklist[1].checked = true;
+        task.checklist[2].parent_id = Some("item-0".into());
+        let patches = Rc::new(RefCell::new(Vec::new()));
+        let mut input =
+            TaskChecklistInput::new(&task, Rc::clone(&patches), Rc::new(RefCell::new(None)));
+        input
+            .input
+            .list_control_mut()
+            .data_view_mut()
+            .highlight_id(&"item-2".into());
+
+        input.event(
+            &TuiEvent::Key(Key::Char('<').into()),
+            &mut EventCtx::default(),
+        );
+
+        assert_eq!(
+            input.input.check_state(&"item-0".into()),
+            CheckState::Checked
+        );
+        assert_eq!(
+            input.input.list_control().data_view().highlighted_id(),
+            Some("item-2".into())
+        );
+        assert!(matches!(
+            patches.borrow().last(),
+            Some(TaskPatch::Checklist(items))
+                if items[0].checked && items[1].checked && !items[2].checked
+        ));
+
+        input.event(
+            &TuiEvent::Key(Key::Char('>').into()),
+            &mut EventCtx::default(),
+        );
+
+        assert_eq!(
+            input.input.check_state(&"item-0".into()),
+            CheckState::Indeterminate
+        );
+        assert_eq!(
+            input.input.list_control().data_view().highlighted_id(),
+            Some("item-2".into())
+        );
     }
 }
