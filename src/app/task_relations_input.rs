@@ -129,18 +129,7 @@ impl TaskRelationsInput {
                 ]
             },
             move |row, values| {
-                row.relation.kind = TaskRelationKind::parse(&values[0])
-                    .expect("relation dropdown only contains valid relation types");
-                row.relation.task_id.clone_from(&values[1]);
-                row.id.clone_from(&values[1]);
-                row.target_reference = editor_references
-                    .get(&row.relation.task_id)
-                    .cloned()
-                    .unwrap_or_else(|| row.relation.task_id.clone());
-                row.target_label = editor_labels
-                    .get(&row.relation.task_id)
-                    .cloned()
-                    .unwrap_or_else(|| row.relation.task_id.clone());
+                apply_issue_link_edit(row, &values, &editor_references, &editor_labels);
             },
         )
         .column(Column::text(
@@ -231,6 +220,25 @@ impl TaskRelationsInput {
         ctx.request_layout();
         ctx.request_redraw();
     }
+}
+
+fn apply_issue_link_edit(
+    row: &mut TaskRelationRow,
+    values: &[String],
+    task_references: &HashMap<String, String>,
+    task_labels: &HashMap<String, String>,
+) {
+    row.relation.kind = TaskRelationKind::parse(&values[0])
+        .expect("relation dropdown only contains valid relation types");
+    row.relation.task_id.clone_from(&values[1]);
+    row.target_reference = task_references
+        .get(&row.relation.task_id)
+        .cloned()
+        .unwrap_or_else(|| row.relation.task_id.clone());
+    row.target_label = task_labels
+        .get(&row.relation.task_id)
+        .cloned()
+        .unwrap_or_else(|| row.relation.task_id.clone());
 }
 
 fn duplicate_target(rows: &[TaskRelationRow]) -> Option<(&TaskRelationRow, &TaskRelationRow)> {
@@ -500,6 +508,34 @@ mod tests {
         task.project_id = Some(project.id.clone());
 
         assert_eq!(task_label(&task, &[project]), " CORE-42 - Ship it");
+    }
+
+    #[test]
+    fn editing_issue_link_target_preserves_data_view_row_id() {
+        let mut row = TaskRelationRow {
+            id: "projected-task".into(),
+            relation: TaskRelation {
+                task_id: "projected-task".into(),
+                kind: TaskRelationKind::Blocks,
+            },
+            target_reference: "APP-2".into(),
+            target_label: "APP-2 - Projected".into(),
+        };
+        let references = HashMap::from([("3".into(), "3".into())]);
+        let labels = HashMap::from([("3".into(), "3 - No project".into())]);
+
+        apply_issue_link_edit(
+            &mut row,
+            &["relates_to".into(), "3".into()],
+            &references,
+            &labels,
+        );
+
+        assert_eq!(row.id, "projected-task");
+        assert_eq!(row.relation.task_id, "3");
+        assert_eq!(row.relation.kind, TaskRelationKind::RelatesTo);
+        assert_eq!(row.target_reference, "3");
+        assert_eq!(row.target_label, "3 - No project");
     }
 
     #[test]
