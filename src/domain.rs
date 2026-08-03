@@ -284,6 +284,10 @@ pub fn reduce_app_state(state: &mut AppState, event: AppEvent) -> DispatchOutcom
                 return DispatchOutcome::unchanged();
             };
             state.tasks.remove(index);
+            for task in &mut state.tasks {
+                task.relations
+                    .retain(|relation| relation.task_id != task_id);
+            }
             state
                 .save_errors
                 .retain(|target, _| target.entity_id != task_id);
@@ -321,7 +325,12 @@ pub fn reduce_app_state(state: &mut AppState, event: AppEvent) -> DispatchOutcom
             let Some(index) = state.tasks.iter().position(|task| task.id == task_id) else {
                 return DispatchOutcome::unchanged();
             };
-            let task_changed = apply_task_patch(&mut state.tasks[index], &mut state.tags, &patch);
+            let task_changed = match &patch {
+                TaskPatch::Relations(relations) => {
+                    apply_task_relations(&mut state.tasks, index, relations)
+                }
+                _ => apply_task_patch(&mut state.tasks[index], &mut state.tags, &patch),
+            };
             let custom_changed = match patch {
                 TaskPatch::Snooze {
                     remember_custom: Some(custom),
@@ -749,6 +758,7 @@ pub struct Task {
     pub tag_ids: Vec<String>,
     pub checklist: Vec<ChecklistItem>,
     pub links: Vec<String>,
+    pub relations: Vec<TaskRelation>,
     pub description: String,
 }
 
@@ -769,7 +779,66 @@ impl Task {
             tag_ids: Vec::new(),
             checklist: Vec::new(),
             links: Vec::new(),
+            relations: Vec::new(),
             description,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskRelation {
+    pub task_id: String,
+    pub kind: TaskRelationKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TaskRelationKind {
+    Blocks,
+    IsBlockedBy,
+    RelatesTo,
+    Duplicates,
+    IsDuplicatedBy,
+}
+
+impl TaskRelationKind {
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Blocks => "blocks",
+            Self::IsBlockedBy => "is_blocked_by",
+            Self::RelatesTo => "relates_to",
+            Self::Duplicates => "duplicates",
+            Self::IsDuplicatedBy => "is_duplicated_by",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Blocks => "blocks",
+            Self::IsBlockedBy => "is blocked by",
+            Self::RelatesTo => "relates to",
+            Self::Duplicates => "duplicates",
+            Self::IsDuplicatedBy => "is duplicated by",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "blocks" => Some(Self::Blocks),
+            "is_blocked_by" => Some(Self::IsBlockedBy),
+            "relates_to" => Some(Self::RelatesTo),
+            "duplicates" => Some(Self::Duplicates),
+            "is_duplicated_by" => Some(Self::IsDuplicatedBy),
+            _ => None,
+        }
+    }
+
+    pub fn inverse(self) -> Self {
+        match self {
+            Self::Blocks => Self::IsBlockedBy,
+            Self::IsBlockedBy => Self::Blocks,
+            Self::RelatesTo => Self::RelatesTo,
+            Self::Duplicates => Self::IsDuplicatedBy,
+            Self::IsDuplicatedBy => Self::Duplicates,
         }
     }
 }
@@ -790,6 +859,15 @@ pub(crate) fn task_number(identifier: &str) -> Option<i64> {
         .parse::<i64>()
         .ok()
         .filter(|number| *number > 0)
+}
+
+pub(crate) fn task_display_id(task: &Task, project: Option<&Project>) -> String {
+    let number = task_number(&task.id)
+        .map(|number| number.to_string())
+        .unwrap_or_else(|| task.id.clone());
+    project.map_or(number.clone(), |project| {
+        format!("{}-{number}", project.key)
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -910,6 +988,7 @@ pub enum TaskField {
     Tags,
     Checklist,
     Links,
+    Relations,
     Snooze,
 }
 
@@ -946,6 +1025,7 @@ pub enum TaskPatch {
     Tags(Vec<Tag>),
     Checklist(Vec<ChecklistItem>),
     Links(Vec<String>),
+    Relations(Vec<TaskRelation>),
     Snooze {
         until: PrimitiveDateTime,
         remember_custom: Option<PrimitiveDateTime>,
@@ -966,6 +1046,7 @@ impl TaskPatch {
             Self::Tags(_) => TaskField::Tags,
             Self::Checklist(_) => TaskField::Checklist,
             Self::Links(_) => TaskField::Links,
+            Self::Relations(_) => TaskField::Relations,
             Self::Snooze { .. } | Self::Unsnooze => TaskField::Snooze,
         }
     }
@@ -1233,6 +1314,10 @@ fn apply_task_patch(task: &mut Task, available_tags: &mut Vec<Tag>, patch: &Task
                 true
             }
         }
+        TaskPatch::Relations(relations) if task.relations != *relations => {
+            task.relations = relations.clone();
+            true
+        }
         TaskPatch::Snooze { until, .. }
             if task.state != TaskState::Snoozed || task.snoozed_until != Some(*until) =>
         {
@@ -1247,6 +1332,43 @@ fn apply_task_patch(task: &mut Task, available_tags: &mut Vec<Tag>, patch: &Task
         }
         _ => false,
     }
+}
+
+fn apply_task_relations(tasks: &mut [Task], task_index: usize, relations: &[TaskRelation]) -> bool {
+    let task_id = tasks[task_index].id.clone();
+    let before = tasks
+        .iter()
+        .map(|task| task.relations.clone())
+        .collect::<Vec<_>>();
+    for task in tasks.iter_mut() {
+        if task.id == task_id {
+            task.relations.clear();
+        } else {
+            task.relations
+                .retain(|relation| relation.task_id != task_id);
+        }
+    }
+    for relation in relations {
+        if relation.task_id == task_id || !tasks.iter().any(|task| task.id == relation.task_id) {
+            continue;
+        }
+        if !tasks[task_index].relations.contains(relation) {
+            tasks[task_index].relations.push(relation.clone());
+        }
+        let inverse = TaskRelation {
+            task_id: task_id.clone(),
+            kind: relation.kind.inverse(),
+        };
+        if let Some(other) = tasks.iter_mut().find(|task| task.id == relation.task_id)
+            && !other.relations.contains(&inverse)
+        {
+            other.relations.push(inverse);
+        }
+    }
+    before
+        .iter()
+        .zip(tasks.iter())
+        .any(|(before, task)| before != &task.relations)
 }
 
 fn apply_person_patch(person: &mut Person, patch: &PersonPatch) -> bool {
@@ -1502,6 +1624,40 @@ mod tests {
         assert!(outcome.changed);
         assert_eq!(state.tasks.len(), 1);
         assert_eq!(state.selected_task_id, None);
+    }
+
+    #[test]
+    fn deleting_task_removes_reverse_relations_from_remaining_tasks() {
+        let mut first = Task::quick_capture(
+            "first".into(),
+            "First".into(),
+            String::new(),
+            TaskSize::Small,
+        );
+        first.relations.push(TaskRelation {
+            task_id: "second".into(),
+            kind: TaskRelationKind::Blocks,
+        });
+        let mut second = Task::quick_capture(
+            "second".into(),
+            "Second".into(),
+            String::new(),
+            TaskSize::Small,
+        );
+        second.relations.push(TaskRelation {
+            task_id: "first".into(),
+            kind: TaskRelationKind::IsBlockedBy,
+        });
+        let mut state = AppState::from_snapshot(WorkspaceSnapshot {
+            tasks: vec![first, second],
+            people: Vec::new(),
+            projects: Vec::new(),
+            tags: Vec::new(),
+        });
+
+        reduce_app_state(&mut state, AppEvent::TaskDeleted("first".into()));
+
+        assert!(state.tasks[0].relations.is_empty());
     }
 
     #[test]

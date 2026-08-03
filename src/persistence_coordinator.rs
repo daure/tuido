@@ -719,7 +719,6 @@ async fn execute(
         PersistenceCommand::DeleteTask(task) => service
             .delete_task(&task.id, expected()?)
             .await
-            .map(|_| HashMap::new())
             .map_err(boxed_service_error),
         PersistenceCommand::CreatePerson(person) => service
             .create_person_entity(person)

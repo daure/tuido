@@ -55,12 +55,13 @@ pub(super) fn label_filter_dropdown(
         .on_select(move |ids| *active_filter.borrow_mut() = ids)
 }
 
-pub(super) fn task_split(
+pub(super) fn task_workspace_layout(
+    toolbar: Flex<AppMsg>,
     store: &AppStore,
     task_view: TaskView,
     project_filter: Option<&str>,
     label_filter: &[String],
-) -> TaskPane {
+) -> TaskWorkspaceLayout {
     let store_ref = store.borrow();
     let state = store_ref.state();
     let rows = task_rows_for_view(&state.tasks, task_view, project_filter, label_filter);
@@ -75,12 +76,15 @@ pub(super) fn task_split(
     let save_error = selected_task.and_then(|task| state.task_status_error(&task.id));
     let detail = TaskDetailForm::new(
         selected_task,
+        &state.tasks,
         &state.people,
         &state.projects,
         &state.tags,
         save_error,
     );
-    ResponsiveSplit::master_detail(table, detail).second_visible(selected_task.is_some())
+    let master =
+        Split::vertical(toolbar, table).constraints(Constraint::Length(1), Constraint::Min(1));
+    ResponsiveSplit::master_detail(master, detail).second_visible(selected_task.is_some())
 }
 
 pub(super) fn task_rows_for_view(
@@ -146,6 +150,7 @@ fn task_table_with_copy_context_and_empty(
     copy_context: TaskCopyContext,
     empty_state: SeasonalEmptyState,
 ) -> TaskTable {
+    let display_context = copy_context.clone();
     let mut table = ListControl::new_fields(
         rows,
         |row: &TaskRow| row.id.clone(),
@@ -205,9 +210,12 @@ fn task_table_with_copy_context_and_empty(
         )
         .constrained()
         .filter_key(|row| row.size.label().to_string()),
-        Column::text("title", "Task", Constraint::Fill(1), |row: &TaskRow| {
-            row.title.clone()
-        })
+        Column::text(
+            "title",
+            "Task",
+            Constraint::Fill(1),
+            move |row: &TaskRow| format!("{} - {}", display_context.display_id(row), row.title),
+        )
         .sortable(|row| row.title.clone())
         .filter_key(|row| row.title.clone()),
     ])
@@ -367,16 +375,21 @@ impl TuiNode<AppMsg> for TaskTagsInput {
 
 pub(crate) fn detail_form(
     task: Option<&TaskRow>,
-    people: &[Person],
-    projects: &[Project],
-    tags: &[Tag],
+    catalogs: TaskDetailCatalogs<'_>,
     patch_sink: PatchSink,
     checklist_highlighted_id: Rc<RefCell<Option<String>>>,
+    highlighted_issue_link_task_id: Option<&str>,
     save_status: SaveStatusLine,
 ) -> Flex<AppMsg> {
+    let (tasks, people, projects, tags) = catalogs;
     let Some(task) = task else {
         return Flex::<AppMsg>::column();
     };
+    let project = task
+        .project_id
+        .as_deref()
+        .and_then(|project_id| projects.iter().find(|project| project.id == project_id));
+    let display_id = Rc::new(RefCell::new(task_display_id(task, project)));
 
     let status_fields = Flex::<AppMsg>::row()
         .gap(1)
@@ -453,7 +466,7 @@ pub(crate) fn detail_form(
         .child("save-status", save_status, FlexItem::content())
         .child(
             "title",
-            TaskTitleInput::new(&task.title, Rc::clone(&patch_sink)),
+            TaskTitleInput::new(&task.title, Rc::clone(&display_id), Rc::clone(&patch_sink)),
             FlexItem::fixed(3),
         )
         .child(
@@ -488,7 +501,12 @@ pub(crate) fn detail_form(
                 )
                 .child(
                     "projects",
-                    task_projects_dropdown(task, projects, Rc::clone(&patch_sink)),
+                    task_projects_dropdown(
+                        task,
+                        projects,
+                        Rc::clone(&display_id),
+                        Rc::clone(&patch_sink),
+                    ),
                     FlexItem::fill(1),
                 ),
             FlexItem::fixed(3),
@@ -506,6 +524,17 @@ pub(crate) fn detail_form(
         .child(
             "links",
             TaskLinksInput::new(task, Rc::clone(&patch_sink)),
+            FlexItem::content(),
+        )
+        .child(
+            "relations",
+            TaskRelationsInput::new(
+                task,
+                tasks,
+                projects,
+                Rc::clone(&patch_sink),
+                highlighted_issue_link_task_id,
+            ),
             FlexItem::content(),
         )
 }
@@ -622,10 +651,13 @@ pub(super) fn task_people_dropdown(
 pub(super) fn task_projects_dropdown(
     task: &TaskRow,
     projects: &[Project],
+    display_id: Rc<RefCell<String>>,
     patch_sink: PatchSink,
 ) -> Dropdown<Choice, String> {
+    let task = task.clone();
+    let projects = projects.to_vec();
     Dropdown::single(
-        project_choices(projects),
+        project_choices(&projects),
         |row| row.id.clone(),
         |row| row.label.clone(),
     )
@@ -636,9 +668,12 @@ pub(super) fn task_projects_dropdown(
     .search_mode(DropdownSearchMode::Contains)
     .commit_mode(DropdownCommitMode::Explicit)
     .on_select(move |ids| {
-        patch_sink
-            .borrow_mut()
-            .push(TaskPatch::Project(ids.into_iter().next()));
+        let project_id = ids.into_iter().next();
+        let project = project_id
+            .as_deref()
+            .and_then(|project_id| projects.iter().find(|project| project.id == project_id));
+        *display_id.borrow_mut() = task_display_id(&task, project);
+        patch_sink.borrow_mut().push(TaskPatch::Project(project_id));
     })
     .hotkey(keys::TASK_PROJECTS_FIELD.hotkey())
 }

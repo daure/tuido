@@ -1,6 +1,131 @@
 use super::*;
 
 #[test]
+fn selecting_project_from_detail_dropdown_refreshes_title_panel_identifier() {
+    let project = Project::new(
+        "project-1".into(),
+        "APP".into(),
+        "Application".into(),
+        String::new(),
+    );
+    let task = task_with("OLD-42", "Original", TaskState::Todo);
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![task],
+        people: Vec::new(),
+        projects: vec![project],
+        tags: Vec::new(),
+    });
+    let mut workspace = TaskWorkspace::new(context);
+    let area = Rect::new(0, 0, 120, 40);
+    let mut layout = LayoutCtx::new();
+    workspace.layout(area, &mut layout);
+    let project_field = layout
+        .focus_targets()
+        .iter()
+        .find(|target| {
+            target.id.as_str() == "field"
+                && target
+                    .path
+                    .keys()
+                    .iter()
+                    .any(|key| key.as_str() == "projects")
+        })
+        .expect("task project should be focusable")
+        .clone();
+    let mut dispatcher = TreeDispatcher::new();
+    let open = dispatcher.dispatch_event(
+        &mut workspace,
+        &EventRoute::new(project_field.path),
+        &TuiEvent::Hotkey(HotkeyEvent::Commit(keys::TASK_PROJECTS_FIELD.hotkey())),
+        AnimationSettings::default(),
+    );
+    let focus_request = open
+        .focus_request
+        .as_ref()
+        .expect("project hotkey should request dropdown search focus");
+    let mut open_layout = LayoutCtx::new();
+    workspace.layout(area, &mut open_layout);
+    let mut focus = FocusManager::new();
+    let transition = focus
+        .apply_request(focus_request, open_layout.focus_targets())
+        .expect("project dropdown search should accept focus");
+    let focused = transition.current.clone().unwrap();
+    dispatcher.dispatch_focus(&mut workspace, transition, AnimationSettings::default());
+
+    dispatcher.dispatch_event(
+        &mut workspace,
+        &EventRoute::new(focused.path.clone()),
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('j'),
+            modifiers: KeyModifiers::CONTROL,
+        }),
+        AnimationSettings::default(),
+    );
+    dispatcher.dispatch_event(
+        &mut workspace,
+        &EventRoute::new(focused.path),
+        &TuiEvent::Key(KeyEvent::from(Key::Enter)),
+        AnimationSettings::default(),
+    );
+    workspace.layout(area, &mut LayoutCtx::new());
+
+    let detail = rendered_text(workspace.detail(), area);
+    assert!(detail.contains("APP-42"), "rendered detail: {detail:?}");
+
+    let mut selected_layout = LayoutCtx::new();
+    workspace.layout(area, &mut selected_layout);
+    let project_field = selected_layout
+        .focus_targets()
+        .iter()
+        .find(|target| {
+            target.id.as_str() == "field"
+                && target
+                    .path
+                    .keys()
+                    .iter()
+                    .any(|key| key.as_str() == "projects")
+        })
+        .unwrap()
+        .clone();
+    let open = dispatcher.dispatch_event(
+        &mut workspace,
+        &EventRoute::new(project_field.path),
+        &TuiEvent::Hotkey(HotkeyEvent::Commit(keys::TASK_PROJECTS_FIELD.hotkey())),
+        AnimationSettings::default(),
+    );
+    let mut open_layout = LayoutCtx::new();
+    workspace.layout(area, &mut open_layout);
+    let mut focus = FocusManager::new();
+    let transition = focus
+        .apply_request(
+            open.focus_request.as_ref().unwrap(),
+            open_layout.focus_targets(),
+        )
+        .unwrap();
+    let focused = transition.current.clone().unwrap();
+    dispatcher.dispatch_focus(&mut workspace, transition, AnimationSettings::default());
+    dispatcher.dispatch_event(
+        &mut workspace,
+        &EventRoute::new(focused.path.clone()),
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('k'),
+            modifiers: KeyModifiers::CONTROL,
+        }),
+        AnimationSettings::default(),
+    );
+    dispatcher.dispatch_event(
+        &mut workspace,
+        &EventRoute::new(focused.path),
+        &TuiEvent::Key(KeyEvent::from(Key::Enter)),
+        AnimationSettings::default(),
+    );
+    workspace.layout(area, &mut LayoutCtx::new());
+
+    let detail = rendered_text(workspace.detail(), area);
+    assert!(!detail.contains("APP-42"), "rendered detail: {detail:?}");
+}
+
+#[test]
 fn task_table_ignores_data_view_filter_mode_hotkey() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
@@ -72,7 +197,8 @@ fn empty_task_workspace_collapses_detail_and_gives_table_full_pane() {
     workspace.layout(area, &mut LayoutCtx::new());
 
     let text = rendered_text(&workspace, area);
-    let (table_area, detail_area) = workspace.layout.second().child_areas();
+    let (_, table_area) = workspace.layout.first().child_areas();
+    let (_, detail_area) = workspace.layout.child_areas();
     assert_eq!(table_area, Rect::new(0, 1, 120, 29));
     assert_eq!(detail_area, Rect::default());
     assert!(text.contains("No active tasks"));
@@ -125,7 +251,7 @@ fn task_search_hides_detail_and_clearing_search_restores_it() {
     assert_eq!(workspace.table().highlighted_id(), None);
     assert_eq!(workspace.visible_selection.borrow().as_deref(), None);
     assert_eq!(workspace.detail().task_id, None);
-    assert!(!workspace.layout.second().is_second_visible());
+    assert!(!workspace.layout.is_second_visible());
     workspace.layout(Rect::new(0, 0, 100, 30), &mut LayoutCtx::new());
     assert!(
         rendered_text(&workspace, Rect::new(0, 0, 100, 30)).contains("No tasks match your filters")
@@ -138,7 +264,7 @@ fn task_search_hides_detail_and_clearing_search_restores_it() {
         Some("task-1")
     );
     assert_eq!(workspace.detail().task_id.as_deref(), Some("task-1"));
-    assert!(workspace.layout.second().is_second_visible());
+    assert!(workspace.layout.is_second_visible());
 }
 
 #[test]
@@ -237,6 +363,45 @@ fn escape_keeps_task_table_focused_as_tab_root() {
 
     assert!(outcome.handled());
     assert_eq!(ctx.propagation(), Propagation::Stopped);
+}
+
+#[test]
+fn focus_tracking_matches_master_detail_layout_paths() {
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![test_task()],
+        people: Vec::new(),
+        projects: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut workspace = TaskWorkspace::new(context);
+    let mut layout = LayoutCtx::new();
+    workspace.layout(Rect::new(0, 0, 120, 40), &mut layout);
+    let table = layout
+        .focus_targets()
+        .iter()
+        .find(|target| {
+            target.id.as_str() == "data-view"
+                && target.path.keys().first() == Some(&ChildKey::first())
+        })
+        .unwrap()
+        .clone();
+    let detail = layout
+        .focus_targets()
+        .iter()
+        .find(|target| {
+            target.path.keys().first() == Some(&ChildKey::second())
+                && target.path.keys().iter().any(|key| key.as_str() == "title")
+        })
+        .unwrap()
+        .clone();
+
+    workspace.dispatch_focus(&table, true, &mut FocusCtx::default());
+    assert!(workspace.table_focused);
+    assert!(!workspace.detail_draft_protected);
+
+    workspace.dispatch_focus(&detail, true, &mut FocusCtx::default());
+    assert!(!workspace.table_focused);
+    assert!(workspace.detail_draft_protected);
 }
 
 #[test]
@@ -1324,7 +1489,14 @@ fn snoozed_detail_queues_datetime_selection() {
     let mut task = test_task();
     task.state = TaskState::Snoozed;
     task.snoozed_until = Some(until);
-    let mut detail = TaskDetailForm::new(Some(&task), &[], &[], &[], None);
+    let mut detail = TaskDetailForm::new(
+        Some(&task),
+        std::slice::from_ref(&task),
+        &[],
+        &[],
+        &[],
+        None,
+    );
     let area = Rect::new(0, 0, 80, 120);
     detail.layout(area, &mut LayoutCtx::new());
     let text = rendered_text(&detail, area);
@@ -1371,7 +1543,14 @@ fn snoozed_detail_queues_datetime_selection() {
 
     task.state = TaskState::Todo;
     task.snoozed_until = None;
-    let mut active_detail = TaskDetailForm::new(Some(&task), &[], &[], &[], None);
+    let mut active_detail = TaskDetailForm::new(
+        Some(&task),
+        std::slice::from_ref(&task),
+        &[],
+        &[],
+        &[],
+        None,
+    );
     active_detail.layout(area, &mut LayoutCtx::new());
     assert!(!rendered_text(&active_detail, area).contains("Snoozed until"));
 }
@@ -1381,7 +1560,14 @@ fn snoozed_until_hotkey_opens_detail_picker() {
     let mut task = test_task();
     task.state = TaskState::Snoozed;
     task.snoozed_until = Some(time::macros::datetime!(2026-07-24 8:00));
-    let mut detail = TaskDetailForm::new(Some(&task), &[], &[], &[], None);
+    let mut detail = TaskDetailForm::new(
+        Some(&task),
+        std::slice::from_ref(&task),
+        &[],
+        &[],
+        &[],
+        None,
+    );
     let area = Rect::new(0, 0, 80, 120);
     let mut layout = LayoutCtx::new();
     detail.layout(area, &mut layout);
@@ -2444,6 +2630,7 @@ fn title_blur_during_description_hotkey_preserves_description_focus() {
                 tag_ids: Vec::new(),
                 checklist: Vec::new(),
                 links: Vec::new(),
+                relations: Vec::new(),
                 description: "Existing detail".to_string(),
             }],
             people: Vec::new(),

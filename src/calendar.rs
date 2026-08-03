@@ -14,7 +14,7 @@ use crate::app::{
     task_detail::detail_escape, task_ids_at_snooze_time,
 };
 use crate::app_keymap::keys;
-use crate::domain::{Task, TaskState};
+use crate::domain::{Project, Task, TaskState};
 use crate::persistence_coordinator::PersistenceCommand;
 use crate::ui::responsive_split::ResponsiveSplit;
 use crate::ui::save_status::SaveStatusLine;
@@ -58,6 +58,7 @@ impl CalendarCreateContext {
 struct SnoozedTaskEntry {
     id: String,
     title: String,
+    display_title: String,
     until: PrimitiveDateTime,
     rank: i64,
 }
@@ -115,6 +116,7 @@ impl CalendarWorkspace {
         let label_filter = active_label_filter.borrow().clone();
         let visible_entries = filtered_snoozed_task_entries(
             &state.state().tasks,
+            &state.state().projects,
             project_filter.as_deref(),
             &label_filter,
         );
@@ -123,6 +125,7 @@ impl CalendarWorkspace {
             .show_weekends(show_weekends);
         let detail = TaskDetailForm::new(
             None,
+            &state.state().tasks,
             &state.state().people,
             &state.state().projects,
             &state.state().tags,
@@ -155,6 +158,7 @@ impl CalendarWorkspace {
         self.observed_version = state.version;
         let entries = filtered_snoozed_task_entries(
             &state.tasks,
+            &state.projects,
             self.project_filter.as_deref(),
             &self.label_filter,
         );
@@ -206,6 +210,7 @@ impl CalendarWorkspace {
         let state = self.context.store.borrow().state().clone();
         let entries = filtered_snoozed_task_entries(
             &state.tasks,
+            &state.projects,
             self.project_filter.as_deref(),
             &self.label_filter,
         );
@@ -388,9 +393,7 @@ impl CalendarWorkspace {
         if identity_changed {
             self.detail_mut().set_task(
                 task,
-                &state.people,
-                &state.projects,
-                &state.tags,
+                (&state.tasks, &state.people, &state.projects, &state.tags),
                 save_error,
                 ctx,
             );
@@ -618,27 +621,32 @@ pub(crate) fn parse_show_weekends_setting(value: Option<&str>) -> Result<bool, S
     }
 }
 
-#[cfg(test)]
-fn snoozed_task_entries(tasks: &[Task]) -> Vec<SnoozedTaskEntry> {
-    tasks.iter().filter_map(snoozed_task_entry).collect()
-}
-
 fn filtered_snoozed_task_entries(
     tasks: &[Task],
+    projects: &[Project],
     project_filter: Option<&str>,
     label_filter: &[String],
 ) -> Vec<SnoozedTaskEntry> {
     tasks
         .iter()
         .filter(|task| task_matches_filters(task, project_filter, label_filter))
-        .filter_map(snoozed_task_entry)
+        .filter_map(|task| snoozed_task_entry(task, projects))
         .collect()
 }
 
-fn snoozed_task_entry(task: &Task) -> Option<SnoozedTaskEntry> {
+fn snoozed_task_entry(task: &Task, projects: &[Project]) -> Option<SnoozedTaskEntry> {
+    let project = task
+        .project_id
+        .as_deref()
+        .and_then(|project_id| projects.iter().find(|project| project.id == project_id));
     (task.state == TaskState::Snoozed).then_some(SnoozedTaskEntry {
         id: task.id.clone(),
         title: task.title.clone(),
+        display_title: format!(
+            "{} - {}",
+            crate::domain::task_display_id(task, project),
+            task.title
+        ),
         until: task.snoozed_until?,
         rank: task.rank,
     })
@@ -660,8 +668,9 @@ fn task_calendar(entries: Vec<SnoozedTaskEntry>) -> TaskCalendar {
         entries,
         |entry| entry.id.clone(),
         |entry| CalendarSpan::timed(entry.until, entry.until + Duration::minutes(1)),
-        |entry| entry.title.clone(),
+        |entry| entry.display_title.clone(),
     )
+    .compact_summary_title(100, |entry| entry.title.clone())
     .bordered(false)
     .entry_order(compare_snoozed_task_entries)
     .role(|_| Some(CalendarEntryRole::Muted))
@@ -912,28 +921,63 @@ mod tests {
             tag_ids: Vec::new(),
             checklist: Vec::new(),
             links: Vec::new(),
+            relations: Vec::new(),
             description: String::new(),
         }
     }
 
     #[test]
-    fn calendar_shows_dated_snoozed_tasks_with_snooze_icons() {
+    fn calendar_shows_task_reference_only_in_day_view() {
         let date = Date::from_calendar_date(2026, Month::July, 24).unwrap();
         let until = date.with_time(Time::from_hms(8, 0, 0).unwrap());
-        let entries = snoozed_task_entries(&[
-            task("snoozed", "Follow up", TaskState::Snoozed, Some(until)),
-            task("todo", "Still active", TaskState::Todo, Some(until)),
-            task("undated", "Missing return date", TaskState::Snoozed, None),
-        ]);
-        let mut calendar = task_calendar(entries).cursor(date);
+        let project = Project::new(
+            "project".into(),
+            "if".into(),
+            "Internal fixes".into(),
+            String::new(),
+        );
+        let mut snoozed = task("OLD-30", "Follow up", TaskState::Snoozed, Some(until));
+        snoozed.project_id = Some(project.id.clone());
+        let entries = filtered_snoozed_task_entries(
+            &[
+                snoozed,
+                task("todo", "Still active", TaskState::Todo, Some(until)),
+                task("undated", "Missing return date", TaskState::Snoozed, None),
+            ],
+            &[project],
+            None,
+            &[],
+        );
+        let mut calendar = task_calendar(entries.clone())
+            .cursor(date)
+            .view(CalendarView::Day);
         let area = Rect::new(0, 0, 100, 28);
         calendar.layout(area, &mut LayoutCtx::new());
 
         let text = rendered_text(&calendar, area);
 
-        assert!(text.contains(&format!("{SNOOZE_ICON} Follow up")));
+        assert!(text.contains(SNOOZE_ICON));
+        assert!(text.contains("IF-30 - Follow up"));
         assert!(!text.contains("Still active"));
         assert!(!text.contains("Missing return date"));
+
+        for view in [CalendarView::Month, CalendarView::Week] {
+            let normal = Rect::new(0, 0, 120, 28);
+            let mut calendar = task_calendar(entries.clone()).cursor(date).view(view);
+            calendar.layout(normal, &mut LayoutCtx::new());
+            let text = rendered_text(&calendar, normal);
+            assert!(text.contains("IF-30"), "missing task reference in {view:?}");
+
+            let small = Rect::new(0, 0, 80, 28);
+            let mut calendar = task_calendar(entries.clone()).cursor(date).view(view);
+            calendar.layout(small, &mut LayoutCtx::new());
+            let text = rendered_text(&calendar, small);
+            assert!(text.contains("Follow"), "missing title in compact {view:?}");
+            assert!(
+                !text.contains("IF-30"),
+                "task reference leaked into compact {view:?}"
+            );
+        }
     }
 
     #[test]

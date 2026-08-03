@@ -2,9 +2,9 @@ use std::{cell::RefCell, rc::Rc, time::Duration};
 
 use ratatui::{Frame, layout::Rect};
 use tuicore::{
-    AnimationSettings, EventCtx, EventOutcome, EventRoute, FocusCtx, FocusTarget, Key, KeySpec,
-    LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, RenderCtx, TextInput,
-    TickResult, TuiEvent, TuiNode,
+    AnimationSettings, EventCtx, EventOutcome, EventRoute, FocusCtx, FocusTarget, InputChrome, Key,
+    KeySpec, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, RenderCtx,
+    TextInput, TickResult, TuiEvent, TuiNode,
 };
 
 use super::{AppMsg, PatchSink};
@@ -13,15 +13,18 @@ use crate::{app_keymap::keys, domain::TaskPatch};
 pub(super) struct TaskTitleInput {
     input: TextInput<AppMsg>,
     saved_title: Rc<RefCell<String>>,
+    display_id: Rc<RefCell<String>>,
+    rendered_display_id: String,
 }
 
 impl TaskTitleInput {
-    pub(super) fn new(title: &str, patch_sink: PatchSink) -> Self {
+    pub(super) fn new(title: &str, display_id: Rc<RefCell<String>>, patch_sink: PatchSink) -> Self {
         let saved_title = Rc::new(RefCell::new(title.to_string()));
+        let rendered_display_id = display_id.borrow().clone();
         let input = TextInput::new()
             .value(title)
             .placeholder("Task title")
-            .panel("Title")
+            .style(InputChrome::panel("Title").top_right(rendered_display_id.clone()))
             .hotkey(keys::TASK_TITLE_FIELD.hotkey())
             .on_edit_end({
                 let saved_title = Rc::clone(&saved_title);
@@ -33,7 +36,12 @@ impl TaskTitleInput {
                     AppMsg::Noop
                 }
             });
-        Self { input, saved_title }
+        Self {
+            input,
+            saved_title,
+            display_id,
+            rendered_display_id,
+        }
     }
 
     fn revert_empty_after_edit_end(
@@ -62,6 +70,12 @@ impl TuiNode<AppMsg> for TaskTitleInput {
     }
 
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
+        let display_id = self.display_id.borrow().clone();
+        if display_id != self.rendered_display_id {
+            self.input
+                .set_style(InputChrome::panel("Title").top_right(display_id.clone()));
+            self.rendered_display_id = display_id;
+        }
         self.input.layout(area, ctx)
     }
 
@@ -115,14 +129,57 @@ impl TuiNode<AppMsg> for TaskTitleInput {
 
 #[cfg(test)]
 mod tests {
+    use ratatui::{Terminal, backend::TestBackend};
     use tuicore::{KeyEvent, KeyModifiers};
 
     use super::*;
 
     #[test]
+    fn task_id_renders_on_title_panel_top_right() {
+        let patches = Rc::new(RefCell::new(Vec::new()));
+        let display_id = Rc::new(RefCell::new("APP-42".into()));
+        let mut input = TaskTitleInput::new("Saved title", Rc::clone(&display_id), patches);
+        let area = Rect::new(0, 0, 30, 3);
+        input.layout(area, &mut LayoutCtx::new());
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+
+        terminal
+            .draw(|frame| {
+                let mut ctx = RenderCtx::new();
+                input.render(frame, area, &mut ctx);
+            })
+            .unwrap();
+
+        let top_border = (0..area.width)
+            .map(|x| terminal.backend().buffer().cell((x, 0)).unwrap().symbol())
+            .collect::<String>();
+        let title = top_border.find("Title").unwrap();
+        let task_id = top_border.find("APP-42").unwrap();
+        assert!(title < task_id, "unexpected title border: {top_border:?}");
+
+        *display_id.borrow_mut() = "42".into();
+        input.layout(area, &mut LayoutCtx::new());
+        terminal
+            .draw(|frame| {
+                let mut ctx = RenderCtx::new();
+                input.render(frame, area, &mut ctx);
+            })
+            .unwrap();
+        let updated_border = (0..area.width)
+            .map(|x| terminal.backend().buffer().cell((x, 0)).unwrap().symbol())
+            .collect::<String>();
+        assert!(!updated_border.contains("APP-42"));
+        assert!(updated_border.contains("42"));
+    }
+
+    #[test]
     fn enter_on_empty_title_restores_last_accepted_value_without_patch() {
         let patches = Rc::new(RefCell::new(Vec::new()));
-        let mut input = TaskTitleInput::new("Saved title", Rc::clone(&patches));
+        let mut input = TaskTitleInput::new(
+            "Saved title",
+            Rc::new(RefCell::new("APP-42".into())),
+            Rc::clone(&patches),
+        );
         let mut ctx = EventCtx::default();
         input.event(&TuiEvent::Key(KeyEvent::from(Key::Enter)), &mut ctx);
         input.input.set_value("  ");
@@ -136,7 +193,11 @@ mod tests {
     #[test]
     fn empty_title_restores_most_recent_accepted_value() {
         let patches = Rc::new(RefCell::new(Vec::new()));
-        let mut input = TaskTitleInput::new("Original", Rc::clone(&patches));
+        let mut input = TaskTitleInput::new(
+            "Original",
+            Rc::new(RefCell::new("APP-42".into())),
+            Rc::clone(&patches),
+        );
         let mut ctx = EventCtx::default();
         input.event(&TuiEvent::Key(KeyEvent::from(Key::Enter)), &mut ctx);
         input.input.set_value("Updated");
@@ -165,7 +226,11 @@ mod tests {
 
         for key in close_keys {
             let patches = Rc::new(RefCell::new(Vec::new()));
-            let mut input = TaskTitleInput::new("Saved title", Rc::clone(&patches));
+            let mut input = TaskTitleInput::new(
+                "Saved title",
+                Rc::new(RefCell::new("APP-42".into())),
+                Rc::clone(&patches),
+            );
             let mut ctx = EventCtx::default();
             input.event(&TuiEvent::Key(KeyEvent::from(Key::Enter)), &mut ctx);
             input.input.set_value("  ");

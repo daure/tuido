@@ -71,9 +71,9 @@ impl TaskLinksInput {
         ])
         .copy_with(|row| row.url.clone())
         .headers(false)
-        .title("Links")
-        .hotkey(keys::TASK_LINKS_FIELD.hotkey())
-        .empty_message("No links added")
+        .title("URL links")
+        .hotkey(keys::TASK_URL_LINKS_FIELD.hotkey())
+        .empty_message("No URL links added")
         .keybindings(ListControlKeyBindings::default().remove([keys::TASK_LINK_DELETE.key_spec()]))
         .max_rows(usize::MAX);
         Self {

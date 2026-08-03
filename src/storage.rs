@@ -8,8 +8,8 @@ use sqlx::{
 };
 
 use crate::domain::{
-    ChecklistItem, Person, Project, Tag, Task, TaskPriority, TaskSize, TaskState,
-    WorkspaceSnapshot, task_identifier,
+    ChecklistItem, Person, Project, Tag, Task, TaskPriority, TaskRelation, TaskRelationKind,
+    TaskSize, TaskState, WorkspaceSnapshot, task_identifier,
 };
 use crate::snooze::parse_datetime;
 
@@ -189,6 +189,7 @@ async fn load_workspace(
         let tag_ids = load_task_tags(pool, dialect, number).await?;
         let checklist = load_task_checklist(pool, dialect, number).await?;
         let links = load_task_links(pool, dialect, number).await?;
+        let relations = load_task_relations(pool, dialect, number).await?;
         let key_prefix = row.try_get::<String, _>("key_prefix")?;
 
         let task = Task {
@@ -216,6 +217,7 @@ async fn load_workspace(
             tag_ids,
             checklist,
             links,
+            relations,
             description: row.try_get("description")?,
         };
         tasks.push(task);
@@ -227,6 +229,53 @@ async fn load_workspace(
         projects,
         tags,
     })
+}
+
+async fn load_task_relations(
+    pool: &AnyPool,
+    dialect: SqlDialect,
+    task_id: i64,
+) -> Result<Vec<TaskRelation>, Box<dyn std::error::Error>> {
+    let query = format!(
+        "SELECT r.source_task_id, r.target_task_id, r.relation_type, source.key_prefix AS source_key, target.key_prefix AS target_key FROM task_relations r JOIN tasks source ON source.id = r.source_task_id JOIN tasks target ON target.id = r.target_task_id WHERE r.source_task_id = {} OR r.target_task_id = {} ORDER BY r.position, r.source_task_id, r.target_task_id",
+        dialect.placeholder(1),
+        dialect.placeholder(2)
+    );
+    sqlx::query(AssertSqlSafe(query.as_str()))
+        .bind(task_id)
+        .bind(task_id)
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .map(|row| {
+            let source_id = row.try_get::<i64, _>("source_task_id")?;
+            let target_id = row.try_get::<i64, _>("target_task_id")?;
+            let relation_type = row.try_get::<String, _>("relation_type")?;
+            let stored_kind = TaskRelationKind::parse(&relation_type).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("unknown task relation type: {relation_type}"),
+                )
+            })?;
+            let (other_number, other_key, kind) = if source_id == task_id {
+                (
+                    target_id,
+                    row.try_get::<String, _>("target_key")?,
+                    stored_kind,
+                )
+            } else {
+                (
+                    source_id,
+                    row.try_get::<String, _>("source_key")?,
+                    stored_kind.inverse(),
+                )
+            };
+            Ok(TaskRelation {
+                task_id: task_identifier(other_number, Some(&other_key)),
+                kind,
+            })
+        })
+        .collect()
 }
 
 async fn load_task_checklist(

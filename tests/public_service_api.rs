@@ -36,6 +36,7 @@ async fn external_client_can_use_public_service_dtos() {
             project_id: None,
             tag_ids: Vec::new(),
             links: vec!["file:///tmp/task.txt".into()],
+            relations: Vec::new(),
             description: "public DTO mutation".into(),
         })
         .await

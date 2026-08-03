@@ -12,7 +12,7 @@ use uuid::Uuid;
 use crate::{
     domain::{
         ChecklistItem, Person, PersonPatch, Project, ProjectPatch, Tag, TagPatch, Task, TaskPatch,
-        TaskRank, WorkspaceSnapshot, task_identifier, task_number,
+        TaskRank, TaskRelation, TaskRelationKind, WorkspaceSnapshot, task_identifier, task_number,
     },
     storage::{self, SqlDialect, Storage},
 };
@@ -150,7 +150,22 @@ pub struct TaskView {
     pub checklist: Vec<ChecklistItemView>,
     /// Task URLs, deduplicated and sorted lexicographically.
     pub links: Vec<String>,
+    /// Relations to other tasks, expressed from this task's perspective.
+    pub relations: Vec<TaskRelationView>,
     pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
+pub struct TaskRelationView {
+    pub task_id: String,
+    pub relation_type: String,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct TaskRelationInput {
+    pub task_id: String,
+    #[schemars(extend("enum" = ["blocks", "is_blocked_by", "relates_to", "duplicates", "is_duplicated_by"]))]
+    pub relation_type: String,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
@@ -254,6 +269,9 @@ pub struct TaskUpdate {
     #[serde(default)]
     /// Complete task URL set. Values require an explicit scheme or a www. prefix.
     pub links: Vec<String>,
+    #[serde(default)]
+    /// Complete relation set from this task's perspective.
+    pub relations: Vec<TaskRelationInput>,
     #[serde(default)]
     pub description: String,
 }
@@ -536,6 +554,7 @@ impl TuidoService {
         validate_task_temporal_fields(task.state, task.snoozed_until.is_some())?;
         normalize_task_links(&mut task.links);
         normalize_task_checklist(&mut task.checklist);
+        normalize_task_relations(&mut task.relations);
         validation::validate_task_links(&task.links)?;
         validate_task_checklist(&task.checklist)?;
         if task.project_id.is_none() {
@@ -603,6 +622,11 @@ impl TuidoService {
             .await?;
         self.replace_task_checklist(&mut tx, &task.id, &task.checklist)
             .await?;
+        let affected = self
+            .replace_task_relations(&mut tx, &task.id, &task.relations)
+            .await?;
+        self.bump_related_task_revisions(&mut tx, &task.id, affected)
+            .await?;
         tx.commit().await.map_err(storage_error)?;
         Ok(Versioned {
             revision: 1,
@@ -638,6 +662,7 @@ impl TuidoService {
             tag_ids: input.tag_ids,
             checklist: Vec::new(),
             links: input.links,
+            relations: Vec::new(),
             description: input.description,
         })
         .await
@@ -646,6 +671,9 @@ impl TuidoService {
     pub async fn update_task(&self, mut input: TaskUpdate) -> ServiceResult<Versioned<TaskView>> {
         normalize_task_links(&mut input.links);
         validate_task_update(&input)?;
+        let mut relations = task_relation_inputs(std::mem::take(&mut input.relations))?;
+        normalize_task_relations(&mut relations);
+        validate_task_relations(&input.id, &relations)?;
         let snoozed_until = input
             .snoozed_until
             .as_deref()
@@ -698,6 +726,11 @@ impl TuidoService {
             .await?;
         self.replace_task_links(&mut tx, &input.id, &input.links)
             .await?;
+        let affected = self
+            .replace_task_relations(&mut tx, &input.id, &relations)
+            .await?;
+        self.bump_related_task_revisions(&mut tx, &input.id, affected)
+            .await?;
         bump_workspace(&mut tx, self.dialect).await?;
         tx.commit().await.map_err(storage_error)?;
         self.get_task(&input.id).await
@@ -714,6 +747,10 @@ impl TuidoService {
         }
         if let TaskPatch::Checklist(items) = &mut patch {
             normalize_task_checklist(items);
+        }
+        if let TaskPatch::Relations(relations) = &mut patch {
+            normalize_task_relations(relations);
+            validate_task_relations(&id, relations)?;
         }
         validate_task_patch(&patch)?;
         let mut tx = self.pool.begin().await.map_err(storage_error)?;
@@ -767,6 +804,15 @@ impl TuidoService {
             TaskPatch::Checklist(items) => {
                 self.replace_task_checklist(&mut tx, &id, &items).await?
             }
+            TaskPatch::Relations(relations) => {
+                let affected = self
+                    .replace_task_relations(&mut tx, &id, &relations)
+                    .await?;
+                related_revisions.extend(
+                    self.bump_related_task_revisions(&mut tx, &id, affected)
+                        .await?,
+                );
+            }
             patch => apply_task_patch(&mut tx, self.dialect, &id, patch).await?,
         }
         let touch = format!(
@@ -809,6 +855,21 @@ impl TuidoService {
         flatten_checklist_inputs(checklist, None, &mut items);
         self.patch_task(id.clone(), expected_revision, TaskPatch::Checklist(items))
             .await?;
+        self.get_task(&id).await
+    }
+
+    pub async fn set_task_relations(
+        &self,
+        id: String,
+        expected_revision: u64,
+        relations: Vec<TaskRelationInput>,
+    ) -> ServiceResult<Versioned<TaskView>> {
+        self.patch_task(
+            id.clone(),
+            expected_revision,
+            TaskPatch::Relations(task_relation_inputs(relations)?),
+        )
+        .await?;
         self.get_task(&id).await
     }
 
@@ -898,10 +959,15 @@ impl TuidoService {
         self.get_task(&id).await
     }
 
-    pub async fn delete_task(&self, id: &str, expected: u64) -> ServiceResult<()> {
+    pub async fn delete_task(
+        &self,
+        id: &str,
+        expected: u64,
+    ) -> ServiceResult<HashMap<String, u64>> {
         let mut tx = self.pool.begin().await.map_err(storage_error)?;
         let number = parse_task_number(id)?;
         self.claim_task(&mut tx, id, expected).await?;
+        let related = self.related_task_numbers(&mut tx, number).await?;
         let sql = format!(
             "DELETE FROM tasks WHERE id = {} AND revision = {}",
             self.dialect.placeholder(1),
@@ -922,8 +988,12 @@ impl TuidoService {
                 actual: self.actual_task_revision(&mut tx, number).await?,
             });
         }
+        let revisions = self
+            .bump_related_task_revisions(&mut tx, id, related)
+            .await?;
         bump_workspace(&mut tx, self.dialect).await?;
-        tx.commit().await.map_err(storage_error)
+        tx.commit().await.map_err(storage_error)?;
+        Ok(revisions)
     }
     pub async fn get_task(&self, id: &str) -> ServiceResult<Versioned<TaskView>> {
         let number = parse_task_number(id)?;
@@ -1518,6 +1588,133 @@ impl TuidoService {
         }
         Ok(())
     }
+
+    async fn replace_task_relations(
+        &self,
+        tx: &mut Transaction<'_, Any>,
+        task_id: &str,
+        relations: &[TaskRelation],
+    ) -> ServiceResult<Vec<i64>> {
+        validate_task_relations(task_id, relations)?;
+        let task_number = parse_task_number(task_id)?;
+        let mut affected = self.related_task_numbers(tx, task_number).await?;
+        let delete = format!(
+            "DELETE FROM task_relations WHERE source_task_id = {} OR target_task_id = {}",
+            self.dialect.placeholder(1),
+            self.dialect.placeholder(2)
+        );
+        sqlx::query(AssertSqlSafe(delete.as_str()))
+            .bind(task_number)
+            .bind(task_number)
+            .execute(&mut **tx)
+            .await
+            .map_err(storage_error)?;
+        let insert = format!(
+            "INSERT INTO task_relations (source_task_id, target_task_id, relation_type, position) VALUES ({}, {}, {}, {})",
+            self.dialect.placeholder(1),
+            self.dialect.placeholder(2),
+            self.dialect.placeholder(3),
+            self.dialect.placeholder(4)
+        );
+        for (position, relation) in relations.iter().enumerate() {
+            let other = parse_task_number(&relation.task_id)?;
+            if !affected.contains(&other) {
+                affected.push(other);
+            }
+            let (source, target, kind) = match relation.kind {
+                TaskRelationKind::IsBlockedBy => (other, task_number, TaskRelationKind::Blocks),
+                TaskRelationKind::IsDuplicatedBy => {
+                    (other, task_number, TaskRelationKind::Duplicates)
+                }
+                kind => (task_number, other, kind),
+            };
+            sqlx::query(AssertSqlSafe(insert.as_str()))
+                .bind(source)
+                .bind(target)
+                .bind(kind.id())
+                .bind(position as i64)
+                .execute(&mut **tx)
+                .await
+                .map_err(storage_error)?;
+        }
+        Ok(affected)
+    }
+
+    async fn related_task_numbers(
+        &self,
+        tx: &mut Transaction<'_, Any>,
+        task_number: i64,
+    ) -> ServiceResult<Vec<i64>> {
+        let select = format!(
+            "SELECT source_task_id, target_task_id FROM task_relations WHERE source_task_id = {} OR target_task_id = {}",
+            self.dialect.placeholder(1),
+            self.dialect.placeholder(2)
+        );
+        let mut related = sqlx::query(AssertSqlSafe(select.as_str()))
+            .bind(task_number)
+            .bind(task_number)
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(storage_error)?
+            .into_iter()
+            .flat_map(|row| {
+                [
+                    row.try_get::<i64, _>("source_task_id"),
+                    row.try_get::<i64, _>("target_task_id"),
+                ]
+            })
+            .collect::<Result<HashSet<_>, _>>()
+            .map_err(storage_error)?;
+        related.remove(&task_number);
+        Ok(related.into_iter().collect())
+    }
+
+    async fn bump_related_task_revisions(
+        &self,
+        tx: &mut Transaction<'_, Any>,
+        task_id: &str,
+        task_numbers: Vec<i64>,
+    ) -> ServiceResult<HashMap<String, u64>> {
+        let mut revisions = HashMap::new();
+        for number in task_numbers {
+            let update = format!(
+                "UPDATE tasks SET revision = revision + 1, updated_at = {} WHERE id = {}",
+                self.dialect.placeholder(1),
+                self.dialect.placeholder(2)
+            );
+            sqlx::query(AssertSqlSafe(update.as_str()))
+                .bind(now_text())
+                .bind(number)
+                .execute(&mut **tx)
+                .await
+                .map_err(storage_error)?;
+            let select = format!(
+                "SELECT key_prefix, revision FROM tasks WHERE id = {}",
+                self.dialect.placeholder(1)
+            );
+            if let Some(row) = sqlx::query(AssertSqlSafe(select.as_str()))
+                .bind(number)
+                .fetch_optional(&mut **tx)
+                .await
+                .map_err(storage_error)?
+            {
+                let id = task_identifier(
+                    number,
+                    Some(
+                        &row.try_get::<String, _>("key_prefix")
+                            .map_err(storage_error)?,
+                    ),
+                );
+                if id != task_id {
+                    revisions.insert(
+                        format!("task:{id}"),
+                        row.try_get::<i64, _>("revision").map_err(storage_error)? as u64,
+                    );
+                }
+            }
+        }
+        Ok(revisions)
+    }
     async fn delete(
         &self,
         table: &'static str,
@@ -1676,6 +1873,14 @@ fn task_view(v: Task) -> TaskView {
         tag_ids: v.tag_ids,
         checklist,
         links: v.links,
+        relations: v
+            .relations
+            .into_iter()
+            .map(|relation| TaskRelationView {
+                task_id: relation.task_id,
+                relation_type: relation.kind.id().to_string(),
+            })
+            .collect(),
         description: v.description,
     }
 }
@@ -1720,6 +1925,48 @@ fn normalize_task_checklist(items: &mut [ChecklistItem]) {
     for item in items {
         item.text = item.text.trim().to_string();
     }
+}
+
+fn normalize_task_relations(relations: &mut Vec<TaskRelation>) {
+    let mut seen = HashSet::new();
+    relations.retain(|relation| seen.insert((relation.task_id.clone(), relation.kind)));
+}
+
+fn validate_task_relations(task_id: &str, relations: &[TaskRelation]) -> ServiceResult<()> {
+    if relations.iter().any(|relation| relation.task_id == task_id) {
+        return Err(ServiceError::Invalid(
+            "a task cannot relate to itself".into(),
+        ));
+    }
+    let mut linked_task_ids = HashSet::new();
+    if let Some(duplicate) = relations
+        .iter()
+        .find(|relation| !linked_task_ids.insert(relation.task_id.as_str()))
+    {
+        return Err(ServiceError::Invalid(format!(
+            "task {task_id} can have only one issue link to {}",
+            duplicate.task_id
+        )));
+    }
+    Ok(())
+}
+
+fn task_relation_inputs(inputs: Vec<TaskRelationInput>) -> ServiceResult<Vec<TaskRelation>> {
+    inputs
+        .into_iter()
+        .map(|input| {
+            let kind = TaskRelationKind::parse(&input.relation_type).ok_or_else(|| {
+                ServiceError::Invalid(format!(
+                    "unknown task relation type: {}",
+                    input.relation_type
+                ))
+            })?;
+            Ok(TaskRelation {
+                task_id: input.task_id,
+                kind,
+            })
+        })
+        .collect()
 }
 
 fn storage_workflow_state(v: &str) -> &str {
@@ -1813,7 +2060,8 @@ async fn apply_task_patch(
         | TaskPatch::Project(_)
         | TaskPatch::Tags(_)
         | TaskPatch::Checklist(_)
-        | TaskPatch::Links(_) => {
+        | TaskPatch::Links(_)
+        | TaskPatch::Relations(_) => {
             return Err(ServiceError::Invalid(
                 "relation patch requires full task update".into(),
             ));

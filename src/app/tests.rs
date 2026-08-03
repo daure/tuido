@@ -1,5 +1,5 @@
 use super::*;
-use crate::domain::{SaveTarget, TaskField, WorkspaceSnapshot};
+use crate::domain::{SaveTarget, TaskField, TaskRelation, TaskRelationKind, WorkspaceSnapshot};
 use ratatui::{Terminal, backend::TestBackend};
 use sqlx::any::AnyPoolOptions;
 use tuicore::{
@@ -22,6 +22,7 @@ fn test_task() -> Task {
         tag_ids: Vec::new(),
         checklist: Vec::new(),
         links: Vec::new(),
+        relations: Vec::new(),
         description: "Existing detail".to_string(),
     }
 }
@@ -262,6 +263,143 @@ pub(crate) fn rendered_text(node: &impl TuiNode<AppMsg>, area: Rect) -> String {
         .iter()
         .map(|cell| cell.symbol())
         .collect()
+}
+
+#[test]
+fn task_navigation_uses_the_most_specific_view_for_each_state() {
+    for (state, expected_view) in [
+        (TaskState::Backlog, TaskView::Backlog),
+        (TaskState::Todo, TaskView::Active),
+        (TaskState::InProgress, TaskView::Active),
+        (TaskState::Snoozed, TaskView::Snoozed),
+        (TaskState::Done, TaskView::Archived),
+        (TaskState::Rejected, TaskView::Archived),
+    ] {
+        let mut target = test_task();
+        target.id = format!("target-{}", state.id());
+        target.state = state;
+        let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+            tasks: vec![target.clone()],
+            people: vec![],
+            projects: vec![],
+            tags: vec![],
+        });
+        let mut workspace = TaskWorkspace::new(context);
+        *workspace.pending_navigation.borrow_mut() = Some(TaskNavigation {
+            target_task_id: target.id.clone(),
+            source_task_id: "source".into(),
+            view: expected_view,
+        });
+
+        assert!(workspace.sync_navigation());
+        assert_eq!(workspace.task_view, expected_view);
+        assert_eq!(
+            workspace.table().highlighted_id().as_deref(),
+            Some(target.id.as_str())
+        );
+        assert_eq!(
+            store.borrow().state().selected_task_id.as_deref(),
+            Some(target.id.as_str())
+        );
+    }
+}
+
+#[test]
+fn app_task_navigation_chooses_the_view_for_each_task_state() {
+    for (state, expected_view) in [
+        (TaskState::Backlog, TaskView::Backlog),
+        (TaskState::Todo, TaskView::Active),
+        (TaskState::InProgress, TaskView::Active),
+        (TaskState::Snoozed, TaskView::Snoozed),
+        (TaskState::Done, TaskView::Archived),
+        (TaskState::Rejected, TaskView::Archived),
+    ] {
+        let mut target = test_task();
+        target.state = state;
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks: vec![target.clone()],
+            people: vec![],
+            projects: vec![],
+            tags: vec![],
+        });
+        let mut app = App::new(context.store, context.coordinator);
+        app.active_tab.set(CALENDAR_TAB_INDEX);
+
+        app.navigate_to_task("source".into(), target.id.clone(), &mut EventCtx::default());
+
+        assert_eq!(app.active_tab.get(), TASKS_TAB_INDEX);
+        assert_eq!(
+            app.pending_task_navigation.borrow().as_ref(),
+            Some(&TaskNavigation {
+                target_task_id: target.id,
+                source_task_id: "source".into(),
+                view: expected_view,
+            })
+        );
+    }
+}
+
+#[test]
+fn task_navigation_focuses_reverse_issue_link_on_destination_task() {
+    let mut source = test_task();
+    source.id = "source".into();
+    source.relations.push(TaskRelation {
+        task_id: "target".into(),
+        kind: TaskRelationKind::Blocks,
+    });
+    let mut target = test_task();
+    target.id = "target".into();
+    target.relations.push(TaskRelation {
+        task_id: "source".into(),
+        kind: TaskRelationKind::IsBlockedBy,
+    });
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![source, target],
+        people: vec![],
+        projects: vec![],
+        tags: vec![],
+    });
+    let mut app = App::new(context.store, context.coordinator);
+    app.navigate_to_task("source".into(), "target".into(), &mut EventCtx::default());
+    let mut layout = LayoutCtx::new();
+    app.layout(Rect::new(0, 0, 120, 80), &mut layout);
+    let mut focus = FocusManager::new();
+    let transition = focus
+        .apply_request(&issue_links_focus_request(), layout.focus_targets())
+        .expect("Issue links control should accept navigation focus");
+    let mut dispatcher = TreeDispatcher::new();
+    dispatcher.dispatch_focus(&mut app, transition, AnimationSettings::default());
+    let route = EventRoute::new(focus.current_path());
+
+    let effects = dispatcher.dispatch_event(
+        &mut app,
+        &route,
+        &TuiEvent::Key(KeyEvent::from(Key::Enter)),
+        AnimationSettings::default(),
+    );
+
+    assert!(matches!(
+        effects.messages.as_slice(),
+        [AppMsg::NavigateToTask {
+            source_task_id,
+            target_task_id,
+        }] if source_task_id == "target" && target_task_id == "source"
+    ));
+}
+
+#[test]
+fn tracked_tabs_apply_programmatic_selection_requests() {
+    let selected = Rc::new(Cell::new(0));
+    let tabs = Tabs::new(vec![
+        Tab::text("First", "first"),
+        Tab::text("Second", "second"),
+    ]);
+    let mut tracked = TrackedTabs::new(tabs, Rc::clone(&selected));
+    selected.set(1);
+
+    tracked.layout(Rect::new(0, 0, 40, 5), &mut LayoutCtx::new());
+
+    assert_eq!(tracked.tabs.selected_index(), 1);
 }
 
 #[test]
@@ -581,6 +719,24 @@ fn task_table_state_column_is_icon_only() {
 }
 
 #[test]
+fn task_table_shows_current_project_key_task_number_and_title() {
+    let project = Project::new(
+        "project".into(),
+        "core".into(),
+        "Core".into(),
+        String::new(),
+    );
+    let mut task = task_with("OLD-42", "Ship it", TaskState::Todo);
+    task.project_id = Some(project.id.clone());
+    let mut table =
+        task_table_with_copy_context(vec![task], None, TaskCopyContext::new(&[], &[project], &[]));
+    let area = Rect::new(0, 0, 80, 5);
+    <TaskTable as TuiNode<AppMsg>>::layout(&mut table, area, &mut LayoutCtx::new());
+
+    assert!(rendered_text(&table, area).contains("CORE-42 - Ship it"));
+}
+
+#[test]
 fn task_table_shows_horizontal_scrollbar_for_long_titles() {
     let table = task_table(
         vec![task_with(
@@ -626,6 +782,22 @@ fn narrow_task_workspace_renders_task_and_detail() {
     let text = rendered_text(&workspace, area);
     assert!(text.contains("Original"));
     assert!(text.contains("Title"));
+}
+
+#[test]
+fn wide_task_workspace_aligns_detail_with_toolbar_top() {
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![test_task()],
+        people: Vec::new(),
+        projects: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut workspace = TaskWorkspace::new(context);
+
+    workspace.layout(Rect::new(0, 0, 120, 40), &mut LayoutCtx::new());
+
+    let (_, detail_area) = workspace.layout.child_areas();
+    assert_eq!(detail_area.y, 0);
 }
 
 #[test]
@@ -994,7 +1166,8 @@ fn task_detail_hotkeys_are_registered_while_task_table_is_focused() {
         keys::TASK_TITLE_FIELD.hotkey(),
         keys::TASK_TAGS_FIELD.hotkey(),
         keys::TASK_CHECKLIST_FIELD.hotkey(),
-        keys::TASK_LINKS_FIELD.hotkey(),
+        keys::TASK_URL_LINKS_FIELD.hotkey(),
+        keys::TASK_ISSUE_LINKS_FIELD.hotkey(),
     ] {
         assert_eq!(
             layout
@@ -1291,9 +1464,12 @@ fn escape_from_global_filters_focuses_active_tab_content() {
                             && target.id.as_str() == "field"
                     })
                     .expect("global filter should be focusable");
-                if component == "project" {
-                    assert_eq!(target.hotkey_sequences, ["r"]);
-                }
+                let expected_hotkey = if component == "project" {
+                    "shift+p"
+                } else {
+                    "shift+l"
+                };
+                assert_eq!(target.hotkey_sequences, [expected_hotkey]);
                 let mut ctx = EventCtx::default();
 
                 let outcome = filters.dispatch_event(
@@ -1813,7 +1989,7 @@ fn detail_state_change_with_no_remaining_tasks_clears_detail() {
     assert!(!text.contains("No task selected."));
     assert_eq!(workspace.table().highlighted_id(), None);
     assert_eq!(workspace.detail().task_id, None);
-    assert!(!workspace.layout.second().is_second_visible());
+    assert!(!workspace.layout.is_second_visible());
 }
 
 #[path = "tests_workspace.rs"]

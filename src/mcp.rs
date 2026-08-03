@@ -14,8 +14,8 @@ use crate::{
     domain::{TaskPatch, TaskState},
     service::{
         ChecklistItemInput, PersonInput, PersonView, ProjectInput, ProjectView, ServiceError,
-        TagInput, TagView, TaskCreate, TaskUpdate, TaskView, TuidoService, Versioned,
-        WorkspaceFilter, WorkspaceView,
+        TagInput, TagView, TaskCreate, TaskRelationInput, TaskUpdate, TaskView, TuidoService,
+        Versioned, WorkspaceFilter, WorkspaceView,
     },
 };
 
@@ -76,6 +76,14 @@ struct TaskChecklistUpdate {
     expected_revision: u64,
     /// Complete ordered checklist tree. Replaces every existing item; use [] to clear it.
     checklist: Vec<ChecklistItemInput>,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+struct TaskRelationsUpdate {
+    id: String,
+    #[schemars(schema_with = "crate::service::revision_schema")]
+    expected_revision: u64,
+    /// Complete relation set from this task's perspective. Replaces existing relations.
+    relations: Vec<TaskRelationInput>,
 }
 #[derive(Debug, Deserialize, JsonSchema)]
 struct TaskTagsUpdate {
@@ -214,6 +222,20 @@ impl McpServer {
         preflight_task_expirations(&self.service).await?;
         self.service
             .set_task_checklist(v.id, v.expected_revision, v.checklist)
+            .await
+            .map(Json)
+            .map_err(mcp_error)
+    }
+    #[tool(
+        description = "Replace a task's complete issue-link set. Links are bidirectional and use blocks, is_blocked_by, relates_to, duplicates, or is_duplicated_by. Get the task first and use its latest expected_revision. Pass [] to remove all issue links."
+    )]
+    async fn set_task_relations(
+        &self,
+        Parameters(v): Parameters<TaskRelationsUpdate>,
+    ) -> Result<Json<Versioned<TaskView>>, String> {
+        preflight_task_expirations(&self.service).await?;
+        self.service
+            .set_task_relations(v.id, v.expected_revision, v.relations)
             .await
             .map(Json)
             .map_err(mcp_error)
@@ -686,6 +708,8 @@ mod tests {
         assert!(tools.contains("complete link set"));
         assert!(tools.contains("set_task_checklist"));
         assert!(tools.contains("complete ordered checklist tree"));
+        assert!(tools.contains("set_task_relations"));
+        assert!(tools.contains("Links are bidirectional"));
     }
 
     #[test]
@@ -819,6 +843,7 @@ mod tests {
                     project_id: None,
                     tag_ids: Vec::new(),
                     links: Vec::new(),
+                    relations: Vec::new(),
                     description: String::new(),
                 }))
                 .await;

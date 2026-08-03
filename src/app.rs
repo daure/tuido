@@ -14,7 +14,8 @@ use crate::create_management_dialog::{CreateManagementDialog, ManagementEntityDr
 use crate::create_task_dialog::{CreateTaskDialog, CreateTaskDraft};
 use crate::domain::{
     AppEvent, AppState, DEFAULT_PROJECT_SETTING, Person, Project, Tag, Task, TaskPatch,
-    TaskPriority, TaskRank, TaskSize, TaskState, reduce_app_state, task_identifier, task_number,
+    TaskPriority, TaskRank, TaskSize, TaskState, reduce_app_state, task_display_id,
+    task_identifier, task_number,
 };
 use crate::persistence_coordinator::{AppStore, PersistenceCommand, PersistenceCoordinator};
 use crate::service::TuidoService;
@@ -29,7 +30,7 @@ use crate::task_title::format_title;
 use crate::ui::management::{ManagementDialogKind, people, projects, tags};
 use crate::ui::responsive_split::ResponsiveSplit;
 use crate::ui::save_status::SaveStatusLine;
-use crate::ui::task_detail::{PatchSink, TaskDetailForm};
+use crate::ui::task_detail::{PatchSink, TaskDetailCatalogs, TaskDetailForm};
 use ratatui::{
     Frame,
     layout::{Constraint, Rect},
@@ -55,17 +56,20 @@ use uuid::Uuid;
 mod task_checklist_input;
 mod task_copy;
 mod task_links_input;
+mod task_relations_input;
 mod task_title_input;
 
 use task_checklist_input::TaskChecklistInput;
 use task_copy::TaskCopyContext;
 use task_links_input::TaskLinksInput;
+use task_relations_input::TaskRelationsInput;
 use task_title_input::TaskTitleInput;
 
 const PEOPLE_MENU_ID: &str = "people";
 const PROJECTS_MENU_ID: &str = "projects";
 const TAGS_MENU_ID: &str = "tags";
 const SETTINGS_MENU_ID: &str = "settings";
+const TASKS_TAB_INDEX: usize = 0;
 const CALENDAR_TAB_INDEX: usize = 1;
 static NEXT_PENDING_TASK_ID: AtomicU64 = AtomicU64::new(1);
 const STATUS_BAR_MENU_ITEMS: [StatusBarMenuItem; 6] = [
@@ -166,6 +170,10 @@ pub(crate) enum AppMsg {
         state: TaskState,
     },
     ToggleTaskProgress(String),
+    NavigateToTask {
+        source_task_id: String,
+        target_task_id: String,
+    },
     SnoozeTask {
         task_id: String,
         until: PrimitiveDateTime,
@@ -306,6 +314,10 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         } => app.open_complete_task_dialog(&task_id, return_focus, ctx),
         AppMsg::CompleteTask { task_id, state } => app.complete_task(task_id, state, ctx),
         AppMsg::ToggleTaskProgress(task_id) => app.toggle_task_progress(task_id, ctx),
+        AppMsg::NavigateToTask {
+            source_task_id,
+            target_task_id,
+        } => app.navigate_to_task(source_task_id, target_task_id, ctx),
         AppMsg::CloseManagementOverlay => app.close_management_overlay(ctx),
         AppMsg::CloseSnoozeDialog => app.close_snooze_dialog(ctx),
         AppMsg::CloseDeleteTaskDialog => app.close_delete_task_dialog(ctx),
@@ -335,6 +347,13 @@ impl TrackedTabs {
     fn sync_selected(&self) {
         self.selected.set(self.tabs.selected_index());
     }
+
+    fn sync_requested(&mut self) {
+        let selected = self.selected.get();
+        if self.tabs.selected_index() != selected {
+            self.tabs.select_index(selected);
+        }
+    }
 }
 
 impl TuiNode<AppMsg> for TrackedTabs {
@@ -343,6 +362,7 @@ impl TuiNode<AppMsg> for TrackedTabs {
     }
 
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
+        self.sync_requested();
         self.tabs.layout(area, ctx)
     }
 
@@ -404,6 +424,8 @@ struct App {
     snooze_return_focus: Option<TreePath>,
     delete_return_focus: Option<TreePath>,
     complete_return_focus: Option<CompleteReturnFocus>,
+    active_tab: Rc<Cell<usize>>,
+    pending_task_navigation: PendingTaskNavigation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -438,6 +460,7 @@ impl App {
     ) -> Self {
         let context = AppContext { store, coordinator };
         let active_tab = Rc::new(Cell::new(0));
+        let pending_task_navigation = Rc::new(RefCell::new(None));
         let active_project_filter = Rc::new(RefCell::new(None));
         let active_label_filter = Rc::new(RefCell::new(Vec::new()));
         let calendar_create_context = CalendarCreateContext::new();
@@ -448,6 +471,7 @@ impl App {
                     context.clone(),
                     Rc::clone(&active_project_filter),
                     Rc::clone(&active_label_filter),
+                    Rc::clone(&pending_task_navigation),
                 ),
             ),
             Tab::new(
@@ -546,7 +570,46 @@ impl App {
             snooze_return_focus: None,
             delete_return_focus: None,
             complete_return_focus: None,
+            active_tab,
+            pending_task_navigation,
         }
+    }
+
+    fn navigate_to_task(
+        &mut self,
+        source_task_id: String,
+        target_task_id: String,
+        ctx: &mut EventCtx<AppMsg>,
+    ) {
+        let state = self.context.store.borrow();
+        let Some(task) = state
+            .state()
+            .tasks
+            .iter()
+            .find(|task| task.id == target_task_id)
+        else {
+            ctx.notify(tuicore::Notification::error(
+                "Task not found",
+                format!("Could not navigate to {target_task_id}."),
+            ));
+            return;
+        };
+        let view = match task.state {
+            TaskState::Backlog => TaskView::Backlog,
+            TaskState::Todo | TaskState::InProgress => TaskView::Active,
+            TaskState::Snoozed => TaskView::Snoozed,
+            TaskState::Done | TaskState::Rejected => TaskView::Archived,
+        };
+        drop(state);
+        *self.pending_task_navigation.borrow_mut() = Some(TaskNavigation {
+            target_task_id,
+            source_task_id,
+            view,
+        });
+        self.active_tab.set(TASKS_TAB_INDEX);
+        ctx.focus(issue_links_focus_request());
+        ctx.request_layout();
+        ctx.request_redraw();
     }
 
     fn primary_dialog(&mut self) -> &mut PrimaryDialogLayer {
@@ -1565,10 +1628,11 @@ impl TuiNode<AppMsg> for App {
 type TaskRow = Task;
 type TaskTable = ListControl<TaskRow, String, AppMsg>;
 type TaskDetail = TaskDetailForm;
-type TaskPane = ResponsiveSplit<TaskTable, TaskDetail>;
-type TaskWorkspaceLayout = Split<Flex<AppMsg>, TaskPane>;
+type TaskMaster = Split<Flex<AppMsg>, TaskTable>;
+type TaskWorkspaceLayout = ResponsiveSplit<TaskMaster, TaskDetail>;
 type TaskViewChange = Rc<RefCell<Option<TaskView>>>;
 type ActiveTaskView = Rc<RefCell<TaskView>>;
+type PendingTaskNavigation = Rc<RefCell<Option<TaskNavigation>>>;
 pub(crate) type ActiveProjectFilter = Rc<RefCell<Option<String>>>;
 pub(crate) type ActiveLabelFilter = Rc<RefCell<Vec<String>>>;
 type VisibleTaskSelection = Rc<RefCell<Option<String>>>;
@@ -1653,8 +1717,25 @@ fn initial_task_table_focus_request() -> FocusRequest {
             ChildKey::new("content"),
             ChildKey::new("tabs"),
             ChildKey::new("tab-0"),
-            ChildKey::second(),
             ChildKey::first(),
+            ChildKey::second(),
+            ChildKey::new("data"),
+        ]),
+        id: FocusId::new("data-view"),
+    }
+}
+
+fn issue_links_focus_request() -> FocusRequest {
+    FocusRequest::TargetAt {
+        path: TreePath::from_keys([
+            ChildKey::first(),
+            ChildKey::first(),
+            ChildKey::new("content"),
+            ChildKey::new("tabs"),
+            ChildKey::new("tab-0"),
+            ChildKey::second(),
+            ChildKey::new("form"),
+            ChildKey::new("relations"),
             ChildKey::new("data"),
         ]),
         id: FocusId::new("data-view"),
@@ -1700,6 +1781,13 @@ enum TaskView {
     Snoozed,
     Archived,
     All,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TaskNavigation {
+    target_task_id: String,
+    source_task_id: String,
+    view: TaskView,
 }
 
 impl TaskView {
@@ -2058,6 +2146,7 @@ struct TaskWorkspace {
     detail_draft_protected: bool,
     observed_version: u64,
     observed_external_refresh_version: u64,
+    pending_navigation: PendingTaskNavigation,
 }
 
 #[derive(Debug, Default)]
@@ -2073,6 +2162,7 @@ impl TaskWorkspace {
             context,
             Rc::new(RefCell::new(None)),
             Rc::new(RefCell::new(Vec::new())),
+            Rc::new(RefCell::new(None)),
         )
     }
 
@@ -2080,6 +2170,7 @@ impl TaskWorkspace {
         context: AppContext,
         active_project_filter: ActiveProjectFilter,
         active_label_filter: ActiveLabelFilter,
+        pending_navigation: PendingTaskNavigation,
     ) -> Self {
         let task_view = TaskView::Active;
         let state = context.store.borrow().state().clone();
@@ -2106,14 +2197,13 @@ impl TaskWorkspace {
         let active_task_view = Rc::new(RefCell::new(task_view));
         let visible_selection = Rc::new(RefCell::new(selected_task_id.clone()));
         let toolbar = task_toolbar(Rc::clone(&pending_task_view), Rc::clone(&active_task_view));
-        let pane = task_split(
+        let layout = task_workspace_layout(
+            toolbar,
             &context.store,
             task_view,
             project_filter.as_deref(),
             &label_filter,
         );
-        let layout =
-            Split::vertical(toolbar, pane).constraints(Constraint::Length(1), Constraint::Min(1));
         let observed_version = context.store.borrow().state().version;
         let observed_external_refresh_version = state.external_refresh_version;
         Self {
@@ -2138,15 +2228,16 @@ impl TaskWorkspace {
             detail_draft_protected: false,
             observed_version,
             observed_external_refresh_version,
+            pending_navigation,
         }
     }
 
     fn task_list(&self) -> &TaskTable {
-        self.layout.second().first()
+        self.layout.first().second()
     }
 
     fn task_list_mut(&mut self) -> &mut TaskTable {
-        self.layout.second_mut().first_mut()
+        self.layout.first_mut().second_mut()
     }
 
     fn table(&self) -> &DataView<TaskRow, String> {
@@ -2158,11 +2249,11 @@ impl TaskWorkspace {
     }
 
     fn detail(&self) -> &TaskDetail {
-        self.layout.second().second()
+        self.layout.second()
     }
 
     fn detail_mut(&mut self) -> &mut TaskDetail {
-        self.layout.second_mut().second_mut()
+        self.layout.second_mut()
     }
 
     fn sync_store_version(&mut self) {
@@ -2194,6 +2285,29 @@ impl TaskWorkspace {
                 self.table_mut().reveal_highlighted();
             }
         }
+    }
+
+    fn sync_navigation(&mut self) -> bool {
+        let navigation = self.pending_navigation.borrow_mut().take();
+        let Some(navigation) = navigation else {
+            return false;
+        };
+        self.table_mut().clear_search();
+        self.task_view = navigation.view;
+        *self.active_task_view.borrow_mut() = navigation.view;
+        self.project_filter = None;
+        *self.active_project_filter.borrow_mut() = None;
+        self.label_filter.clear();
+        self.active_label_filter.borrow_mut().clear();
+        self.detail_mut()
+            .queue_issue_link_highlight(navigation.source_task_id);
+        self.context
+            .store
+            .borrow_mut()
+            .dispatch(AppEvent::SelectTask(navigation.target_task_id));
+        let state = self.context.store.borrow().state().clone();
+        self.refresh_from_state(&state, false, false, false);
+        true
     }
 
     fn refresh_from_state(
@@ -2255,9 +2369,7 @@ impl TaskWorkspace {
             .and_then(|task| state.task_status_error(&task.id))
             .map(str::to_string);
         *self.visible_selection.borrow_mut() = selected_task_id.clone();
-        self.layout
-            .second_mut()
-            .set_second_visible(selected_task_id.is_some());
+        self.layout.set_second_visible(selected_task_id.is_some());
 
         if let Some(task_id) = selected_task_id.as_ref()
             && state.selected_task_id.as_ref() != Some(task_id)
@@ -2273,7 +2385,8 @@ impl TaskWorkspace {
             || self.detail().task_state != selected_task.map(|task| task.state);
         let detail_options_changed = self.detail().people_snapshot != state.people
             || self.detail().projects_snapshot != state.projects
-            || self.detail().tags_snapshot != state.tags;
+            || self.detail().tags_snapshot != state.tags
+            || self.detail().tasks_snapshot != state.tasks;
         let detail_content_changed =
             self.detail().task_snapshot.as_ref() != selected_task || detail_options_changed;
         if detail_identity_changed
@@ -2282,9 +2395,7 @@ impl TaskWorkspace {
         {
             self.detail_mut().set_task(
                 selected_task,
-                &state.people,
-                &state.projects,
-                &state.tags,
+                (&state.tasks, &state.people, &state.projects, &state.tags),
                 save_error.as_deref(),
                 &mut EventCtx::default(),
             );
@@ -2293,6 +2404,7 @@ impl TaskWorkspace {
             if !external_refresh {
                 let detail = self.detail_mut();
                 detail.task_snapshot = selected_task.cloned();
+                detail.tasks_snapshot = state.tasks.clone();
                 detail.people_snapshot = state.people.clone();
                 detail.projects_snapshot = state.projects.clone();
                 detail.tags_snapshot = state.tags.clone();
@@ -2446,24 +2558,26 @@ impl TaskWorkspace {
         if self.detail().task_id.as_deref() != Some(id) {
             self.detail_mut().set_task(
                 selected_task,
-                &state.people,
-                &state.projects,
-                &state.tags,
+                (&state.tasks, &state.people, &state.projects, &state.tags),
                 save_error,
                 ctx,
             );
         }
-        let visibility_changed = self.layout.second_mut().set_second_visible(true);
+        let visibility_changed = self.layout.set_second_visible(true);
         outcome.changed || visibility_changed
     }
 
     fn clear_task_detail(&mut self, ctx: &mut EventCtx<AppMsg>) -> bool {
         *self.visible_selection.borrow_mut() = None;
         let state = self.context.store.borrow().state().clone();
-        self.detail_mut()
-            .set_task(None, &state.people, &state.projects, &state.tags, None, ctx);
+        self.detail_mut().set_task(
+            None,
+            (&state.tasks, &state.people, &state.projects, &state.tags),
+            None,
+            ctx,
+        );
         self.detail_draft_protected = false;
-        self.layout.second_mut().set_second_visible(false)
+        self.layout.set_second_visible(false)
     }
 
     fn drain_detail_patches(&mut self) -> bool {
@@ -2622,8 +2736,7 @@ impl TaskWorkspace {
         ctx: &mut EventCtx<AppMsg>,
     ) -> Option<EventOutcome> {
         let route_keys = route.path.keys();
-        let detail_route = route_keys.first() == Some(&ChildKey::second())
-            && route_keys.get(1) == Some(&ChildKey::second());
+        let detail_route = route_keys.first() == Some(&ChildKey::second());
         let links_route = route_keys.iter().any(|key| key.as_str() == "links");
         let checklist_route = route_keys.iter().any(|key| key.as_str() == "checklist");
         if child_outcome.handled()
@@ -2652,8 +2765,7 @@ impl TaskWorkspace {
         ctx: &mut EventCtx<AppMsg>,
     ) -> Option<EventOutcome> {
         let route_keys = route.path.keys();
-        let detail_route = route_keys.first() == Some(&ChildKey::second())
-            && route_keys.get(1) == Some(&ChildKey::second());
+        let detail_route = route_keys.first() == Some(&ChildKey::second());
         if child_outcome.handled()
             || ctx.propagation() != Propagation::Continue
             || !detail_route
@@ -2711,6 +2823,7 @@ impl TaskWorkspace {
 
 impl TuiNode<AppMsg> for TaskWorkspace {
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
+        self.sync_navigation();
         self.sync_store_version();
         self.sync_project_filter_change();
         self.sync_label_filter_change();
@@ -2795,18 +2908,15 @@ impl TuiNode<AppMsg> for TaskWorkspace {
 
     fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<AppMsg>) {
         let table_targeted = target
-            .for_child(&ChildKey::second())
-            .and_then(|target| target.for_child(&ChildKey::first()))
+            .for_child(&ChildKey::first())
+            .and_then(|target| target.for_child(&ChildKey::second()))
             .is_some();
         if table_targeted {
             self.table_focused = focused;
         } else if focused {
             self.table_focused = false;
         }
-        let detail_targeted = target
-            .for_child(&ChildKey::second())
-            .and_then(|target| target.for_child(&ChildKey::second()))
-            .is_some();
+        let detail_targeted = target.for_child(&ChildKey::second()).is_some();
         if detail_targeted {
             self.detail_draft_protected = focused;
         } else if focused {

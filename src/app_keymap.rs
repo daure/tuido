@@ -305,6 +305,9 @@ fn parse_key_event(value: &str) -> Option<KeyEvent> {
     if let Some(rest) = value.strip_prefix("ctrl+") {
         return modified_key_event(rest, KeyModifiers::CONTROL);
     }
+    if let Some(rest) = value.strip_prefix("shift+") {
+        return modified_key_event(rest, KeyModifiers::SHIFT);
+    }
 
     let code = match value.as_str() {
         "esc" => Key::Esc,
@@ -348,10 +351,10 @@ pub mod keys {
     pub const APP_CALENDAR_TAB: AppBinding = AppBinding::new("APP_CALENDAR_TAB", "c");
     pub const APP_PROJECTS_TAB: AppBinding = AppBinding::new_sequence("APP_PROJECTS_TAB", "pr");
     pub const APP_PEOPLE_TAB: AppBinding = AppBinding::new_sequence("APP_PEOPLE_TAB", "pe");
-    pub const TASK_QUICK_CREATE: AppBinding = AppBinding::new("TASK_QUICK_CREATE", "n");
+    pub const TASK_QUICK_CREATE: AppBinding = AppBinding::new("TASK_QUICK_CREATE", "shift+n");
     pub const TASK_VIEW_MENU: AppBinding = AppBinding::new("TASK_VIEW_MENU", "f");
-    pub const TASK_PROJECT_FILTER: AppBinding = AppBinding::new("TASK_PROJECT_FILTER", "r");
-    pub const TASK_LABEL_FILTER: AppBinding = AppBinding::new("TASK_LABEL_FILTER", "a");
+    pub const TASK_PROJECT_FILTER: AppBinding = AppBinding::new("TASK_PROJECT_FILTER", "shift+p");
+    pub const TASK_LABEL_FILTER: AppBinding = AppBinding::new("TASK_LABEL_FILTER", "shift+l");
     pub const TASK_DELETE: AppBinding = AppBinding::new("TASK_DELETE", "delete");
     pub const TASK_DELETE_BACKSPACE: AppBinding = AppBinding::new("TASK_DELETE_X", "backspace");
     pub const TASK_DELETE_CTRL_X: AppBinding = AppBinding::new("TASK_DELETE_CTRL_X", "ctrl+x");
@@ -396,7 +399,10 @@ pub mod keys {
     pub const TASK_TAGS_FIELD: AppBinding = AppBinding::new_sequence("TASK_TAGS_FIELD", "ut");
     pub const TASK_CHECKLIST_FIELD: AppBinding =
         AppBinding::new_sequence("TASK_CHECKLIST_FIELD", "uc");
-    pub const TASK_LINKS_FIELD: AppBinding = AppBinding::new_sequence("TASK_LINKS_FIELD", "ul");
+    pub const TASK_URL_LINKS_FIELD: AppBinding =
+        AppBinding::new_sequence("TASK_URL_LINKS_FIELD", "uu");
+    pub const TASK_ISSUE_LINKS_FIELD: AppBinding =
+        AppBinding::new_sequence("TASK_ISSUE_LINKS_FIELD", "ui");
     pub const TASK_LINK_DELETE: AppBinding = AppBinding::new("TASK_LINK_DELETE", "ctrl+x");
     pub const TASK_SNOOZED_UNTIL_FIELD: AppBinding =
         AppBinding::new_sequence("TASK_SNOOZED_UNTIL_FIELD", "su");
@@ -522,7 +528,8 @@ pub mod keys {
         TASK_PROJECTS_FIELD,
         TASK_TAGS_FIELD,
         TASK_CHECKLIST_FIELD,
-        TASK_LINKS_FIELD,
+        TASK_URL_LINKS_FIELD,
+        TASK_ISSUE_LINKS_FIELD,
         TASK_LINK_DELETE,
         TASK_SNOOZED_UNTIL_FIELD,
         DETAIL_CLOSE,
@@ -640,7 +647,8 @@ pub mod keys {
                 TASK_PROJECTS_FIELD,
                 TASK_TAGS_FIELD,
                 TASK_CHECKLIST_FIELD,
-                TASK_LINKS_FIELD,
+                TASK_URL_LINKS_FIELD,
+                TASK_ISSUE_LINKS_FIELD,
                 TASK_LINK_DELETE,
                 TASK_SNOOZED_UNTIL_FIELD,
                 DETAIL_CLOSE,
@@ -722,9 +730,21 @@ mod tests {
     #[test]
     fn invalid_keys_are_rejected() {
         assert!(parse_key("").is_none());
-        assert!(parse_key("shift+a").is_none());
+        assert!(parse_key("shift+escape").is_none());
         assert!(parse_key("ctrl+").is_none());
         assert!(parse_key("enter now").is_none());
+    }
+
+    #[test]
+    fn shifted_letters_parse_with_uppercase_labels() {
+        let binding = parse_key("shift+p").unwrap();
+
+        assert_eq!(binding.label(), "P");
+        assert!(binding.matches(KeyEvent {
+            code: Key::Char('P'),
+            modifiers: KeyModifiers::SHIFT,
+        }));
+        assert!(!binding.matches(KeyEvent::from(Key::Char('p'))));
     }
 
     #[test]
@@ -757,7 +777,8 @@ mod tests {
             ("TASK_PROJECTS_FIELD", "po"),
             ("TASK_TAGS_FIELD", "ut"),
             ("TASK_CHECKLIST_FIELD", "uc"),
-            ("TASK_LINKS_FIELD", "ul"),
+            ("TASK_URL_LINKS_FIELD", "uu"),
+            ("TASK_ISSUE_LINKS_FIELD", "ui"),
             ("TASK_SNOOZED_UNTIL_FIELD", "su"),
         ];
 
@@ -818,8 +839,9 @@ mod tests {
     fn task_and_management_shortcuts_use_requested_defaults() {
         let keymap = AppKeymap::from_overrides(std::iter::empty::<(String, String)>()).unwrap();
         for (name, expected) in [
-            ("TASK_PROJECT_FILTER", "r"),
-            ("TASK_LABEL_FILTER", "a"),
+            ("TASK_PROJECT_FILTER", "shift+p"),
+            ("TASK_LABEL_FILTER", "shift+l"),
+            ("TASK_QUICK_CREATE", "shift+n"),
             ("TASK_SNOOZE", "ctrl+z"),
             ("TASK_COMPLETE", "ctrl+c"),
             ("TASK_TOGGLE_PROGRESS", "ctrl+t"),
@@ -861,7 +883,8 @@ mod tests {
 
     #[test]
     fn active_context_rejects_duplicate_bindings() {
-        let error = AppKeymap::from_overrides([("TASK_VIEW_MENU".into(), "n".into())]).unwrap_err();
+        let error =
+            AppKeymap::from_overrides([("TASK_VIEW_MENU".into(), "shift+n".into())]).unwrap_err();
 
         assert!(error.to_string().contains("task workspace context"));
     }

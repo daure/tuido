@@ -670,6 +670,7 @@ fn public_task_inputs_reject_legacy_state_aliases() {
                 project_id: None,
                 tag_ids: Vec::new(),
                 links: Vec::new(),
+                relations: Vec::new(),
                 description: String::new(),
             })
             .await;
@@ -794,6 +795,7 @@ fn malformed_task_snooze_update_is_rejected_without_poisoning_workspace() {
                 project_id: None,
                 tag_ids: Vec::new(),
                 links: Vec::new(),
+                relations: Vec::new(),
                 description: String::new(),
             })
             .await
@@ -1092,5 +1094,208 @@ fn concurrent_workspace_reads_return_matching_values_and_revisions() {
         writer.await.unwrap();
         pool.close().await;
         let _ = std::fs::remove_file(path);
+    });
+}
+
+#[test]
+fn task_relations_are_bidirectional_and_replaceable_from_either_task() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let service = test_service().await;
+        let first = service.create_task(task_create("First")).await.unwrap();
+        let second = service.create_task(task_create("Second")).await.unwrap();
+
+        service
+            .set_task_relations(
+                first.value.id.clone(),
+                first.revision,
+                vec![TaskRelationInput {
+                    task_id: second.value.id.clone(),
+                    relation_type: "blocks".into(),
+                }],
+            )
+            .await
+            .unwrap();
+
+        let first = service.get_task(&first.value.id).await.unwrap();
+        let second = service.get_task(&second.value.id).await.unwrap();
+        assert_eq!(first.revision, 2);
+        assert_eq!(second.revision, 2);
+        assert_eq!(first.value.relations[0].relation_type, "blocks");
+        assert_eq!(first.value.relations[0].task_id, second.value.id);
+        assert_eq!(second.value.relations[0].relation_type, "is_blocked_by");
+        assert_eq!(second.value.relations[0].task_id, first.value.id);
+
+        service
+            .set_task_relations(second.value.id.clone(), second.revision, Vec::new())
+            .await
+            .unwrap();
+
+        let first = service.get_task(&first.value.id).await.unwrap();
+        let second = service.get_task(&second.value.id).await.unwrap();
+        assert!(first.value.relations.is_empty());
+        assert!(second.value.relations.is_empty());
+        assert_eq!(first.revision, 3);
+        assert_eq!(second.revision, 3);
+    });
+}
+
+#[test]
+fn full_task_update_replaces_relations_and_bumps_related_revision() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let service = test_service().await;
+        let first = service.create_task(task_create("First")).await.unwrap();
+        let second = service.create_task(task_create("Second")).await.unwrap();
+
+        let updated = service
+            .update_task(TaskUpdate {
+                id: first.value.id.clone(),
+                expected_revision: first.revision,
+                title: first.value.title,
+                state: first.value.state,
+                size: first.value.size,
+                priority: first.value.priority,
+                snoozed_until: first.value.snoozed_until,
+                people_ids: first.value.people_ids,
+                project_id: first.value.project_id,
+                tag_ids: first.value.tag_ids,
+                links: first.value.links,
+                relations: vec![TaskRelationInput {
+                    task_id: second.value.id.clone(),
+                    relation_type: "blocks".into(),
+                }],
+                description: first.value.description,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(updated.value.relations[0].task_id, second.value.id);
+        assert_eq!(updated.value.relations[0].relation_type, "blocks");
+        let second = service.get_task(&second.value.id).await.unwrap();
+        assert_eq!(second.revision, 2);
+        assert_eq!(second.value.relations[0].relation_type, "is_blocked_by");
+    });
+}
+
+#[test]
+fn deleting_linked_task_bumps_remaining_task_revision() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let service = test_service().await;
+        let first = service.create_task(task_create("First")).await.unwrap();
+        let second = service.create_task(task_create("Second")).await.unwrap();
+        service
+            .set_task_relations(
+                first.value.id.clone(),
+                first.revision,
+                vec![TaskRelationInput {
+                    task_id: second.value.id.clone(),
+                    relation_type: "blocks".into(),
+                }],
+            )
+            .await
+            .unwrap();
+        let first = service.get_task(&first.value.id).await.unwrap();
+
+        let revisions = service
+            .delete_task(&first.value.id, first.revision)
+            .await
+            .unwrap();
+
+        let second = service.get_task(&second.value.id).await.unwrap();
+        assert_eq!(second.revision, 3);
+        assert!(second.value.relations.is_empty());
+        assert_eq!(
+            revisions.get(&format!("task:{}", second.value.id)),
+            Some(&second.revision)
+        );
+    });
+}
+
+#[test]
+fn inverse_and_symmetric_issue_links_round_trip_from_current_task_perspective() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let service = test_service().await;
+        let first = service.create_task(task_create("First")).await.unwrap();
+        let second = service.create_task(task_create("Second")).await.unwrap();
+
+        for (index, (selected, first_label, second_label)) in [
+            ("is_blocked_by", "is_blocked_by", "blocks"),
+            ("is_duplicated_by", "is_duplicated_by", "duplicates"),
+            ("relates_to", "relates_to", "relates_to"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            service
+                .set_task_relations(
+                    first.value.id.clone(),
+                    first.revision + index as u64,
+                    vec![TaskRelationInput {
+                        task_id: second.value.id.clone(),
+                        relation_type: selected.into(),
+                    }],
+                )
+                .await
+                .unwrap();
+
+            let first_view = service.get_task(&first.value.id).await.unwrap();
+            let second_view = service.get_task(&second.value.id).await.unwrap();
+            assert_eq!(first_view.value.relations[0].relation_type, first_label);
+            assert_eq!(second_view.value.relations[0].relation_type, second_label);
+        }
+    });
+}
+
+#[test]
+fn multiple_issue_links_to_the_same_task_are_rejected() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let service = test_service().await;
+        let first = service.create_task(task_create("First")).await.unwrap();
+        let second = service.create_task(task_create("Second")).await.unwrap();
+
+        let error = service
+            .set_task_relations(
+                first.value.id.clone(),
+                first.revision,
+                vec![
+                    TaskRelationInput {
+                        task_id: second.value.id.clone(),
+                        relation_type: "blocks".into(),
+                    },
+                    TaskRelationInput {
+                        task_id: second.value.id.clone(),
+                        relation_type: "is_blocked_by".into(),
+                    },
+                ],
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "task {} can have only one issue link to {}",
+                first.value.id, second.value.id
+            )
+        );
     });
 }

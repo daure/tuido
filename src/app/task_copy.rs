@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde::Serialize;
 
-use crate::domain::{Person, Project, Tag, Task};
+use crate::domain::{Person, Project, Tag, Task, task_display_id};
 
 #[derive(Clone, Default)]
 pub(super) struct TaskCopyContext {
@@ -37,6 +37,14 @@ impl TaskCopyContext {
             Ok(export) => pretty_json(&export),
             Err(error) => pretty_json(&error),
         }
+    }
+
+    pub(super) fn display_id(&self, task: &Task) -> String {
+        let project = task
+            .project_id
+            .as_deref()
+            .and_then(|project_id| self.projects.get(project_id));
+        task_display_id(task, project)
     }
 
     fn person<'a>(
