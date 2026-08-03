@@ -1,5 +1,7 @@
 use super::*;
-use crate::domain::{SaveTarget, TaskField, TaskRelation, TaskRelationKind, WorkspaceSnapshot};
+use crate::domain::{
+    ChecklistItem, SaveTarget, TaskField, TaskRelation, TaskRelationKind, WorkspaceSnapshot,
+};
 use ratatui::{Terminal, backend::TestBackend};
 use sqlx::any::AnyPoolOptions;
 use tuicore::{
@@ -561,7 +563,7 @@ fn task_header_shows_filters_to_the_left_of_new() {
         " Active",
         &keys::TASK_VIEW_MENU.label(),
         &keys::TASK_LABEL_FILTER.label(),
-        "󰲋 Workspace",
+        "󰲋 Space",
         " Labels",
         "New",
     ] {
@@ -571,7 +573,7 @@ fn task_header_shows_filters_to_the_left_of_new() {
         );
     }
     let workspace = text
-        .find("󰲋 Workspace")
+        .find("󰲋 Space")
         .expect("workspace filter should render");
     let labels = text.find(" Labels").expect("label filter should render");
     let new = text.find("New").expect("new button should render");
@@ -964,7 +966,7 @@ fn yanking_highlighted_task_copies_pretty_resolved_agent_json() {
         ])
     );
     assert_eq!(
-        json["workspace"],
+        json["space"],
         serde_json::json!({"id": "workspace-alpha", "key": "ALPHA", "name": "Alpha", "description": "First workspace", "lead": {"id": "person-grace", "name": "Grace Hopper", "email": "grace@example.com", "active": false}})
     );
     assert_eq!(
@@ -1430,6 +1432,68 @@ fn escape_from_task_toolbar_filters_focuses_data_view() {
 }
 
 #[test]
+fn canceling_open_task_view_menu_focuses_data_view() {
+    for key in [
+        KeyEvent::from(Key::Esc),
+        KeyEvent {
+            code: Key::Char('['),
+            modifiers: KeyModifiers::CONTROL,
+        },
+    ] {
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks: vec![test_task()],
+            people: Vec::new(),
+            workspaces: Vec::new(),
+            tags: Vec::new(),
+        });
+        let mut workspace = TaskWorkspace::new(context);
+        let area = Rect::new(0, 0, 80, 40);
+        let mut closed_layout = LayoutCtx::new();
+        workspace.layout(area, &mut closed_layout);
+        let trigger_path = closed_layout
+            .focus_targets()
+            .iter()
+            .find(|target| {
+                let path = target.path.keys();
+                path.iter().any(|part| part.as_str() == "view")
+                    && path.iter().any(|part| part.as_str() == "trigger")
+            })
+            .expect("task view trigger should be focusable")
+            .path
+            .clone();
+        workspace.dispatch_event(
+            &EventRoute::new(trigger_path),
+            &TuiEvent::Hotkey(HotkeyEvent::Commit(keys::TASK_VIEW_MENU.hotkey())),
+            &mut EventCtx::default(),
+        );
+        let mut open_layout = LayoutCtx::new();
+        workspace.layout(area, &mut open_layout);
+        let menu_path = open_layout
+            .focus_targets()
+            .iter()
+            .find(|target| {
+                let path = target.path.keys();
+                path.iter().any(|part| part.as_str() == "view")
+                    && path.iter().any(|part| part.as_str() == "menu")
+            })
+            .expect("open task view menu should be focusable")
+            .path
+            .clone();
+        let mut ctx = EventCtx::default();
+
+        let outcome =
+            workspace.dispatch_event(&EventRoute::new(menu_path), &TuiEvent::Key(key), &mut ctx);
+
+        assert!(outcome.handled());
+        assert_eq!(
+            ctx.focus_request(),
+            Some(&initial_task_table_focus_request())
+        );
+        assert_eq!(ctx.propagation(), Propagation::Stopped);
+    }
+}
+
+#[test]
 fn escape_from_global_filters_focuses_active_tab_content() {
     let close_keys = [
         KeyEvent::from(Key::Esc),
@@ -1474,7 +1538,7 @@ fn escape_from_global_filters_focuses_active_tab_content() {
                     })
                     .expect("global filter should be focusable");
                 let expected_hotkey = if component == "workspace" {
-                    "shift+w"
+                    "shift+s"
                 } else {
                     "shift+l"
                 };
@@ -1493,6 +1557,36 @@ fn escape_from_global_filters_focuses_active_tab_content() {
             }
         }
     }
+}
+
+#[test]
+fn submitting_global_filters_focuses_tabs() {
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![test_task()],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let filters = TaskFilterControls::new(
+        context,
+        Rc::new(RefCell::new(None)),
+        Rc::new(RefCell::new(Vec::new())),
+        Rc::new(Cell::new(0)),
+    );
+    filters.filter_submitted.set(true);
+    let mut ctx = EventCtx::default();
+    let outcome = filters.finish_event(
+        EventOutcome::Handled,
+        &TuiEvent::Key(Key::Enter.into()),
+        &mut ctx,
+    );
+
+    assert!(outcome.handled());
+    assert_eq!(
+        ctx.focus_request(),
+        Some(&initial_task_table_focus_request())
+    );
+    assert_eq!(ctx.propagation(), Propagation::Stopped);
 }
 
 #[test]
@@ -1783,6 +1877,48 @@ fn switching_views_selects_first_visible_task() {
         Some("backlog-2")
     );
     assert_eq!(workspace.detail().task_id.as_deref(), Some("backlog-2"));
+}
+
+#[test]
+fn applying_filters_preserves_selected_task_when_still_visible() {
+    let workspace_id = "workspace-1".to_string();
+    let tag_id = "tag-1".to_string();
+    let mut tasks = vec![
+        task_with_rank("first", "First", TaskState::Todo, 3),
+        task_with_rank("selected", "Selected", TaskState::Todo, 2),
+        task_with_rank("last", "Last", TaskState::Todo, 1),
+    ];
+    for task in &mut tasks {
+        task.workspace_id = Some(workspace_id.clone());
+        task.tag_ids.push(tag_id.clone());
+    }
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks,
+        people: Vec::new(),
+        workspaces: vec![Workspace::new(
+            workspace_id.clone(),
+            "APP".into(),
+            "Application".into(),
+            String::new(),
+        )],
+        tags: vec![Tag::new(tag_id.clone(), "Tag".into())],
+    });
+    let mut workspace = TaskWorkspace::new(context);
+    select_workspace_task(&mut workspace, "selected");
+
+    *workspace.active_workspace_filter.borrow_mut() = Some(workspace_id);
+    assert!(workspace.sync_workspace_filter_change());
+    assert_eq!(
+        workspace.table().highlighted_id().as_deref(),
+        Some("selected")
+    );
+
+    workspace.active_label_filter.borrow_mut().push(tag_id);
+    assert!(workspace.sync_label_filter_change());
+    assert_eq!(
+        workspace.table().highlighted_id().as_deref(),
+        Some("selected")
+    );
 }
 
 #[test]

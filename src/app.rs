@@ -83,7 +83,7 @@ const STATUS_BAR_MENU_ITEMS: [StatusBarMenuItem; 6] = [
     },
     StatusBarMenuItem::Custom {
         id: WORKSPACES_MENU_ID,
-        label: "󰲋 Workspaces",
+        label: "󰲋 Spaces",
     },
     StatusBarMenuItem::Custom {
         id: TAGS_MENU_ID,
@@ -746,7 +746,7 @@ impl App {
                 if !Workspace::is_valid_key(&key) {
                     notify_required(
                         ctx,
-                        "Invalid workspace key",
+                        "Invalid space key",
                         "Use 2-5 characters without spaces.",
                     );
                     return;
@@ -754,8 +754,8 @@ impl App {
                 if name.trim().is_empty() {
                     notify_required(
                         ctx,
-                        "Workspace key and name required",
-                        "Enter both a key and name before creating the workspace.",
+                        "Space key and name required",
+                        "Enter both a key and name before creating the space.",
                     );
                     return;
                 }
@@ -770,7 +770,7 @@ impl App {
                     .borrow_mut()
                     .submit(PersistenceCommand::CreateWorkspace(workspace));
                 ctx.notify(tuicore::Notification::success(
-                    "Workspace created",
+                    "Space created",
                     format!("“{workspace_name}” was created."),
                 ));
             }
@@ -887,7 +887,7 @@ impl App {
                     .borrow_mut()
                     .submit(PersistenceCommand::DeleteWorkspace(deletion));
                 ctx.notify(tuicore::Notification::success(
-                    "Workspace deleted",
+                    "Space deleted",
                     format!("“{workspace_name}” was deleted."),
                 ));
             }
@@ -1888,6 +1888,21 @@ impl TaskViewMenu {
         ctx.request_layout();
         ctx.request_redraw();
     }
+
+    fn finish_event(
+        &mut self,
+        was_open: bool,
+        event: &TuiEvent,
+        outcome: EventOutcome,
+        ctx: &mut EventCtx<AppMsg>,
+    ) -> EventOutcome {
+        self.sync_activated(ctx);
+        if was_open && !self.menu_button.is_open() && detail_escape(event) {
+            focus_task_table(ctx);
+            return EventOutcome::Handled;
+        }
+        outcome
+    }
 }
 
 impl TuiNode<AppMsg> for TaskViewMenu {
@@ -1906,9 +1921,9 @@ impl TuiNode<AppMsg> for TaskViewMenu {
     }
 
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<AppMsg>) -> EventOutcome {
+        let was_open = self.menu_button.is_open();
         let outcome = self.menu_button.event(event, ctx);
-        self.sync_activated(ctx);
-        outcome
+        self.finish_event(was_open, event, outcome, ctx)
     }
 
     fn dispatch_event(
@@ -1917,9 +1932,9 @@ impl TuiNode<AppMsg> for TaskViewMenu {
         event: &TuiEvent,
         ctx: &mut EventCtx<AppMsg>,
     ) -> EventOutcome {
+        let was_open = self.menu_button.is_open();
         let outcome = self.menu_button.dispatch_event(route, event, ctx);
-        self.sync_activated(ctx);
-        outcome
+        self.finish_event(was_open, event, outcome, ctx)
     }
 
     fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<AppMsg>) {
@@ -1953,6 +1968,7 @@ struct TaskFilterControls {
     active_workspace_filter: ActiveWorkspaceFilter,
     active_label_filter: ActiveLabelFilter,
     active_tab: Rc<Cell<usize>>,
+    filter_submitted: Rc<Cell<bool>>,
     known_workspaces: Vec<(String, String)>,
     known_tags: Vec<(String, String)>,
 }
@@ -1968,17 +1984,26 @@ impl TaskFilterControls {
         let workspaces = state.state().workspaces.clone();
         let tags = state.state().tags.clone();
         drop(state);
+        let filter_submitted = Rc::new(Cell::new(false));
         let controls = Flex::row()
             .align(CrossAlign::Center)
             .gap(1)
             .child(
                 "workspace",
-                workspace_filter_dropdown(&workspaces, Rc::clone(&active_workspace_filter)),
+                workspace_filter_dropdown(
+                    &workspaces,
+                    Rc::clone(&active_workspace_filter),
+                    Rc::clone(&filter_submitted),
+                ),
                 FlexItem::content(),
             )
             .child(
                 "labels",
-                label_filter_dropdown(&tags, Rc::clone(&active_label_filter)),
+                label_filter_dropdown(
+                    &tags,
+                    Rc::clone(&active_label_filter),
+                    Rc::clone(&filter_submitted),
+                ),
                 FlexItem::content(),
             );
         Self {
@@ -1987,6 +2012,7 @@ impl TaskFilterControls {
             active_workspace_filter,
             active_label_filter,
             active_tab,
+            filter_submitted,
             known_workspaces: workspaces
                 .iter()
                 .map(|workspace| (workspace.id.clone(), workspace.name.clone()))
@@ -2032,6 +2058,7 @@ impl TaskFilterControls {
                     workspace_filter_dropdown(
                         &workspaces,
                         Rc::clone(&self.active_workspace_filter),
+                        Rc::clone(&self.filter_submitted),
                     ),
                     FlexItem::content(),
                     &mut ctx,
@@ -2047,7 +2074,11 @@ impl TaskFilterControls {
             self.controls
                 .replace(
                     "labels",
-                    label_filter_dropdown(&tags, Rc::clone(&self.active_label_filter)),
+                    label_filter_dropdown(
+                        &tags,
+                        Rc::clone(&self.active_label_filter),
+                        Rc::clone(&self.filter_submitted),
+                    ),
                     FlexItem::content(),
                     &mut ctx,
                 )
@@ -2062,6 +2093,17 @@ impl TaskFilterControls {
         event: &TuiEvent,
         ctx: &mut EventCtx<AppMsg>,
     ) -> EventOutcome {
+        if self.filter_submitted.replace(false) {
+            let focus = if self.active_tab.get() == CALENDAR_TAB_INDEX {
+                initial_calendar_focus_request()
+            } else {
+                initial_task_table_focus_request()
+            };
+            ctx.focus(focus);
+            ctx.stop_propagation();
+            ctx.request_redraw();
+            return EventOutcome::Handled;
+        }
         if !detail_escape(event) {
             return outcome;
         }
@@ -2444,7 +2486,7 @@ impl TaskWorkspace {
         self.table_mut().clear_search();
         self.label_filter = next_filter;
         let state = self.context.store.borrow().state().clone();
-        self.refresh_from_state(&state, true, false, false);
+        self.refresh_from_state(&state, false, false, false);
         true
     }
 
@@ -2456,7 +2498,7 @@ impl TaskWorkspace {
         self.table_mut().clear_search();
         self.workspace_filter = next_filter;
         let state = self.context.store.borrow().state().clone();
-        self.refresh_from_state(&state, true, false, false);
+        self.refresh_from_state(&state, false, false, false);
         true
     }
 
@@ -2599,6 +2641,18 @@ impl TaskWorkspace {
         self.detail_draft_protected = false;
         let previous_task_id = self.table().highlighted_id();
         let state = self.context.store.borrow().state().clone();
+        let selected_task = self
+            .visible_selection
+            .borrow()
+            .as_deref()
+            .and_then(|id| state.tasks.iter().find(|task| task.id == id))
+            .cloned();
+        let detail = self.detail_mut();
+        detail.task_snapshot = selected_task;
+        detail.tasks_snapshot = state.tasks.clone();
+        detail.people_snapshot = state.people.clone();
+        detail.workspaces_snapshot = state.workspaces.clone();
+        detail.tags_snapshot = state.tags.clone();
         self.refresh_from_state(&state, false, true, false);
         let selected_task_id = self.table().highlighted_id();
         TaskDetailSync {

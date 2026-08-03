@@ -19,7 +19,7 @@ use crate::{
     },
 };
 
-const MCP_INSTRUCTIONS: &str = "Read and mutate Tuido tasks, task checklists, people, workspaces, and tags. Task IDs use WORKSPACE_KEY-number, or number when no workspace was set at creation. Replace checklists as complete ordered trees rather than issuing granular item actions. Treat task state as user-facing Status, not Type or Workflow. Task people are people involved besides the workspace owner; never describe them as assignees or owners. Revisions are internal optimistic-concurrency tokens: use the latest entity revision as expected_revision for mutations, but omit revisions from user-facing task tables and summaries unless the user asks for them.";
+const MCP_INSTRUCTIONS: &str = "Read and mutate Tuido tasks, task checklists, people, spaces, and tags. Task IDs use SPACE_KEY-number, or number when no space was set at creation. Replace checklists as complete ordered trees rather than issuing granular item actions. Treat task state as user-facing Status, not Type or Workflow. Task people are people involved besides the space owner; never describe them as assignees or owners. Revisions are internal optimistic-concurrency tokens: use the latest entity revision as expected_revision for mutations, but omit revisions from user-facing task tables and summaries unless the user asks for them.";
 
 #[derive(Clone)]
 struct McpServer {
@@ -41,8 +41,8 @@ struct Id {
     id: String,
 }
 #[derive(Debug, Deserialize, JsonSchema)]
-struct WorkspaceKey {
-    /// Unique workspace key, normalized to uppercase.
+struct SpaceKey {
+    /// Unique space key, normalized to uppercase.
     key: String,
 }
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -107,7 +107,7 @@ struct PersonUpdate {
     value: PersonInput,
 }
 #[derive(Debug, Deserialize, JsonSchema)]
-struct WorkspaceUpdate {
+struct SpaceUpdate {
     id: String,
     #[schemars(schema_with = "crate::service::revision_schema")]
     expected_revision: u64,
@@ -135,12 +135,12 @@ struct PeopleList {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-struct WorkspaceList {
-    workspaces: Vec<Versioned<WorkspaceDetailsView>>,
+struct SpaceList {
+    spaces: Vec<Versioned<SpaceDetailsView>>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-struct WorkspaceDetailsView {
+struct SpaceDetailsView {
     #[serde(flatten)]
     workspace: WorkspaceView,
     tasks: Vec<Versioned<TaskView>>,
@@ -158,9 +158,9 @@ fn mcp_error(error: ServiceError) -> String {
 #[tool_router]
 impl McpServer {
     #[tool(
-        description = "Get a normalized workspace graph. Excludes done and rejected tasks by default; set include_resolved=true to include them. Filters apply to tasks using OR within each property and AND across properties. People, workspaces, and tags always contain the complete workspace catalogs so their IDs can be used when creating or updating tasks. Task state is user-facing status. Task people are involved people besides the workspace owner, never assignees. Revisions are internal concurrency tokens and should normally be omitted from user-facing summaries."
+        description = "Get a normalized task graph. Excludes done and rejected tasks by default; set include_resolved=true to include them. Filters apply to tasks using OR within each property and AND across properties. People, spaces, and tags always contain the complete catalogs so their IDs can be used when creating or updating tasks. Task state is user-facing status. Task people are involved people besides the space owner, never assignees. Revisions are internal concurrency tokens and should normally be omitted from user-facing summaries."
     )]
-    async fn get_workspace(
+    async fn get_overview(
         &self,
         Parameters(filter): Parameters<WorkspaceFilter>,
     ) -> Result<Json<WorkspaceGraph>, String> {
@@ -421,27 +421,27 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Get all workspaces with their tasks. Task issue links contain only relation type and linked task workspace/id/title."
+        description = "Get all spaces with their tasks. Task issue links contain only relation type and linked task space/id/title."
     )]
-    async fn get_all_workspaces(&self) -> Result<Json<WorkspaceList>, String> {
+    async fn get_all_spaces(&self) -> Result<Json<SpaceList>, String> {
         preflight_task_expirations(&self.service).await?;
         let graph = self.service.workspace().await.map_err(mcp_error)?;
-        Ok(Json(WorkspaceList {
-            workspaces: graph
+        Ok(Json(SpaceList {
+            spaces: graph
                 .workspaces
                 .iter()
                 .cloned()
-                .map(|workspace| workspace_details(&graph, workspace))
+                .map(|workspace| space_details(&graph, workspace))
                 .collect(),
         }))
     }
     #[tool(
-        description = "Get workspace by its unique key with its tasks. Task issue links contain only relation type and linked task workspace/id/title."
+        description = "Get space by its unique key with its tasks. Task issue links contain only relation type and linked task space/id/title."
     )]
-    async fn get_workspace_by_key(
+    async fn get_space_by_key(
         &self,
-        Parameters(v): Parameters<WorkspaceKey>,
-    ) -> Result<Json<Versioned<WorkspaceDetailsView>>, String> {
+        Parameters(v): Parameters<SpaceKey>,
+    ) -> Result<Json<Versioned<SpaceDetailsView>>, String> {
         preflight_task_expirations(&self.service).await?;
         let graph = self.service.workspace().await.map_err(mcp_error)?;
         graph
@@ -449,12 +449,12 @@ impl McpServer {
             .iter()
             .find(|x| x.value.key.eq_ignore_ascii_case(v.key.trim()))
             .cloned()
-            .map(|workspace| workspace_details(&graph, workspace))
+            .map(|workspace| space_details(&graph, workspace))
             .map(Json)
-            .ok_or_else(|| "workspace not found".into())
+            .ok_or_else(|| "space not found".into())
     }
-    #[tool(description = "Create workspace")]
-    async fn create_workspace(
+    #[tool(description = "Create space")]
+    async fn create_space(
         &self,
         Parameters(v): Parameters<WorkspaceInput>,
     ) -> Result<Json<Versioned<WorkspaceView>>, String> {
@@ -464,10 +464,10 @@ impl McpServer {
             .map(Json)
             .map_err(mcp_error)
     }
-    #[tool(description = "Replace workspace fields conditionally")]
-    async fn update_workspace(
+    #[tool(description = "Replace space fields conditionally")]
+    async fn update_space(
         &self,
-        Parameters(v): Parameters<WorkspaceUpdate>,
+        Parameters(v): Parameters<SpaceUpdate>,
     ) -> Result<Json<Versioned<WorkspaceView>>, String> {
         self.service
             .update_workspace(&v.id, v.expected_revision, v.value)
@@ -475,12 +475,12 @@ impl McpServer {
             .map(Json)
             .map_err(mcp_error)
     }
-    #[tool(description = "Delete workspace conditionally")]
-    async fn delete_workspace(
+    #[tool(description = "Delete space conditionally")]
+    async fn delete_space(
         &self,
         Parameters(v): Parameters<Expected>,
     ) -> Result<Json<DeletionResult>, String> {
-        let result = deletion_result("workspace", &v);
+        let result = deletion_result("space", &v);
         self.service
             .delete_workspace(&v.id, v.expected_revision)
             .await
@@ -545,10 +545,10 @@ impl McpServer {
     }
 }
 
-fn workspace_details(
+fn space_details(
     graph: &WorkspaceGraph,
     workspace: Versioned<WorkspaceView>,
-) -> Versioned<WorkspaceDetailsView> {
+) -> Versioned<SpaceDetailsView> {
     let tasks = graph
         .tasks
         .iter()
@@ -557,7 +557,7 @@ fn workspace_details(
         .collect();
     Versioned {
         revision: workspace.revision,
-        value: WorkspaceDetailsView {
+        value: SpaceDetailsView {
             workspace: workspace.value,
             tasks,
         },
@@ -839,7 +839,7 @@ mod tests {
             let server = McpServer::new(service);
 
             let workspace = server
-                .get_workspace_by_key(Parameters(WorkspaceKey { key: "core".into() }))
+                .get_space_by_key(Parameters(SpaceKey { key: "core".into() }))
                 .await
                 .unwrap();
             assert_eq!(workspace.0.value.workspace.key, "CORE");
@@ -847,14 +847,14 @@ mod tests {
             let responses = [
                 serde_json::to_value(
                     server
-                        .get_workspace(Parameters(WorkspaceFilter::default()))
+                        .get_overview(Parameters(WorkspaceFilter::default()))
                         .await
                         .unwrap()
                         .0,
                 )
                 .unwrap(),
                 serde_json::to_value(server.list_people().await.unwrap().0).unwrap(),
-                serde_json::to_value(server.get_all_workspaces().await.unwrap().0).unwrap(),
+                serde_json::to_value(server.get_all_spaces().await.unwrap().0).unwrap(),
                 serde_json::to_value(server.list_tags().await.unwrap().0).unwrap(),
             ];
 
@@ -911,22 +911,22 @@ mod tests {
                 .unwrap();
             let server = McpServer::new(service);
 
-            let all = serde_json::to_value(server.get_all_workspaces().await.unwrap().0).unwrap();
+            let all = serde_json::to_value(server.get_all_spaces().await.unwrap().0).unwrap();
             let by_key = serde_json::to_value(
                 server
-                    .get_workspace_by_key(Parameters(WorkspaceKey { key: "CORE".into() }))
+                    .get_space_by_key(Parameters(SpaceKey { key: "CORE".into() }))
                     .await
                     .unwrap()
                     .0,
             )
             .unwrap();
             for task in [
-                &all["workspaces"][0]["value"]["tasks"][0],
+                &all["spaces"][0]["value"]["tasks"][0],
                 &by_key["value"]["tasks"][0],
             ] {
                 let relation = &task["value"]["relations"][0];
                 assert_eq!(relation["relation_type"], "blocks");
-                assert_eq!(relation["task"]["workspace_id"], workspace.value.id);
+                assert_eq!(relation["task"]["space_id"], workspace.value.id);
                 assert_eq!(relation["task"]["id"], second.value.id);
                 assert_eq!(relation["task"]["title"], "Second");
                 assert!(relation["task"].get("description").is_none());
@@ -1052,7 +1052,7 @@ mod tests {
                 .unwrap()
                 .0;
             let workspace = server
-                .get_workspace(Parameters(WorkspaceFilter::default()))
+                .get_overview(Parameters(WorkspaceFilter::default()))
                 .await
                 .unwrap()
                 .0;
@@ -1076,7 +1076,7 @@ mod tests {
 
             let before = service.workspace_revision().await.unwrap();
             server
-                .get_workspace(Parameters(WorkspaceFilter::default()))
+                .get_overview(Parameters(WorkspaceFilter::default()))
                 .await
                 .unwrap();
             assert_eq!(service.workspace_revision().await.unwrap(), before);

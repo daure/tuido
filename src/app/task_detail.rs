@@ -21,6 +21,7 @@ pub(super) fn task_toolbar(
 pub(super) fn workspace_filter_dropdown(
     workspaces: &[Workspace],
     active_filter: ActiveWorkspaceFilter,
+    submitted: Rc<Cell<bool>>,
 ) -> Dropdown<Workspace, String> {
     let selected = active_filter.borrow().iter().cloned().collect::<Vec<_>>();
     Dropdown::single(
@@ -28,7 +29,7 @@ pub(super) fn workspace_filter_dropdown(
         |workspace| workspace.id.clone(),
         |workspace| workspace.name.clone(),
     )
-    .placeholder("󰲋 Workspace")
+    .placeholder("󰲋 Space")
     .no_selection_text("None")
     .hotkey(keys::TASK_WORKSPACE_FILTER.hotkey())
     .selected(selected)
@@ -36,12 +37,16 @@ pub(super) fn workspace_filter_dropdown(
     .commit_mode(DropdownCommitMode::Explicit)
     .variant(DropdownVariant::Filled)
     .max_popup_height(12)
-    .on_select(move |ids| *active_filter.borrow_mut() = ids.into_iter().next())
+    .on_select(move |ids| {
+        *active_filter.borrow_mut() = ids.into_iter().next();
+        submitted.set(true);
+    })
 }
 
 pub(super) fn label_filter_dropdown(
     tags: &[Tag],
     active_filter: ActiveLabelFilter,
+    submitted: Rc<Cell<bool>>,
 ) -> Dropdown<Tag, String> {
     let selected = active_filter.borrow().clone();
     Dropdown::multi(tags.to_vec(), |tag| tag.id.clone(), |tag| tag.label.clone())
@@ -52,7 +57,10 @@ pub(super) fn label_filter_dropdown(
         .commit_mode(DropdownCommitMode::Explicit)
         .variant(DropdownVariant::Filled)
         .max_popup_height(12)
-        .on_select(move |ids| *active_filter.borrow_mut() = ids)
+        .on_select(move |ids| {
+            *active_filter.borrow_mut() = ids;
+            submitted.set(true);
+        })
 }
 
 pub(super) fn task_workspace_layout(
@@ -662,8 +670,8 @@ pub(super) fn task_workspaces_dropdown(
         |row| row.id.clone(),
         |row| row.label.clone(),
     )
-    .label("Workspace")
-    .placeholder("Select workspace")
+    .label("Space")
+    .placeholder("Select space")
     .no_selection_text("None")
     .selected(task.workspace_id.iter().cloned())
     .search_mode(DropdownSearchMode::Contains)

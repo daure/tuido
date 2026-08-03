@@ -100,11 +100,12 @@ pub(crate) struct ConsistentWorkspace {
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct WorkspaceGraph {
-    /// Internal change token for workspace refresh detection, not task metadata.
+    /// Internal change token for data refresh detection, not task metadata.
     #[schemars(schema_with = "revision_schema")]
     pub revision: u64,
     pub tasks: Vec<Versioned<TaskView>>,
     pub people: Vec<Versioned<PersonView>>,
+    #[serde(rename = "spaces")]
     pub workspaces: Vec<Versioned<WorkspaceView>>,
     pub tags: Vec<Versioned<TagView>>,
 }
@@ -123,6 +124,7 @@ pub struct WorkspaceFilter {
     pub sizes: Vec<String>,
     /// Match tasks involving any of these people. People are not assignees or owners.
     pub person_ids: Vec<String>,
+    #[serde(rename = "space_ids")]
     pub workspace_ids: Vec<String>,
     pub tag_ids: Vec<String>,
     pub query: Option<String>,
@@ -130,7 +132,7 @@ pub struct WorkspaceFilter {
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct TaskView {
-    /// Stable task ID formatted as WORKSPACE_KEY-number, or number when no workspace was set at creation.
+    /// Stable task ID formatted as SPACE_KEY-number, or number when no space was set at creation.
     pub id: String,
     /// Creation time as Unix epoch nanoseconds.
     pub created_at: String,
@@ -142,9 +144,10 @@ pub struct TaskView {
     pub size: String,
     pub priority: String,
     pub snoozed_until: Option<String>,
-    /// People involved in this task besides the workspace owner. These are related people, not
+    /// People involved in this task besides the space owner. These are related people, not
     /// assignees or owners.
     pub people_ids: Vec<String>,
+    #[serde(rename = "space_id")]
     pub workspace_id: Option<String>,
     pub tag_ids: Vec<String>,
     /// Ordered checklist tree. Children are ordered as shown in the task detail view.
@@ -164,6 +167,7 @@ pub struct TaskRelationView {
 
 #[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct LinkedTaskView {
+    #[serde(rename = "space_id")]
     pub workspace_id: Option<String>,
     pub id: String,
     pub title: String,
@@ -180,6 +184,7 @@ pub struct TaskDetailsView {
     pub priority: String,
     pub snoozed_until: Option<String>,
     pub people_ids: Vec<String>,
+    #[serde(rename = "space_id")]
     pub workspace_id: Option<String>,
     pub tag_ids: Vec<String>,
     pub checklist: Vec<ChecklistItemView>,
@@ -259,8 +264,9 @@ pub struct TaskCreate {
     pub priority: String,
     pub snoozed_until: Option<String>,
     #[serde(default)]
-    /// People involved in this task besides the workspace owner; not assignees or owners.
+    /// People involved in this task besides the space owner; not assignees or owners.
     pub people_ids: Vec<String>,
+    #[serde(rename = "space_id")]
     pub workspace_id: Option<String>,
     #[serde(default)]
     pub tag_ids: Vec<String>,
@@ -280,7 +286,7 @@ fn default_priority() -> String {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct TaskUpdate {
-    /// Task ID formatted as WORKSPACE_KEY-number, or number for an unprefixed task.
+    /// Task ID formatted as SPACE_KEY-number, or number for an unprefixed task.
     pub id: String,
     #[schemars(schema_with = "revision_schema")]
     pub expected_revision: u64,
@@ -294,8 +300,9 @@ pub struct TaskUpdate {
     pub priority: String,
     pub snoozed_until: Option<String>,
     #[serde(default)]
-    /// People involved in this task besides the workspace owner; not assignees or owners.
+    /// People involved in this task besides the space owner; not assignees or owners.
     pub people_ids: Vec<String>,
+    #[serde(rename = "space_id")]
     pub workspace_id: Option<String>,
     #[serde(default)]
     pub tag_ids: Vec<String>,
@@ -325,7 +332,7 @@ fn default_true() -> bool {
 }
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct WorkspaceInput {
-    /// Workspace code used as the prefix for new task IDs. Must be 2-5 characters without whitespace.
+    /// Space code used as the prefix for new task IDs. Must be 2-5 characters without whitespace.
     #[schemars(extend("minLength" = 2, "maxLength" = 5, "pattern" = "^\\S+$"))]
     pub key: String,
     pub name: String,
@@ -555,7 +562,7 @@ impl TuidoService {
             tokio::task::yield_now().await;
         }
         Err(ServiceError::Storage(
-            "workspace kept changing while loading a consistent snapshot".into(),
+            "data kept changing while loading a consistent snapshot".into(),
         ))
     }
 
@@ -1217,12 +1224,12 @@ impl TuidoService {
     ) -> ServiceResult<Versioned<WorkspaceView>> {
         if !Workspace::is_valid_key(&workspace.key) {
             return Err(ServiceError::Invalid(
-                "workspace key must be 2-5 characters without spaces".into(),
+                "space key must be 2-5 characters without spaces".into(),
             ));
         }
         if workspace.name.is_empty() {
             return Err(ServiceError::Invalid(
-                "workspace key and name are required".into(),
+                "space key and name are required".into(),
             ));
         }
         let sql = format!(
@@ -1263,10 +1270,10 @@ impl TuidoService {
         input: WorkspaceInput,
     ) -> ServiceResult<Versioned<WorkspaceView>> {
         validate_workspace_key(&input.key)?;
-        validate_required("workspace name", &input.name)?;
+        validate_required("space name", &input.name)?;
         self.update_simple(
             "workspaces",
-            "workspace",
+            "space",
             id,
             expected,
             &[
@@ -1283,7 +1290,7 @@ impl TuidoService {
             .into_iter()
             .find(|v| v.value.id == id)
             .ok_or_else(|| ServiceError::NotFound {
-                entity: "workspace",
+                entity: "space",
                 id: id.into(),
             })
     }
@@ -1295,7 +1302,7 @@ impl TuidoService {
     ) -> ServiceResult<u64> {
         match &patch {
             WorkspacePatch::Key(value) => validate_workspace_key(value)?,
-            WorkspacePatch::Name(value) => validate_required("workspace name", value)?,
+            WorkspacePatch::Name(value) => validate_required("space name", value)?,
             WorkspacePatch::Description(_) | WorkspacePatch::LeadPerson(_) => {}
         }
         let input = match patch {
@@ -1304,13 +1311,13 @@ impl TuidoService {
             WorkspacePatch::Description(v) => ("description", Value::Text(v)),
             WorkspacePatch::LeadPerson(v) => ("lead_person_id", Value::Optional(v)),
         };
-        self.update_simple("workspaces", "workspace", &id, expected, &[input])
+        self.update_simple("workspaces", "space", &id, expected, &[input])
             .await?;
         Ok(expected + 1)
     }
 
     pub async fn delete_workspace(&self, id: &str, expected: u64) -> ServiceResult<()> {
-        self.delete("workspaces", "workspace", id, expected).await
+        self.delete("workspaces", "space", id, expected).await
     }
 
     pub async fn create_tag(&self, input: TagInput) -> ServiceResult<Versioned<TagView>> {

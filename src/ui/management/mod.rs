@@ -14,7 +14,7 @@ impl ManagementDialogKind {
     pub(crate) fn singular(self) -> &'static str {
         match self {
             Self::People => "person",
-            Self::Workspaces => "workspace",
+            Self::Workspaces => "space",
             Self::Tags => "tag",
         }
     }
@@ -100,8 +100,8 @@ mod tests {
             ),
             (
                 Box::new(workspaces::dialog(context.clone())),
-                "No workspaces yet",
-                &["No workspace selected.", "Description"],
+                "No spaces yet",
+                &["No space selected.", "Description"],
             ),
             (
                 Box::new(tags::dialog(context)),

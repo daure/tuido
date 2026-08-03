@@ -31,7 +31,7 @@ pub(crate) type WorkspacesDialog = DialogHost<WorkspaceManagement, AppMsg>;
 
 pub(crate) fn dialog(context: AppContext) -> WorkspacesDialog {
     Dialog::new()
-        .top_left("Workspaces")
+        .top_left("Spaces")
         .close_on_unfocus_from_descendants(true)
         .on_close(|_| AppMsg::CloseDialog)
         .host(WorkspaceManagement::new(context))
@@ -499,7 +499,7 @@ fn workspace_table(
             .sortable(|row| row.key.clone()),
             Column::text(
                 "name",
-                "Workspace",
+                "Space",
                 Constraint::Percentage(45),
                 |row: &Workspace| row.name.clone(),
             ),
@@ -597,7 +597,7 @@ impl TuiNode<AppMsg> for WorkspaceKeyInput {
                     on_invalid(&self.committed_value);
                 }
                 ctx.notify(tuicore::Notification::warning(
-                    "Invalid workspace key",
+                    "Invalid space key",
                     "Use 2-5 characters without spaces.",
                 ));
                 ctx.request_redraw();
@@ -648,7 +648,7 @@ fn workspace_detail_form(
             WorkspaceKeyInput::new(
                 TextInput::new()
                     .value(workspace.key.clone())
-                    .placeholder("Workspace key")
+                    .placeholder("Space key")
                     .panel("Key")
                     .max_len(5)
                     .hotkey(keys::WORKSPACE_KEY_FIELD.hotkey()),
@@ -668,10 +668,10 @@ fn workspace_detail_form(
             RequiredTextInput::new(
                 TextInput::new()
                     .value(workspace.name.clone())
-                    .placeholder("Workspace name")
+                    .placeholder("Space name")
                     .panel("Name")
                     .hotkey(keys::WORKSPACE_NAME_FIELD.hotkey()),
-                "Invalid workspace name",
+                "Invalid space name",
                 {
                     let patches = Rc::clone(&patches);
                     move |value| {
@@ -687,7 +687,7 @@ fn workspace_detail_form(
             "description",
             TextareaInput::new()
                 .value(workspace.description.clone())
-                .placeholder("Workspace description")
+                .placeholder("Space description")
                 .panel("Description")
                 .hotkey(keys::WORKSPACE_DESCRIPTION_FIELD.hotkey())
                 .editor_hotkey(keys::WORKSPACE_DESCRIPTION_EDITOR.hotkey())
@@ -708,7 +708,7 @@ fn workspace_detail_form(
             "lead",
             dropdown_single_optional(
                 "Lead",
-                "Select workspace lead",
+                "Select space lead",
                 person_choices(people),
                 workspace.lead_person_id.as_deref(),
                 move |id| patches.borrow_mut().push(WorkspacePatch::LeadPerson(id)),
@@ -756,7 +756,7 @@ mod tests {
         assert_eq!(
             effects.notifications,
             vec![tuicore::Notification::warning(
-                "Invalid workspace key",
+                "Invalid space key",
                 "Use 2-5 characters without spaces.",
             )]
         );
@@ -788,7 +788,7 @@ mod tests {
         let area = Rect::new(0, 0, 100, 30);
         workspace.layout(area, &mut LayoutCtx::new());
         let text = rendered_text(&workspace, area);
-        for expected in ["Workspace", "CORE", "Core", "Ada", "Description"] {
+        for expected in ["Space", "CORE", "Core", "Ada", "Description"] {
             assert!(text.contains(expected), "missing {expected}");
         }
         workspace
@@ -920,7 +920,7 @@ mod tests {
         workspace.sync_table_events(&mut EventCtx::default());
         let area = Rect::new(0, 0, 100, 30);
         workspace.layout(area, &mut LayoutCtx::new());
-        assert!(rendered_text(&workspace, area).contains("No workspaces match your search"));
+        assert!(rendered_text(&workspace, area).contains("No spaces match your search"));
         let mut ctx = EventCtx::default();
 
         let outcome = workspace.handle_workspace_event(

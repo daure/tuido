@@ -319,7 +319,7 @@ fn refresh_failure_is_visible_and_success_clears_it() {
     assert!(coordinator.poll());
     assert_eq!(
         store.borrow().state().refresh_error.as_deref(),
-        Some("Workspace refresh failed: database unavailable")
+        Some("Space refresh failed: database unavailable")
     );
 
     coordinator

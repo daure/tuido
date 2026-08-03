@@ -718,7 +718,7 @@ pub fn reduce_app_state(state: &mut AppState, event: AppEvent) -> DispatchOutcom
             DispatchOutcome::layout()
         }
         AppEvent::RefreshFailed(error) => {
-            let message = format!("Workspace refresh failed: {error}");
+            let message = format!("Space refresh failed: {error}");
             if state.refresh_error.as_deref() == Some(&message) {
                 DispatchOutcome::unchanged()
             } else {

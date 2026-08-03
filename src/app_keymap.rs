@@ -352,9 +352,9 @@ pub mod keys {
     pub const APP_WORKSPACES_TAB: AppBinding = AppBinding::new_sequence("APP_WORKSPACES_TAB", "wo");
     pub const APP_PEOPLE_TAB: AppBinding = AppBinding::new_sequence("APP_PEOPLE_TAB", "pe");
     pub const TASK_QUICK_CREATE: AppBinding = AppBinding::new("TASK_QUICK_CREATE", "shift+n");
-    pub const TASK_VIEW_MENU: AppBinding = AppBinding::new("TASK_VIEW_MENU", "f");
+    pub const TASK_VIEW_MENU: AppBinding = AppBinding::new("TASK_VIEW_MENU", "shift+f");
     pub const TASK_WORKSPACE_FILTER: AppBinding =
-        AppBinding::new("TASK_WORKSPACE_FILTER", "shift+w");
+        AppBinding::new("TASK_WORKSPACE_FILTER", "shift+s");
     pub const TASK_LABEL_FILTER: AppBinding = AppBinding::new("TASK_LABEL_FILTER", "shift+l");
     pub const TASK_DELETE: AppBinding = AppBinding::new("TASK_DELETE", "delete");
     pub const TASK_DELETE_BACKSPACE: AppBinding = AppBinding::new("TASK_DELETE_X", "backspace");
@@ -399,7 +399,7 @@ pub mod keys {
         AppBinding::new_sequence("TASK_PRIORITY_FIELD", "pr");
     pub const TASK_PEOPLE_FIELD: AppBinding = AppBinding::new_sequence("TASK_PEOPLE_FIELD", "pe");
     pub const TASK_WORKSPACES_FIELD: AppBinding =
-        AppBinding::new_sequence("TASK_WORKSPACES_FIELD", "wo");
+        AppBinding::new_sequence("TASK_WORKSPACES_FIELD", "sp");
     pub const TASK_TAGS_FIELD: AppBinding = AppBinding::new_sequence("TASK_TAGS_FIELD", "ut");
     pub const TASK_CHECKLIST_FIELD: AppBinding =
         AppBinding::new_sequence("TASK_CHECKLIST_FIELD", "uc");
@@ -618,7 +618,7 @@ pub mod keys {
             bindings: &[APP_TASKS_TAB, APP_CALENDAR_TAB],
         },
         BindingContext {
-            name: "task workspace",
+            name: "task space",
             bindings: &[
                 TASK_QUICK_CREATE,
                 TASK_VIEW_MENU,
@@ -676,7 +676,7 @@ pub mod keys {
             ],
         },
         BindingContext {
-            name: "workspace management",
+            name: "space management",
             bindings: &[
                 MANAGEMENT_CREATE,
                 MANAGEMENT_DELETE,
@@ -778,7 +778,7 @@ mod tests {
             ("TASK_SIZE_FIELD", "si"),
             ("TASK_PRIORITY_FIELD", "pr"),
             ("TASK_PEOPLE_FIELD", "pe"),
-            ("TASK_WORKSPACES_FIELD", "wo"),
+            ("TASK_WORKSPACES_FIELD", "sp"),
             ("TASK_TAGS_FIELD", "ut"),
             ("TASK_CHECKLIST_FIELD", "uc"),
             ("TASK_URL_LINKS_FIELD", "uu"),
@@ -843,7 +843,8 @@ mod tests {
     fn task_and_management_shortcuts_use_requested_defaults() {
         let keymap = AppKeymap::from_overrides(std::iter::empty::<(String, String)>()).unwrap();
         for (name, expected) in [
-            ("TASK_WORKSPACE_FILTER", "shift+w"),
+            ("TASK_VIEW_MENU", "shift+f"),
+            ("TASK_WORKSPACE_FILTER", "shift+s"),
             ("TASK_LABEL_FILTER", "shift+l"),
             ("TASK_QUICK_CREATE", "shift+n"),
             ("TASK_SNOOZE", "ctrl+z"),
@@ -890,7 +891,7 @@ mod tests {
         let error =
             AppKeymap::from_overrides([("TASK_VIEW_MENU".into(), "shift+n".into())]).unwrap_err();
 
-        assert!(error.to_string().contains("task workspace context"));
+        assert!(error.to_string().contains("task space context"));
     }
 
     #[test]

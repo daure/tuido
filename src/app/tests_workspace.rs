@@ -1786,7 +1786,7 @@ fn creating_management_entities_notifies_for_people_workspaces_and_tags() {
                 name: "Core".into(),
                 description: "Platform".into(),
             },
-            tuicore::Notification::success("Workspace created", "“Core” was created."),
+            tuicore::Notification::success("Space created", "“Core” was created."),
         ),
         (
             ManagementEntityDraft::Tag {
@@ -1840,7 +1840,7 @@ fn deleting_management_entities_notifies_for_people_workspaces_and_tags() {
                 )],
                 tags: Vec::new(),
             },
-            tuicore::Notification::success("Workspace deleted", "“Core” was deleted."),
+            tuicore::Notification::success("Space deleted", "“Core” was deleted."),
         ),
         (
             ManagementDialogKind::Tags,
@@ -2904,6 +2904,66 @@ fn save_failure_and_recovery_preserve_focused_task_description_state() {
             EventOutcome::Handled
         );
     }
+}
+
+#[test]
+fn toggling_checklist_item_keeps_checklist_visibly_focused() {
+    let mut task = test_task();
+    task.checklist.push(ChecklistItem {
+        id: "item-1".into(),
+        parent_id: None,
+        text: "Keep focus".into(),
+        checked: false,
+    });
+    let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+        tasks: vec![task],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut workspace = TaskWorkspace::new(context);
+    let area = Rect::new(0, 0, 120, 80);
+    let mut layout = LayoutCtx::new();
+    workspace.layout(area, &mut layout);
+    let checklist = layout
+        .focus_targets()
+        .iter()
+        .find(|target| {
+            target
+                .path
+                .keys()
+                .iter()
+                .any(|key| key.as_str() == "checklist")
+        })
+        .expect("checklist should be focusable")
+        .clone();
+    let mut focus = FocusManager::new();
+    let transition = focus
+        .apply_request(
+            &FocusRequest::TargetAt {
+                path: checklist.path.clone(),
+                id: checklist.id.clone(),
+            },
+            layout.focus_targets(),
+        )
+        .expect("checklist focus should apply");
+    let mut dispatcher = TreeDispatcher::new();
+    dispatcher.dispatch_focus(&mut workspace, transition, AnimationSettings::default());
+
+    let effects = dispatcher.dispatch_event(
+        &mut workspace,
+        &EventRoute::new(focus.current_path()),
+        &TuiEvent::Key(Key::Enter.into()),
+        AnimationSettings::default(),
+    );
+
+    assert_eq!(effects.outcome, EventOutcome::Handled);
+    assert!(store.borrow().state().tasks[0].checklist[0].checked);
+    assert!(rendered_area_has_focus_style(
+        &workspace,
+        area,
+        checklist.area
+    ));
 }
 
 #[test]

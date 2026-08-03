@@ -6,7 +6,7 @@ use tuicore::{
     AnimationSettings, Calendar, CalendarEntryRole, CalendarKeyBindings, CalendarSpan,
     CalendarTypedEvent, CalendarView, ChildKey, EventCtx, EventOutcome, EventRoute, FocusCtx,
     FocusId, FocusRequest, FocusTarget, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint,
-    LifecycleCtx, RenderCtx, SeasonalEmptyState, TickResult, TuiEvent, TuiNode,
+    LifecycleCtx, Propagation, RenderCtx, SeasonalEmptyState, TickResult, TuiEvent, TuiNode,
 };
 
 use crate::app::{
@@ -835,12 +835,20 @@ impl TuiNode<AppMsg> for CalendarWorkspace {
         }
         let previous = self.calendar().is_showing_weekends();
         let detail_route = route.path.keys().first() == Some(&ChildKey::second());
-        let calendar_event = !detail_route || is_calendar_view_hotkey(event);
-        let outcome = if calendar_event {
-            self.calendar_mut().event(event, ctx)
-        } else {
+        let mut calendar_event = !detail_route;
+        let mut outcome = if detail_route {
             self.pane.dispatch_event(route, event, ctx)
+        } else {
+            self.calendar_mut().event(event, ctx)
         };
+        if detail_route
+            && !outcome.handled()
+            && ctx.propagation() == Propagation::Continue
+            && is_calendar_view_hotkey(event)
+        {
+            calendar_event = true;
+            outcome = self.calendar_mut().event(event, ctx);
+        }
         self.sync_selected_date();
         self.sync_empty_day_message();
         self.persist_weekend_visibility_change(previous);
@@ -903,7 +911,8 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend};
     use time::{Date, Month, Time};
     use tuicore::{
-        AnimationSettings, FocusRequest, Key, KeyEvent, KeyModifiers, Propagation, TreeDispatcher,
+        AnimationSettings, FocusManager, FocusRequest, Key, KeyEvent, KeyModifiers, Propagation,
+        TreeDispatcher,
     };
 
     fn task(id: &str, title: &str, state: TaskState, until: Option<PrimitiveDateTime>) -> Task {
@@ -1642,6 +1651,83 @@ mod tests {
             );
             assert_eq!(workspace.calendar().current_view(), expected);
         }
+    }
+
+    #[test]
+    fn calendar_view_hotkeys_are_typed_while_task_detail_is_editing() {
+        let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+            tasks: Vec::new(),
+            people: Vec::new(),
+            workspaces: Vec::new(),
+            tags: Vec::new(),
+        });
+        let mut workspace = CalendarWorkspace::new(context.clone(), true);
+        let until = workspace.today.with_time(Time::from_hms(8, 0, 0).unwrap());
+        context
+            .store
+            .borrow_mut()
+            .dispatch(AppEvent::TaskCreated(task(
+                "snoozed",
+                "Follow up",
+                TaskState::Snoozed,
+                Some(until),
+            )));
+        workspace.sync_store_version();
+        workspace.calendar_mut().on_key(Key::Char('D'));
+        workspace.sync_calendar_detail(&mut EventCtx::default());
+        let area = Rect::new(0, 0, 120, 30);
+        let mut layout = LayoutCtx::new();
+        workspace.layout(area, &mut layout);
+        let title = layout
+            .focus_targets()
+            .iter()
+            .find(|target| {
+                target
+                    .path
+                    .keys()
+                    .iter()
+                    .any(|part| part.as_str() == "title")
+            })
+            .expect("calendar task title should be focusable")
+            .clone();
+        let mut focus = FocusManager::new();
+        let transition = focus
+            .apply_request(
+                &FocusRequest::TargetAt {
+                    path: title.path.clone(),
+                    id: title.id.clone(),
+                },
+                layout.focus_targets(),
+            )
+            .expect("task title focus should apply");
+        let mut dispatcher = TreeDispatcher::new();
+        dispatcher.dispatch_focus(&mut workspace, transition, AnimationSettings::default());
+        let route = EventRoute::new(focus.current_path());
+        dispatcher.dispatch_event(
+            &mut workspace,
+            &route,
+            &TuiEvent::Key(Key::Enter.into()),
+            AnimationSettings::default(),
+        );
+
+        for key in ['W', 'D', 'M'] {
+            let effects = dispatcher.dispatch_event(
+                &mut workspace,
+                &route,
+                &TuiEvent::Key(Key::Char(key).into()),
+                AnimationSettings::default(),
+            );
+            assert_eq!(effects.outcome, EventOutcome::Handled);
+            assert_eq!(workspace.calendar().current_view(), CalendarView::Day);
+        }
+        dispatcher.dispatch_event(
+            &mut workspace,
+            &route,
+            &TuiEvent::Key(Key::Enter.into()),
+            AnimationSettings::default(),
+        );
+
+        assert_eq!(store.borrow().state().tasks[0].title, "Follow upWDM");
     }
 
     #[test]

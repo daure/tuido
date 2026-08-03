@@ -50,7 +50,7 @@ impl SettingsDialog {
             |choice| choice.id.clone(),
             |choice| choice.label.clone(),
         )
-        .label("Default workspace")
+        .label("Default space")
         .placeholder("Unset")
         .no_selection_text("Unset")
         .selected(default_workspace_id.into_iter().map(str::to_string))

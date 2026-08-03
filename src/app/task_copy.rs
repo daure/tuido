@@ -70,6 +70,7 @@ struct TaskExport<'a> {
     priority: &'static str,
     snoozed_until: Option<String>,
     people: Vec<PersonExport<'a>>,
+    #[serde(rename = "space")]
     workspace: Option<WorkspaceExport<'a>>,
     tags: Vec<TagExport<'a>>,
     links: Vec<String>,
@@ -89,11 +90,11 @@ impl<'a> TaskExport<'a> {
                 let workspace = context
                     .workspaces
                     .get(id)
-                    .ok_or_else(|| CopyError::unresolved(task, "workspace", id))?;
+                    .ok_or_else(|| CopyError::unresolved(task, "space", id))?;
                 let lead = workspace
                     .lead_person_id
                     .as_deref()
-                    .map(|lead_id| context.person(task, lead_id, "workspace_lead_person"))
+                    .map(|lead_id| context.person(task, lead_id, "space_lead_person"))
                     .transpose()?;
                 Ok(WorkspaceExport::new(workspace, lead))
             })

@@ -238,7 +238,7 @@ pub(super) fn validate_workspace_key(value: &str) -> ServiceResult<()> {
         Ok(())
     } else {
         Err(ServiceError::Invalid(
-            "workspace key must be 2-5 characters without spaces".into(),
+            "space key must be 2-5 characters without spaces".into(),
         ))
     }
 }

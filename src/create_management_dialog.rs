@@ -203,7 +203,7 @@ fn secondary_label(kind: ManagementDialogKind) -> &'static str {
 fn primary_placeholder(kind: ManagementDialogKind) -> &'static str {
     match kind {
         ManagementDialogKind::People => "Person name",
-        ManagementDialogKind::Workspaces => "Workspace key",
+        ManagementDialogKind::Workspaces => "Space key",
         ManagementDialogKind::Tags => "Tag label",
     }
 }
@@ -211,7 +211,7 @@ fn primary_placeholder(kind: ManagementDialogKind) -> &'static str {
 fn secondary_placeholder(kind: ManagementDialogKind) -> &'static str {
     match kind {
         ManagementDialogKind::People => "Email address",
-        ManagementDialogKind::Workspaces => "Workspace name",
+        ManagementDialogKind::Workspaces => "Space name",
         ManagementDialogKind::Tags => "",
     }
 }
@@ -219,7 +219,7 @@ fn secondary_placeholder(kind: ManagementDialogKind) -> &'static str {
 fn description_placeholder(kind: ManagementDialogKind) -> &'static str {
     match kind {
         ManagementDialogKind::People => "About this person",
-        ManagementDialogKind::Workspaces => "Workspace description",
+        ManagementDialogKind::Workspaces => "Space description",
         ManagementDialogKind::Tags => "",
     }
 }
