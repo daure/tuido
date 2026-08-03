@@ -129,6 +129,10 @@ pub(crate) enum AppMsg {
         calendar_date: Option<Date>,
     },
     CreateTaskSubmitted(CreateTaskDraft),
+    ScheduleCreatedTask {
+        until: PrimitiveDateTime,
+        remember_custom: Option<PrimitiveDateTime>,
+    },
     OpenDeleteTask {
         task_id: String,
         return_focus: Option<TreePath>,
@@ -265,6 +269,10 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         }
         AppMsg::OpenCreateTask { calendar_date } => app.open_create_task_dialog(calendar_date, ctx),
         AppMsg::CreateTaskSubmitted(draft) => app.submit_create_task(draft, ctx),
+        AppMsg::ScheduleCreatedTask {
+            until,
+            remember_custom,
+        } => app.schedule_created_task(until, remember_custom, ctx),
         AppMsg::OpenDeleteTask {
             task_id,
             return_focus,
@@ -392,6 +400,7 @@ struct App {
     context: AppContext,
     calendar_create_context: CalendarCreateContext,
     create_task_calendar_date: Option<Date>,
+    pending_calendar_task: Option<CreateTaskDraft>,
     snooze_return_focus: Option<TreePath>,
     delete_return_focus: Option<TreePath>,
     complete_return_focus: Option<CompleteReturnFocus>,
@@ -533,6 +542,7 @@ impl App {
             context,
             calendar_create_context,
             create_task_calendar_date: None,
+            pending_calendar_task: None,
             snooze_return_focus: None,
             delete_return_focus: None,
             complete_return_focus: None,
@@ -840,6 +850,7 @@ impl App {
     }
 
     fn open_create_task_dialog(&mut self, calendar_date: Option<Date>, ctx: &mut EventCtx<AppMsg>) {
+        self.pending_calendar_task = None;
         self.create_task_calendar_date = calendar_date;
         let primary = self.primary_dialog();
         primary.replace_layer(create_task_dialog_host(), ctx);
@@ -859,12 +870,111 @@ impl App {
             return;
         }
 
+        if let Some(date) = self.create_task_calendar_date {
+            self.pending_calendar_task = Some(CreateTaskDraft { title });
+            let now = match local_now() {
+                Ok(now) => now,
+                Err(error) => {
+                    ctx.notify(tuicore::Notification::error(
+                        "Local time unavailable",
+                        format!("Cannot open schedule options: {error}"),
+                    ));
+                    return;
+                }
+            };
+            let default_time = self
+                .context
+                .store
+                .borrow()
+                .state()
+                .app_setting_values
+                .get(DEFAULT_SNOOZE_TIME_SETTING)
+                .and_then(|value| parse_default_snooze_time(Some(value)).ok())
+                .unwrap_or(default_snooze_time());
+            let last_custom = self.context.store.borrow().state().last_custom_snooze;
+            let primary = self.primary_dialog();
+            primary.replace_layer(
+                AppDialog::Snooze(Box::new(SnoozeDialog::for_calendar(
+                    now,
+                    date.with_time(default_time),
+                    last_custom,
+                ))),
+                ctx,
+            );
+            primary.set_fit_content(true);
+            primary.set_active_with_context(true, ctx);
+            return;
+        }
+
+        self.create_task(CreateTaskDraft { title }, None, None, ctx);
+        focus_task_table(ctx);
+    }
+
+    fn schedule_created_task(
+        &mut self,
+        until: PrimitiveDateTime,
+        remember_custom: Option<PrimitiveDateTime>,
+        ctx: &mut EventCtx<AppMsg>,
+    ) {
+        if self.pending_calendar_task.is_none() {
+            return;
+        }
+        let now = match local_now() {
+            Ok(now) => now,
+            Err(error) => {
+                ctx.notify(tuicore::Notification::error(
+                    "Local time unavailable",
+                    format!("Cannot validate schedule time: {error}"),
+                ));
+                self.recover_calendar_scheduler(ctx);
+                return;
+            }
+        };
+
+        self.schedule_created_task_at(until, remember_custom, now, ctx);
+    }
+
+    fn schedule_created_task_at(
+        &mut self,
+        until: PrimitiveDateTime,
+        remember_custom: Option<PrimitiveDateTime>,
+        now: PrimitiveDateTime,
+        ctx: &mut EventCtx<AppMsg>,
+    ) {
+        let Some(draft) = self.pending_calendar_task.clone() else {
+            return;
+        };
+        if until <= now {
+            ctx.notify(tuicore::Notification::warning(
+                "Schedule time has passed",
+                "Choose a future date and time.",
+            ));
+            self.recover_calendar_scheduler(ctx);
+            return;
+        }
+
+        self.create_task(draft, Some(until), remember_custom, ctx);
+    }
+
+    fn recover_calendar_scheduler(&mut self, ctx: &mut EventCtx<AppMsg>) {
+        if let AppDialog::Snooze(dialog) = self.primary_dialog().layer_mut() {
+            dialog.recover_after_invalid_selection(ctx);
+        }
+    }
+
+    fn create_task(
+        &mut self,
+        draft: CreateTaskDraft,
+        snoozed_until: Option<PrimitiveDateTime>,
+        remember_custom: Option<PrimitiveDateTime>,
+        ctx: &mut EventCtx<AppMsg>,
+    ) {
         let mut task = Task::quick_capture(
             format!(
                 "pending-{}",
                 NEXT_PENDING_TASK_ID.fetch_add(1, Ordering::Relaxed)
             ),
-            title,
+            draft.title,
             String::new(),
             TaskSize::Small,
         );
@@ -877,19 +987,9 @@ impl App {
             .get(DEFAULT_PROJECT_SETTING)
             .filter(|value| !value.is_empty())
             .cloned();
-        let calendar_date = self.create_task_calendar_date;
-        if let Some(date) = calendar_date {
-            let default_time = self
-                .context
-                .store
-                .borrow()
-                .state()
-                .app_setting_values
-                .get(DEFAULT_SNOOZE_TIME_SETTING)
-                .and_then(|value| parse_default_snooze_time(Some(value)).ok())
-                .unwrap_or(default_snooze_time());
+        if let Some(snoozed_until) = snoozed_until {
             task.state = TaskState::Snoozed;
-            task.snoozed_until = Some(date.with_time(default_time));
+            task.snoozed_until = Some(snoozed_until);
             self.calendar_create_context
                 .select_created_task(task.id.clone());
         }
@@ -909,20 +1009,43 @@ impl App {
             .store
             .borrow_mut()
             .dispatch(AppEvent::TaskCreated(task.clone()));
+        let remembered_custom_patch = match (snoozed_until, remember_custom) {
+            (Some(until), Some(custom)) => Some(TaskPatch::Snooze {
+                until,
+                remember_custom: Some(custom),
+            }),
+            _ => None,
+        };
+        if let Some(patch) = remembered_custom_patch.clone() {
+            self.context
+                .store
+                .borrow_mut()
+                .dispatch(AppEvent::PatchTask {
+                    task_id: task.id.clone(),
+                    patch,
+                });
+        }
+        let task_id = task.id.clone();
         self.context
             .coordinator
             .borrow_mut()
             .submit(PersistenceCommand::CreateTask(task));
-        let notification = if let Some(date) = calendar_date {
-            format!("“{task_title}” was scheduled for {date}.")
+        if let Some(patch) = remembered_custom_patch {
+            self.context
+                .coordinator
+                .borrow_mut()
+                .submit(PersistenceCommand::PatchTask(task_id, patch));
+        }
+        let notification = if let Some(until) = snoozed_until {
+            format!(
+                "“{task_title}” was scheduled for {}.",
+                format_datetime(until)
+            )
         } else {
             format!("“{task_title}” was added to backlog.")
         };
         ctx.notify(tuicore::Notification::success("Task created", notification));
         self.close_dialog(ctx);
-        if calendar_date.is_none() {
-            focus_task_table(ctx);
-        }
     }
 
     fn open_delete_task_dialog(
@@ -1300,11 +1423,19 @@ impl App {
     }
 
     fn close_dialog(&mut self, ctx: &mut EventCtx<AppMsg>) {
+        self.pending_calendar_task = None;
+        self.create_task_calendar_date = None;
         self.root.set_active_with_context(false, ctx);
         self.primary_dialog().set_active_with_context(false, ctx);
     }
 
     fn close_snooze_dialog(&mut self, ctx: &mut EventCtx<AppMsg>) {
+        if self.pending_calendar_task.is_some() {
+            self.snooze_return_focus = None;
+            self.close_dialog(ctx);
+            ctx.focus(initial_calendar_focus_request());
+            return;
+        }
         let return_focus = self.snooze_return_focus.take();
         self.close_dialog(ctx);
         if let Some(path) = return_focus {

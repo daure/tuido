@@ -1946,7 +1946,7 @@ fn create_task_submission_uses_default_project() {
 }
 
 #[test]
-fn calendar_task_creation_snoozes_at_selected_day_default_time() {
+fn calendar_title_submission_opens_scheduler_without_creating_task() {
     let (_runtime, context, store) = test_context(WorkspaceSnapshot {
         tasks: Vec::new(),
         people: Vec::new(),
@@ -1960,6 +1960,7 @@ fn calendar_task_creation_snoozes_at_selected_day_default_time() {
             value: "14:30".into(),
             generation: 1,
         });
+    let coordinator = Rc::clone(&context.coordinator);
     let mut app = App::new(context.store, context.coordinator);
     let mut layout = LayoutCtx::new();
     app.layout(Rect::new(0, 0, 100, 30), &mut layout);
@@ -1982,6 +1983,20 @@ fn calendar_task_creation_snoozes_at_selected_day_default_time() {
         &TuiEvent::Key(Key::Char(']').into()),
         &mut EventCtx::default(),
     );
+    let mut calendar_layout = LayoutCtx::new();
+    app.layout(Rect::new(0, 0, 100, 30), &mut calendar_layout);
+    let calendar_path = calendar_layout
+        .focus_targets()
+        .iter()
+        .find(|target| target.id.as_str() == "calendar")
+        .expect("calendar should be focusable")
+        .path
+        .clone();
+    app.dispatch_event(
+        &EventRoute::new(calendar_path),
+        &TuiEvent::Key(Key::Right.into()),
+        &mut EventCtx::default(),
+    );
     let selected_date = app.calendar_create_context.selected_date();
     let mut open_ctx = EventCtx::default();
     app.dispatch_event(
@@ -1996,20 +2011,172 @@ fn calendar_task_creation_snoozes_at_selected_day_default_time() {
     assert_eq!(calendar_date, Some(selected_date));
     app.open_create_task_dialog(calendar_date, &mut EventCtx::default());
 
+    let mut submit_ctx = EventCtx::default();
     app.submit_create_task(
         CreateTaskDraft {
             title: "Schedule follow up".into(),
         },
+        &mut submit_ctx,
+    );
+
+    assert!(store.borrow().state().tasks.is_empty());
+    assert!(!coordinator.borrow().has_pending());
+    assert!(app.pending_calendar_task.is_some());
+    assert!(matches!(app.primary_dialog().layer(), AppDialog::Snooze(_)));
+    assert!(submit_ctx.notifications().is_empty());
+}
+
+#[test]
+fn calendar_schedule_rejects_non_future_times_then_creates_exact_task_once() {
+    let mut existing = test_task();
+    existing.rank = 7;
+    let project = Project::new(
+        "project-1".into(),
+        "ONE".into(),
+        "Project one".into(),
+        String::new(),
+    );
+    let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+        tasks: vec![existing],
+        people: Vec::new(),
+        projects: vec![project.clone()],
+        tags: Vec::new(),
+    });
+    store
+        .borrow_mut()
+        .dispatch(AppEvent::AppSettingChangeRequested {
+            key: DEFAULT_PROJECT_SETTING.into(),
+            value: project.id.clone(),
+            generation: 1,
+        });
+    let coordinator = Rc::clone(&context.coordinator);
+    let mut app = App::new(context.store, context.coordinator);
+    app.open_create_task_dialog(
+        Some(time::macros::date!(2030 - 01 - 01)),
+        &mut EventCtx::default(),
+    );
+    app.submit_create_task(
+        CreateTaskDraft {
+            title: "  schedule   follow up ".into(),
+        },
+        &mut EventCtx::default(),
+    );
+    let now = time::macros::datetime!(2026-07-23 12:00);
+    let warning = tuicore::Notification::warning(
+        "Schedule time has passed",
+        "Choose a future date and time.",
+    );
+    let mut past_ctx = EventCtx::default();
+
+    app.schedule_created_task_at(
+        time::macros::datetime!(2026-07-23 11:59),
+        Some(time::macros::datetime!(2026-07-23 11:59)),
+        now,
+        &mut past_ctx,
+    );
+
+    assert_eq!(store.borrow().state().tasks.len(), 1);
+    assert_eq!(store.borrow().state().last_custom_snooze, None);
+    assert!(!coordinator.borrow().has_pending());
+    assert!(app.primary_dialog().is_active());
+    assert!(matches!(app.primary_dialog().layer(), AppDialog::Snooze(_)));
+    assert_eq!(
+        app.pending_calendar_task
+            .as_ref()
+            .map(|draft| draft.title.as_str()),
+        Some("Schedule follow up")
+    );
+    assert_eq!(past_ctx.notifications(), std::slice::from_ref(&warning));
+
+    let mut equal_ctx = EventCtx::default();
+    app.schedule_created_task_at(now, Some(now), now, &mut equal_ctx);
+
+    assert_eq!(store.borrow().state().tasks.len(), 1);
+    assert_eq!(store.borrow().state().last_custom_snooze, None);
+    assert!(!coordinator.borrow().has_pending());
+    assert!(app.primary_dialog().is_active());
+    assert!(matches!(app.primary_dialog().layer(), AppDialog::Snooze(_)));
+    assert_eq!(
+        app.pending_calendar_task
+            .as_ref()
+            .map(|draft| draft.title.as_str()),
+        Some("Schedule follow up")
+    );
+    assert_eq!(equal_ctx.notifications(), &[warning]);
+
+    let future = time::macros::datetime!(2026-07-30 14:30);
+    let mut success_ctx = EventCtx::default();
+    app.schedule_created_task_at(future, Some(future), now, &mut success_ctx);
+
+    let state = store.borrow();
+    assert_eq!(state.state().tasks.len(), 2);
+    let task = state
+        .state()
+        .tasks
+        .iter()
+        .find(|task| task.id.starts_with("pending-"))
+        .expect("scheduled task should be optimistically created");
+    assert_eq!(task.title, "Schedule follow up");
+    assert_eq!(task.state, TaskState::Snoozed);
+    assert_eq!(task.snoozed_until, Some(future));
+    assert_eq!(task.project_id.as_deref(), Some("project-1"));
+    assert_eq!(task.rank, 8);
+    assert_eq!(state.state().last_custom_snooze, Some(future));
+    drop(state);
+    assert_eq!(
+        success_ctx.notifications(),
+        &[tuicore::Notification::success(
+            "Task created",
+            "“Schedule follow up” was scheduled for 2026-07-30T14:30:00."
+        )]
+    );
+    assert!(!app.primary_dialog().is_active());
+    assert!(app.pending_calendar_task.is_none());
+    assert!(app.create_task_calendar_date.is_none());
+    assert!(coordinator.borrow().has_pending());
+
+    app.schedule_created_task_at(future, Some(future), now, &mut EventCtx::default());
+
+    let state = store.borrow();
+    assert_eq!(state.state().tasks.len(), 2);
+    assert_eq!(
+        state
+            .state()
+            .tasks
+            .iter()
+            .filter(|task| task.id.starts_with("pending-"))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn canceling_calendar_scheduler_discards_pending_draft_without_creating_task() {
+    let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+        tasks: Vec::new(),
+        people: Vec::new(),
+        projects: Vec::new(),
+        tags: Vec::new(),
+    });
+    let coordinator = Rc::clone(&context.coordinator);
+    let mut app = App::new(context.store, context.coordinator);
+    app.open_create_task_dialog(
+        Some(time::macros::date!(2999 - 01 - 01)),
+        &mut EventCtx::default(),
+    );
+    app.submit_create_task(
+        CreateTaskDraft {
+            title: "Canceled schedule".into(),
+        },
         &mut EventCtx::default(),
     );
 
-    let state = store.borrow();
-    let task = state.state().tasks.first().expect("task should be created");
-    assert_eq!(task.state, TaskState::Snoozed);
-    assert_eq!(
-        task.snoozed_until,
-        Some(selected_date.with_time(Time::from_hms(14, 30, 0).unwrap()))
-    );
+    app.close_snooze_dialog(&mut EventCtx::default());
+
+    assert!(app.pending_calendar_task.is_none());
+    assert!(app.create_task_calendar_date.is_none());
+    assert!(store.borrow().state().tasks.is_empty());
+    assert!(!coordinator.borrow().has_pending());
 }
 
 #[test]

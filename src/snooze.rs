@@ -129,6 +129,7 @@ fn custom_label(value: PrimitiveDateTime) -> String {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum SnoozeChoice {
+    CalendarDay,
     Tomorrow,
     Weekend,
     NextWeek,
@@ -142,11 +143,43 @@ enum SnoozeMode {
     Picker,
 }
 
+#[derive(Clone)]
+enum SnoozeTarget {
+    Task { task_id: String, is_snoozed: bool },
+    CalendarCreate,
+}
+
+impl SnoozeTarget {
+    fn allows_unsnooze(&self) -> bool {
+        matches!(
+            self,
+            Self::Task {
+                is_snoozed: true,
+                ..
+            }
+        )
+    }
+
+    fn selection_message(&self, until: PrimitiveDateTime, custom: bool) -> AppMsg {
+        match self {
+            Self::Task { task_id, .. } => AppMsg::SnoozeTask {
+                task_id: task_id.clone(),
+                until,
+                remember_custom: custom.then_some(until),
+            },
+            Self::CalendarCreate => AppMsg::ScheduleCreatedTask {
+                until,
+                remember_custom: custom.then_some(until),
+            },
+        }
+    }
+}
+
 pub(crate) struct SnoozeDialog {
-    task_id: String,
+    target: SnoozeTarget,
     quick: QuickSnoozes,
+    selected_calendar_day: Option<PrimitiveDateTime>,
     last_custom: Option<PrimitiveDateTime>,
-    is_snoozed: bool,
     dropdown: Dropdown<SnoozeOption, SnoozeChoice>,
     actions: Rc<RefCell<Vec<SnoozeChoice>>>,
     mode: SnoozeMode,
@@ -210,31 +243,81 @@ fn snooze_options(
     options
 }
 
+fn calendar_snooze_options(
+    quick: QuickSnoozes,
+    selected_day: PrimitiveDateTime,
+    last_custom: Option<PrimitiveDateTime>,
+) -> Vec<SnoozeOption> {
+    let mut options = snooze_options(quick, last_custom, false);
+    let selected_quick_choice = if selected_day.date() == quick.tomorrow.date() {
+        Some(SnoozeChoice::Tomorrow)
+    } else if selected_day.date() == quick.weekend.date() {
+        Some(SnoozeChoice::Weekend)
+    } else if selected_day.date() == quick.next_week.date() {
+        Some(SnoozeChoice::NextWeek)
+    } else {
+        None
+    };
+    if let Some(choice) = selected_quick_choice {
+        let index = options
+            .iter()
+            .position(|option| option.choice == choice)
+            .expect("quick snooze choice should exist");
+        let selected = options.remove(index);
+        options.insert(0, selected);
+        return options;
+    }
+    let today = quick
+        .tomorrow
+        .date()
+        .previous_day()
+        .expect("tomorrow should have a previous day");
+    let date_label = if selected_day.date() == today {
+        "Today".to_string()
+    } else {
+        selected_day.date().to_string()
+    };
+    options.insert(
+        0,
+        SnoozeOption {
+            choice: SnoozeChoice::CalendarDay,
+            label: format!(
+                "{} · {} · {}",
+                date_label,
+                short_weekday(selected_day.weekday()),
+                format_time(selected_day)
+            ),
+        },
+    );
+    options
+}
+
 fn build_snooze_dropdown(
     quick: QuickSnoozes,
+    selected_calendar_day: Option<PrimitiveDateTime>,
     last_custom: Option<PrimitiveDateTime>,
     is_snoozed: bool,
     actions: Rc<RefCell<Vec<SnoozeChoice>>>,
 ) -> Dropdown<SnoozeOption, SnoozeChoice> {
-    Dropdown::single(
-        snooze_options(quick, last_custom, is_snoozed),
-        |row| row.choice,
-        |row| row.label.clone(),
-    )
-    .variant(DropdownVariant::Filled)
-    .label("Snooze until...")
-    .label_position(DropdownLabelPosition::Inline)
-    .search_mode(DropdownSearchMode::Fuzzy)
-    .commit_mode(DropdownCommitMode::Explicit)
-    .centered(true)
-    .backdrop_amount(0.0)
-    .tab_stop(false)
-    .max_popup_height(12)
-    .on_select(move |ids| {
-        if let Some(choice) = ids.first() {
-            actions.borrow_mut().push(*choice);
-        }
-    })
+    let options = selected_calendar_day.map_or_else(
+        || snooze_options(quick, last_custom, is_snoozed),
+        |selected_day| calendar_snooze_options(quick, selected_day, last_custom),
+    );
+    Dropdown::single(options, |row| row.choice, |row| row.label.clone())
+        .variant(DropdownVariant::Filled)
+        .label("Snooze until...")
+        .label_position(DropdownLabelPosition::Inline)
+        .search_mode(DropdownSearchMode::Fuzzy)
+        .commit_mode(DropdownCommitMode::Explicit)
+        .centered(true)
+        .backdrop_amount(0.0)
+        .tab_stop(false)
+        .max_popup_height(12)
+        .on_select(move |ids| {
+            if let Some(choice) = ids.first() {
+                actions.borrow_mut().push(*choice);
+            }
+        })
 }
 
 impl SnoozeDialog {
@@ -261,17 +344,52 @@ impl SnoozeDialog {
         last_custom: Option<PrimitiveDateTime>,
         is_snoozed: bool,
     ) -> Self {
+        let target = SnoozeTarget::Task {
+            task_id,
+            is_snoozed,
+        };
+        Self::with_target(target, now, default_time, last_custom, None)
+    }
+
+    pub(crate) fn for_calendar(
+        now: PrimitiveDateTime,
+        picker_seed: PrimitiveDateTime,
+        last_custom: Option<PrimitiveDateTime>,
+    ) -> Self {
+        Self::with_target(
+            SnoozeTarget::CalendarCreate,
+            now,
+            picker_seed.time(),
+            last_custom,
+            Some(picker_seed),
+        )
+    }
+
+    fn with_target(
+        target: SnoozeTarget,
+        now: PrimitiveDateTime,
+        default_time: Time,
+        last_custom: Option<PrimitiveDateTime>,
+        picker_seed: Option<PrimitiveDateTime>,
+    ) -> Self {
         let quick = quick_snoozes(now, default_time);
-        let picker_task_id = task_id.clone();
+        let picker_target = target.clone();
+        let selected_calendar_day =
+            picker_seed.filter(|_| matches!(&target, SnoozeTarget::CalendarCreate));
         let actions = Rc::new(RefCell::new(Vec::new()));
-        let mut dropdown =
-            build_snooze_dropdown(quick, last_custom, is_snoozed, Rc::clone(&actions));
+        let mut dropdown = build_snooze_dropdown(
+            quick,
+            selected_calendar_day,
+            last_custom,
+            target.allows_unsnooze(),
+            Rc::clone(&actions),
+        );
         dropdown.open();
         Self {
-            task_id,
+            target,
             quick,
+            selected_calendar_day,
             last_custom,
-            is_snoozed,
             dropdown,
             actions,
             mode: SnoozeMode::Menu,
@@ -280,17 +398,14 @@ impl SnoozeDialog {
             menu_field_area: Rect::default(),
             picker: DateTimePicker::new()
                 .layout(DateTimePickerLayout::Stepped)
-                .value(Some(quick.tomorrow))
-                .on_select(move |until| AppMsg::SnoozeTask {
-                    task_id: picker_task_id.clone(),
-                    until,
-                    remember_custom: Some(until),
-                }),
+                .value(Some(picker_seed.unwrap_or(quick.tomorrow)))
+                .on_select(move |until| picker_target.selection_message(until, true)),
         }
     }
 
     fn activate(&mut self, choice: SnoozeChoice, ctx: &mut EventCtx<AppMsg>) {
         let until = match choice {
+            SnoozeChoice::CalendarDay => self.selected_calendar_day,
             SnoozeChoice::Tomorrow => Some(self.quick.tomorrow),
             SnoozeChoice::Weekend => Some(self.quick.weekend),
             SnoozeChoice::NextWeek => Some(self.quick.next_week),
@@ -307,17 +422,36 @@ impl SnoozeDialog {
                 None
             }
             SnoozeChoice::Unsnooze => {
-                ctx.emit(AppMsg::UnsnoozeTask(self.task_id.clone()));
+                if let SnoozeTarget::Task { task_id, .. } = &self.target {
+                    ctx.emit(AppMsg::UnsnoozeTask(task_id.clone()));
+                }
                 None
             }
         };
         if let Some(until) = until {
-            ctx.emit(AppMsg::SnoozeTask {
-                task_id: self.task_id.clone(),
-                until,
-                remember_custom: None,
-            });
+            ctx.emit(self.target.selection_message(until, false));
         }
+    }
+
+    pub(crate) fn recover_after_invalid_selection(&mut self, ctx: &mut EventCtx<AppMsg>) {
+        match self.mode {
+            SnoozeMode::Menu => {
+                self.dropdown.open_with_context(ctx);
+                ctx.focus(FocusRequest::TargetAt {
+                    path: self.focus_path.clone(),
+                    id: FocusId::new("input"),
+                });
+            }
+            SnoozeMode::Picker => {
+                self.picker_on_time = false;
+                ctx.focus(FocusRequest::TargetAt {
+                    path: self.focus_path.clone(),
+                    id: FocusId::new("date-time-picker"),
+                });
+            }
+        }
+        ctx.request_layout();
+        ctx.request_redraw();
     }
 
     fn drain_actions(&mut self, ctx: &mut EventCtx<AppMsg>) -> bool {
@@ -402,8 +536,9 @@ impl TuiNode<AppMsg> for SnoozeDialog {
                     ctx.request_redraw();
                     self.dropdown = build_snooze_dropdown(
                         self.quick,
+                        self.selected_calendar_day,
                         self.last_custom,
-                        self.is_snoozed,
+                        self.target.allows_unsnooze(),
                         Rc::clone(&self.actions),
                     );
                     self.dropdown.open_with_context(ctx);
@@ -610,6 +745,149 @@ mod tests {
             dialog.picker.current_value(),
             Some(datetime!(2026-07-27 8:15))
         );
+    }
+
+    #[test]
+    fn calendar_target_seeds_selected_date_and_emits_schedule_message() {
+        let selected = datetime!(2026-07-30 14:30);
+        let mut dialog = SnoozeDialog::for_calendar(datetime!(2026-07-23 12:00), selected, None);
+        assert_eq!(dialog.picker.current_value(), Some(selected));
+        assert!(
+            !snooze_options(dialog.quick, None, dialog.target.allows_unsnooze())
+                .iter()
+                .any(|option| option.choice == SnoozeChoice::Unsnooze)
+        );
+        dialog.mode = SnoozeMode::Picker;
+        let enter = TuiEvent::Key(KeyEvent::from(Key::Enter));
+        let mut ctx = EventCtx::default();
+
+        dialog.event(&enter, &mut ctx);
+        dialog.event(&enter, &mut ctx);
+        dialog.event(&enter, &mut ctx);
+
+        assert!(matches!(
+            ctx.messages(),
+            [AppMsg::ScheduleCreatedTask {
+                until,
+                remember_custom: Some(custom),
+            }] if *until == selected && *custom == selected
+        ));
+    }
+
+    #[test]
+    fn calendar_target_lists_selected_day_first_at_default_time() {
+        let selected = datetime!(2026-08-12 8:15);
+        let options = calendar_snooze_options(
+            quick_snoozes(datetime!(2026-08-03 12:00), selected.time()),
+            selected,
+            None,
+        );
+
+        assert_eq!(options[0].choice, SnoozeChoice::CalendarDay);
+        assert_eq!(options[0].label, "2026-08-12 · Wed · 8:15 AM");
+
+        let mut dialog = SnoozeDialog::for_calendar(datetime!(2026-08-03 12:00), selected, None);
+        let mut ctx = EventCtx::default();
+        dialog.event(&TuiEvent::Key(Key::Enter.into()), &mut ctx);
+
+        assert!(matches!(
+            ctx.messages(),
+            [AppMsg::ScheduleCreatedTask {
+                until,
+                remember_custom: None,
+            }] if *until == selected
+        ));
+    }
+
+    #[test]
+    fn calendar_target_labels_selected_current_day_as_today() {
+        let now = datetime!(2026-08-12 12:00);
+        let selected = datetime!(2026-08-12 8:15);
+        let options = calendar_snooze_options(quick_snoozes(now, selected.time()), selected, None);
+
+        assert_eq!(options[0].choice, SnoozeChoice::CalendarDay);
+        assert_eq!(options[0].label, "Today · Wed · 8:15 AM");
+    }
+
+    #[test]
+    fn calendar_target_moves_matching_quick_snooze_first_without_duplication() {
+        let quick = quick_snoozes(datetime!(2026-08-12 12:00), time::macros::time!(8:15));
+
+        for (selected, expected_choice) in [
+            (quick.tomorrow, SnoozeChoice::Tomorrow),
+            (quick.weekend, SnoozeChoice::Weekend),
+            (quick.next_week, SnoozeChoice::NextWeek),
+        ] {
+            let options = calendar_snooze_options(quick, selected, None);
+
+            assert_eq!(options[0].choice, expected_choice);
+            assert!(
+                options
+                    .iter()
+                    .all(|option| option.choice != SnoozeChoice::CalendarDay),
+                "calendar option duplicated quick-snooze date {}",
+                selected.date()
+            );
+        }
+    }
+
+    #[test]
+    fn calendar_target_presents_last_custom_snooze_option() {
+        let last_custom = datetime!(2026-07-29 16:45);
+        let dialog = SnoozeDialog::for_calendar(
+            datetime!(2026-07-23 12:00),
+            datetime!(2026-07-30 14:30),
+            Some(last_custom),
+        );
+
+        assert!(
+            snooze_options(dialog.quick, dialog.last_custom, false)
+                .iter()
+                .any(|option| option.choice == SnoozeChoice::Last
+                    && option.label == "Last · Wed 7/29 · 4:45 PM")
+        );
+    }
+
+    #[test]
+    fn calendar_target_recovers_closed_menu_and_retains_picker_value() {
+        let selected = datetime!(2026-07-30 14:30);
+        let mut dialog = SnoozeDialog::for_calendar(datetime!(2026-07-23 12:00), selected, None);
+        dialog.dropdown.close();
+
+        dialog.recover_after_invalid_selection(&mut EventCtx::default());
+
+        assert!(dialog.dropdown.is_open());
+        dialog.mode = SnoozeMode::Picker;
+        dialog.recover_after_invalid_selection(&mut EventCtx::default());
+        assert!(matches!(dialog.mode, SnoozeMode::Picker));
+        assert_eq!(dialog.picker.current_value(), Some(selected));
+
+        let enter = TuiEvent::Key(KeyEvent::from(Key::Enter));
+        let mut first_ctx = EventCtx::default();
+        for _ in 0..3 {
+            dialog.event(&enter, &mut first_ctx);
+        }
+        assert!(matches!(
+            first_ctx.messages(),
+            [AppMsg::ScheduleCreatedTask {
+                until,
+                remember_custom: Some(custom),
+            }] if *until == selected && *custom == selected
+        ));
+
+        dialog.recover_after_invalid_selection(&mut EventCtx::default());
+        let mut retry_ctx = EventCtx::default();
+        dialog.event(&TuiEvent::Key(Key::Right.into()), &mut retry_ctx);
+        for _ in 0..3 {
+            dialog.event(&enter, &mut retry_ctx);
+        }
+        assert!(matches!(
+            retry_ctx.messages(),
+            [AppMsg::ScheduleCreatedTask {
+                until,
+                remember_custom: Some(custom),
+            }] if *until == datetime!(2026-07-31 14:30) && *custom == *until
+        ));
     }
 
     #[test]

@@ -69,6 +69,7 @@ pub(crate) struct CalendarWorkspace {
     context: AppContext,
     create_context: CalendarCreateContext,
     pane: CalendarPane,
+    visible_entries: Vec<SnoozedTaskEntry>,
     empty_state: SeasonalEmptyState,
     observed_version: u64,
     setting_status: SaveStatusLine,
@@ -112,13 +113,14 @@ impl CalendarWorkspace {
         let today = current_date();
         let project_filter = active_project_filter.borrow().clone();
         let label_filter = active_label_filter.borrow().clone();
-        let calendar = task_calendar(filtered_snoozed_task_entries(
+        let visible_entries = filtered_snoozed_task_entries(
             &state.state().tasks,
             project_filter.as_deref(),
             &label_filter,
-        ))
-        .today(today)
-        .show_weekends(show_weekends);
+        );
+        let calendar = task_calendar(visible_entries.clone())
+            .today(today)
+            .show_weekends(show_weekends);
         let detail = TaskDetailForm::new(
             None,
             &state.state().people,
@@ -131,6 +133,7 @@ impl CalendarWorkspace {
             context,
             create_context,
             pane: ResponsiveSplit::master_detail(calendar, detail).second_visible(false),
+            visible_entries,
             empty_state: SeasonalEmptyState::new("No tasks scheduled for this day"),
             observed_version,
             setting_status: SaveStatusLine::new(None),
@@ -155,7 +158,7 @@ impl CalendarWorkspace {
             self.project_filter.as_deref(),
             &self.label_filter,
         );
-        self.calendar_mut().set_entries(entries);
+        self.set_calendar_entries(entries);
         self.select_created_task();
         if let Some(value) = state.app_setting_values.get(SHOW_WEEKENDS_SETTING)
             && let Ok(show) = parse_show_weekends_setting(Some(value))
@@ -206,16 +209,43 @@ impl CalendarWorkspace {
             self.project_filter.as_deref(),
             &self.label_filter,
         );
-        self.calendar_mut().set_entries(entries);
+        self.set_calendar_entries(entries);
         self.sync_detail(&state, &mut EventCtx::default());
         true
+    }
+
+    fn set_calendar_entries(&mut self, entries: Vec<SnoozedTaskEntry>) {
+        let replacement = self.removed_entry_replacement(&entries);
+        self.visible_entries = entries.clone();
+        self.calendar_mut().set_entries(entries);
+        if let Some(task_id) = replacement {
+            self.select_task_on_current_day(&task_id);
+        }
+    }
+
+    fn removed_entry_replacement(&self, entries: &[SnoozedTaskEntry]) -> Option<String> {
+        if self.calendar().current_view() != CalendarView::Day {
+            return None;
+        }
+        let selected = self.calendar().highlighted_entry_id()?;
+        let date = self.calendar().cursor_date();
+        let previous = day_entry_ids(&self.visible_entries, date);
+        let selected_index = previous.iter().position(|id| id == &selected)?;
+        let current = day_entry_ids(entries, date);
+        if current.contains(&selected) {
+            return None;
+        }
+        current
+            .get(selected_index)
+            .or_else(|| current.last())
+            .cloned()
     }
 
     fn select_created_task(&mut self) {
         let Some(task_id) = self.create_context.take_created_task() else {
             return;
         };
-        let task_is_visible = self
+        let scheduled_date = self
             .context
             .store
             .borrow()
@@ -223,20 +253,6 @@ impl CalendarWorkspace {
             .tasks
             .iter()
             .find(|task| task.id == task_id)
-            .is_some_and(|task| {
-                task_matches_filters(task, self.project_filter.as_deref(), &self.label_filter)
-            });
-        if !task_is_visible {
-            return;
-        }
-        self.calendar_mut().on_key(tuicore::Key::Char('d'));
-        let entry_count = self
-            .context
-            .store
-            .borrow()
-            .state()
-            .tasks
-            .iter()
             .filter(|task| {
                 task.state == TaskState::Snoozed
                     && task_matches_filters(
@@ -244,13 +260,34 @@ impl CalendarWorkspace {
                         self.project_filter.as_deref(),
                         &self.label_filter,
                     )
-                    && task
-                        .snoozed_until
-                        .is_some_and(|until| until.date() == self.calendar().cursor_date())
             })
-            .count();
+            .and_then(|task| task.snoozed_until)
+            .map(|until| until.date());
+        let Some(scheduled_date) = scheduled_date else {
+            return;
+        };
+        self.calendar_mut().on_key(tuicore::Key::Char('D'));
+        self.move_cursor_to_date(scheduled_date);
+        self.select_task_on_current_day(&task_id);
+        self.sync_selected_date();
+    }
+
+    fn move_cursor_to_date(&mut self, date: Date) {
+        let days = (date - self.calendar().cursor_date()).whole_days();
+        let key = if days.is_negative() {
+            tuicore::Key::Left
+        } else {
+            tuicore::Key::Right
+        };
+        for _ in 0..days.unsigned_abs() {
+            self.calendar_mut().on_key(key);
+        }
+    }
+
+    fn select_task_on_current_day(&mut self, task_id: &str) {
+        let entry_count = day_entry_ids(&self.visible_entries, self.calendar().cursor_date()).len();
         for _ in 0..entry_count {
-            if self.calendar().highlighted_entry_id().as_deref() == Some(task_id.as_str()) {
+            if self.calendar().highlighted_entry_id().as_deref() == Some(task_id) {
                 break;
             }
             self.calendar_mut().on_key(tuicore::Key::Down);
@@ -517,7 +554,7 @@ impl CalendarWorkspace {
         if self.calendar().current_view() != CalendarView::Month || !detail_escape(event) {
             return None;
         }
-        self.calendar_mut().on_key(tuicore::Key::Char('t'));
+        self.calendar_mut().on_key(tuicore::Key::Char('T'));
         self.sync_selected_date();
         ctx.request_redraw();
         ctx.stop_propagation();
@@ -626,13 +663,27 @@ fn task_calendar(entries: Vec<SnoozedTaskEntry>) -> TaskCalendar {
         |entry| entry.title.clone(),
     )
     .bordered(false)
-    .entry_order(|left, right| {
-        left.rank
-            .cmp(&right.rank)
-            .then_with(|| left.title.cmp(&right.title))
-    })
+    .entry_order(compare_snoozed_task_entries)
     .role(|_| Some(CalendarEntryRole::Muted))
     .event_marker(|_| SNOOZE_ICON)
+}
+
+fn compare_snoozed_task_entries(
+    left: &SnoozedTaskEntry,
+    right: &SnoozedTaskEntry,
+) -> std::cmp::Ordering {
+    left.rank
+        .cmp(&right.rank)
+        .then_with(|| left.title.cmp(&right.title))
+}
+
+fn day_entry_ids(entries: &[SnoozedTaskEntry], date: Date) -> Vec<String> {
+    let mut entries = entries
+        .iter()
+        .filter(|entry| entry.until.date() == date)
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| compare_snoozed_task_entries(left, right));
+    entries.into_iter().map(|entry| entry.id.clone()).collect()
 }
 
 fn is_calendar_view_hotkey(event: &TuiEvent) -> bool {
@@ -938,7 +989,7 @@ mod tests {
             Rc::clone(&project_filter),
             Rc::clone(&label_filter),
         );
-        workspace.calendar_mut().on_key(Key::Char('d'));
+        workspace.calendar_mut().on_key(Key::Char('D'));
         let area = Rect::new(0, 0, 80, 20);
         workspace.layout(area, &mut LayoutCtx::new());
 
@@ -966,13 +1017,13 @@ mod tests {
         });
         let mut workspace = CalendarWorkspace::new(context, true);
         let area = Rect::new(0, 0, 80, 20);
-        workspace.calendar_mut().on_key(Key::Char('d'));
+        workspace.calendar_mut().on_key(Key::Char('D'));
         workspace.layout(area, &mut LayoutCtx::new());
 
         let text = rendered_text(&workspace, area);
 
         assert!(text.contains(&workspace.today.to_string()));
-        assert!(text.contains("Day |d| · Week |w| · Month |m|"));
+        assert!(text.contains("Day |D| · Week |W| · Month |M|"));
         assert!(text.contains("No tasks scheduled for today"));
         assert!(!text.contains("No entries"));
 
@@ -984,7 +1035,7 @@ mod tests {
         let today_text = rendered_text(&workspace, area);
         assert!(today_text.contains("No tasks scheduled for today"));
 
-        workspace.calendar_mut().on_key(Key::Char('m'));
+        workspace.calendar_mut().on_key(Key::Char('M'));
         let month_text = rendered_text(&workspace, area);
         assert!(!month_text.contains("No tasks scheduled for today"));
         assert!(!month_text.contains("No tasks scheduled for this day"));
@@ -1006,7 +1057,8 @@ mod tests {
         );
         workspace.event(&TuiEvent::Key(Key::Right.into()), &mut EventCtx::default());
         let selected_date = create_context.selected_date();
-        let until = selected_date.with_time(Time::from_hms(8, 0, 0).unwrap());
+        let scheduled_date = selected_date + Duration::weeks(1);
+        let until = scheduled_date.with_time(Time::from_hms(8, 0, 0).unwrap());
         let created = task("created", "Created", TaskState::Snoozed, Some(until));
         create_context.select_created_task(created.id.clone());
         context
@@ -1017,12 +1069,61 @@ mod tests {
         workspace.sync_store_version();
 
         assert_eq!(workspace.calendar().current_view(), CalendarView::Day);
-        assert_eq!(workspace.calendar().cursor_date(), selected_date);
+        assert_eq!(workspace.calendar().cursor_date(), scheduled_date);
         assert_eq!(
             workspace.calendar().highlighted_entry_id().as_deref(),
             Some("created")
         );
         assert_eq!(workspace.pane.second().task_id.as_deref(), Some("created"));
+    }
+
+    #[test]
+    fn removing_day_view_tasks_selects_next_then_previous_then_nothing() {
+        let until = current_date().with_time(Time::from_hms(8, 0, 0).unwrap());
+        let tasks = [
+            ("first", "First", 1),
+            ("second", "Second", 2),
+            ("third", "Third", 3),
+        ]
+        .into_iter()
+        .map(|(id, title, rank)| {
+            let mut task = task(id, title, TaskState::Snoozed, Some(until));
+            task.rank = rank;
+            task
+        })
+        .collect();
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks,
+            people: Vec::new(),
+            projects: Vec::new(),
+            tags: Vec::new(),
+        });
+        let mut workspace = CalendarWorkspace::new(context.clone(), true);
+        workspace.calendar_mut().on_key(Key::Char('D'));
+        workspace.calendar_mut().on_key(Key::Down);
+        assert_eq!(workspace.highlighted_task_id().as_deref(), Some("second"));
+
+        context
+            .store
+            .borrow_mut()
+            .dispatch(AppEvent::TaskDeleted("second".into()));
+        workspace.sync_store_version();
+        assert_eq!(workspace.highlighted_task_id().as_deref(), Some("third"));
+
+        context
+            .store
+            .borrow_mut()
+            .dispatch(AppEvent::TaskDeleted("third".into()));
+        workspace.sync_store_version();
+        assert_eq!(workspace.highlighted_task_id().as_deref(), Some("first"));
+
+        context
+            .store
+            .borrow_mut()
+            .dispatch(AppEvent::TaskDeleted("first".into()));
+        workspace.sync_store_version();
+        assert_eq!(workspace.highlighted_task_id(), None);
+        assert!(!workspace.pane.is_second_visible());
     }
 
     #[test]
@@ -1118,7 +1219,7 @@ mod tests {
             .dispatch(AppEvent::TaskCreated(snoozed));
         workspace.sync_store_version();
 
-        workspace.calendar_mut().on_key(Key::Char('d'));
+        workspace.calendar_mut().on_key(Key::Char('D'));
         assert!(workspace.sync_calendar_detail(&mut EventCtx::default()));
         assert_eq!(workspace.pane.second().task_id.as_deref(), Some("snoozed"));
         assert!(workspace.pane.is_second_visible());
@@ -1139,7 +1240,7 @@ mod tests {
         let text = rendered_text(&workspace, narrow);
         assert!(text.contains("Calendar task detail"));
 
-        workspace.calendar_mut().on_key(Key::Char('m'));
+        workspace.calendar_mut().on_key(Key::Char('M'));
         workspace.sync_calendar_detail(&mut EventCtx::default());
         assert!(!workspace.pane.is_second_visible());
     }
@@ -1174,7 +1275,7 @@ mod tests {
                 Some(second),
             )));
         workspace.sync_store_version();
-        workspace.calendar_mut().on_key(Key::Char('d'));
+        workspace.calendar_mut().on_key(Key::Char('D'));
         workspace.sync_calendar_detail(&mut EventCtx::default());
         assert_eq!(workspace.pane.second().task_id.as_deref(), Some("first"));
 
@@ -1203,7 +1304,7 @@ mod tests {
                 Some(until),
             )));
         workspace.sync_store_version();
-        workspace.calendar_mut().on_key(Key::Char('d'));
+        workspace.calendar_mut().on_key(Key::Char('D'));
         workspace.sync_calendar_detail(&mut EventCtx::default());
         let mut ctx = EventCtx::default();
 
@@ -1240,7 +1341,7 @@ mod tests {
                 .dispatch(AppEvent::TaskCreated(entry));
         }
         let mut workspace = CalendarWorkspace::new(context, true);
-        workspace.calendar_mut().on_key(Key::Char('d'));
+        workspace.calendar_mut().on_key(Key::Char('D'));
         workspace.calendar_mut().on_key(KeyEvent::from(Key::Down));
 
         for key in [
@@ -1297,7 +1398,7 @@ mod tests {
                 Some(until),
             )));
         workspace.sync_store_version();
-        workspace.calendar_mut().on_key(Key::Char('d'));
+        workspace.calendar_mut().on_key(Key::Char('D'));
         workspace.sync_calendar_detail(&mut EventCtx::default());
         let mut ctx = EventCtx::default();
 
@@ -1326,7 +1427,7 @@ mod tests {
                 Some(until),
             )));
         workspace.sync_store_version();
-        workspace.calendar_mut().on_key(Key::Char('d'));
+        workspace.calendar_mut().on_key(Key::Char('D'));
         workspace.sync_calendar_detail(&mut EventCtx::default());
         let mut layout = LayoutCtx::new();
         workspace.layout(Rect::new(0, 0, 120, 30), &mut layout);
@@ -1412,7 +1513,7 @@ mod tests {
                 Some(until),
             )));
         workspace.sync_store_version();
-        workspace.calendar_mut().on_key(Key::Char('d'));
+        workspace.calendar_mut().on_key(Key::Char('D'));
         workspace.sync_calendar_detail(&mut EventCtx::default());
         let mut layout = LayoutCtx::new();
         workspace.layout(Rect::new(0, 0, 120, 30), &mut layout);
@@ -1465,7 +1566,7 @@ mod tests {
                 Some(until),
             )));
         workspace.sync_store_version();
-        workspace.calendar_mut().on_key(Key::Char('d'));
+        workspace.calendar_mut().on_key(Key::Char('D'));
         workspace.sync_calendar_detail(&mut EventCtx::default());
         let mut layout = LayoutCtx::new();
         workspace.layout(Rect::new(0, 0, 120, 30), &mut layout);
@@ -1485,9 +1586,9 @@ mod tests {
         let route = EventRoute::new(detail_path);
 
         for (key, expected) in [
-            ('m', CalendarView::Month),
-            ('w', CalendarView::Week),
-            ('d', CalendarView::Day),
+            ('M', CalendarView::Month),
+            ('W', CalendarView::Week),
+            ('D', CalendarView::Day),
         ] {
             workspace.dispatch_event(
                 &route,
@@ -1518,7 +1619,7 @@ mod tests {
                 Some(until),
             )));
         workspace.sync_store_version();
-        workspace.calendar_mut().on_key(Key::Char('d'));
+        workspace.calendar_mut().on_key(Key::Char('D'));
         workspace.sync_calendar_detail(&mut EventCtx::default());
         let mut layout = LayoutCtx::new();
         workspace.layout(Rect::new(0, 0, 120, 30), &mut layout);
