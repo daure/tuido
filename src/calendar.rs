@@ -10,11 +10,11 @@ use tuicore::{
 };
 
 use crate::app::{
-    ActiveLabelFilter, ActiveProjectFilter, AppContext, AppMsg, persist_task_order,
+    ActiveLabelFilter, ActiveWorkspaceFilter, AppContext, AppMsg, persist_task_order,
     task_detail::detail_escape, task_ids_at_snooze_time,
 };
 use crate::app_keymap::keys;
-use crate::domain::{Project, Task, TaskState};
+use crate::domain::{Task, TaskState, Workspace};
 use crate::persistence_coordinator::PersistenceCommand;
 use crate::ui::responsive_split::ResponsiveSplit;
 use crate::ui::save_status::SaveStatusLine;
@@ -76,9 +76,9 @@ pub(crate) struct CalendarWorkspace {
     setting_status: SaveStatusLine,
     today: Date,
     reordering: bool,
-    project_filter: Option<String>,
+    workspace_filter: Option<String>,
     label_filter: Vec<String>,
-    active_project_filter: ActiveProjectFilter,
+    active_workspace_filter: ActiveWorkspaceFilter,
     active_label_filter: ActiveLabelFilter,
 }
 
@@ -106,18 +106,18 @@ impl CalendarWorkspace {
         context: AppContext,
         show_weekends: bool,
         create_context: CalendarCreateContext,
-        active_project_filter: ActiveProjectFilter,
+        active_workspace_filter: ActiveWorkspaceFilter,
         active_label_filter: ActiveLabelFilter,
     ) -> Self {
         let state = context.store.borrow();
         let observed_version = state.state().version;
         let today = current_date();
-        let project_filter = active_project_filter.borrow().clone();
+        let workspace_filter = active_workspace_filter.borrow().clone();
         let label_filter = active_label_filter.borrow().clone();
         let visible_entries = filtered_snoozed_task_entries(
             &state.state().tasks,
-            &state.state().projects,
-            project_filter.as_deref(),
+            &state.state().workspaces,
+            workspace_filter.as_deref(),
             &label_filter,
         );
         let calendar = task_calendar(visible_entries.clone())
@@ -127,7 +127,7 @@ impl CalendarWorkspace {
             None,
             &state.state().tasks,
             &state.state().people,
-            &state.state().projects,
+            &state.state().workspaces,
             &state.state().tags,
             None,
         );
@@ -142,9 +142,9 @@ impl CalendarWorkspace {
             setting_status: SaveStatusLine::new(None),
             today,
             reordering: false,
-            project_filter,
+            workspace_filter,
             label_filter,
-            active_project_filter,
+            active_workspace_filter,
             active_label_filter,
         }
     }
@@ -158,8 +158,8 @@ impl CalendarWorkspace {
         self.observed_version = state.version;
         let entries = filtered_snoozed_task_entries(
             &state.tasks,
-            &state.projects,
-            self.project_filter.as_deref(),
+            &state.workspaces,
+            self.workspace_filter.as_deref(),
             &self.label_filter,
         );
         self.set_calendar_entries(entries);
@@ -181,12 +181,12 @@ impl CalendarWorkspace {
     fn sync_filter_options(&mut self, state: &crate::domain::AppState) -> bool {
         let mut changed = false;
         if self
-            .project_filter
+            .workspace_filter
             .as_ref()
-            .is_some_and(|id| !state.projects.iter().any(|project| project.id == *id))
+            .is_some_and(|id| !state.workspaces.iter().any(|workspace| workspace.id == *id))
         {
-            self.project_filter = None;
-            *self.active_project_filter.borrow_mut() = None;
+            self.workspace_filter = None;
+            *self.active_workspace_filter.borrow_mut() = None;
             changed = true;
         }
         let previous_labels = self.label_filter.len();
@@ -200,18 +200,18 @@ impl CalendarWorkspace {
     }
 
     fn sync_filter_change(&mut self) -> bool {
-        let project_filter = self.active_project_filter.borrow().clone();
+        let workspace_filter = self.active_workspace_filter.borrow().clone();
         let label_filter = self.active_label_filter.borrow().clone();
-        if project_filter == self.project_filter && label_filter == self.label_filter {
+        if workspace_filter == self.workspace_filter && label_filter == self.label_filter {
             return false;
         }
-        self.project_filter = project_filter;
+        self.workspace_filter = workspace_filter;
         self.label_filter = label_filter;
         let state = self.context.store.borrow().state().clone();
         let entries = filtered_snoozed_task_entries(
             &state.tasks,
-            &state.projects,
-            self.project_filter.as_deref(),
+            &state.workspaces,
+            self.workspace_filter.as_deref(),
             &self.label_filter,
         );
         self.set_calendar_entries(entries);
@@ -262,7 +262,7 @@ impl CalendarWorkspace {
                 task.state == TaskState::Snoozed
                     && task_matches_filters(
                         task,
-                        self.project_filter.as_deref(),
+                        self.workspace_filter.as_deref(),
                         &self.label_filter,
                     )
             })
@@ -355,7 +355,7 @@ impl CalendarWorkspace {
                 task.state == TaskState::Snoozed
                     && task_matches_filters(
                         task,
-                        self.project_filter.as_deref(),
+                        self.workspace_filter.as_deref(),
                         &self.label_filter,
                     )
                     && task
@@ -393,7 +393,7 @@ impl CalendarWorkspace {
         if identity_changed {
             self.detail_mut().set_task(
                 task,
-                (&state.tasks, &state.people, &state.projects, &state.tags),
+                (&state.tasks, &state.people, &state.workspaces, &state.tags),
                 save_error,
                 ctx,
             );
@@ -623,28 +623,29 @@ pub(crate) fn parse_show_weekends_setting(value: Option<&str>) -> Result<bool, S
 
 fn filtered_snoozed_task_entries(
     tasks: &[Task],
-    projects: &[Project],
-    project_filter: Option<&str>,
+    workspaces: &[Workspace],
+    workspace_filter: Option<&str>,
     label_filter: &[String],
 ) -> Vec<SnoozedTaskEntry> {
     tasks
         .iter()
-        .filter(|task| task_matches_filters(task, project_filter, label_filter))
-        .filter_map(|task| snoozed_task_entry(task, projects))
+        .filter(|task| task_matches_filters(task, workspace_filter, label_filter))
+        .filter_map(|task| snoozed_task_entry(task, workspaces))
         .collect()
 }
 
-fn snoozed_task_entry(task: &Task, projects: &[Project]) -> Option<SnoozedTaskEntry> {
-    let project = task
-        .project_id
-        .as_deref()
-        .and_then(|project_id| projects.iter().find(|project| project.id == project_id));
+fn snoozed_task_entry(task: &Task, workspaces: &[Workspace]) -> Option<SnoozedTaskEntry> {
+    let workspace = task.workspace_id.as_deref().and_then(|workspace_id| {
+        workspaces
+            .iter()
+            .find(|workspace| workspace.id == workspace_id)
+    });
     (task.state == TaskState::Snoozed).then_some(SnoozedTaskEntry {
         id: task.id.clone(),
         title: task.title.clone(),
         display_title: format!(
             "{} - {}",
-            crate::domain::task_display_id(task, project),
+            crate::domain::task_display_id(task, workspace),
             task.title
         ),
         until: task.snoozed_until?,
@@ -654,10 +655,10 @@ fn snoozed_task_entry(task: &Task, projects: &[Project]) -> Option<SnoozedTaskEn
 
 fn task_matches_filters(
     task: &Task,
-    project_filter: Option<&str>,
+    workspace_filter: Option<&str>,
     label_filter: &[String],
 ) -> bool {
-    project_filter.is_none_or(|project_id| task.project_id.as_deref() == Some(project_id))
+    workspace_filter.is_none_or(|workspace_id| task.workspace_id.as_deref() == Some(workspace_id))
         && label_filter
             .iter()
             .all(|tag_id| task.tag_ids.contains(tag_id))
@@ -898,7 +899,7 @@ impl TuiNode<AppMsg> for CalendarWorkspace {
 mod tests {
     use super::*;
     use crate::app::tests::{rendered_text, test_context};
-    use crate::domain::{AppEvent, Project, Tag, TaskPriority, TaskSize, WorkspaceSnapshot};
+    use crate::domain::{AppEvent, Tag, TaskPriority, TaskSize, Workspace, WorkspaceSnapshot};
     use ratatui::{Terminal, backend::TestBackend};
     use time::{Date, Month, Time};
     use tuicore::{
@@ -917,7 +918,7 @@ mod tests {
             priority: TaskPriority::Medium,
             snoozed_until: until,
             people_ids: Vec::new(),
-            project_id: None,
+            workspace_id: None,
             tag_ids: Vec::new(),
             checklist: Vec::new(),
             links: Vec::new(),
@@ -930,21 +931,21 @@ mod tests {
     fn calendar_shows_task_reference_only_in_day_view() {
         let date = Date::from_calendar_date(2026, Month::July, 24).unwrap();
         let until = date.with_time(Time::from_hms(8, 0, 0).unwrap());
-        let project = Project::new(
-            "project".into(),
+        let workspace = Workspace::new(
+            "workspace".into(),
             "if".into(),
             "Internal fixes".into(),
             String::new(),
         );
         let mut snoozed = task("OLD-30", "Follow up", TaskState::Snoozed, Some(until));
-        snoozed.project_id = Some(project.id.clone());
+        snoozed.workspace_id = Some(workspace.id.clone());
         let entries = filtered_snoozed_task_entries(
             &[
                 snoozed,
                 task("todo", "Still active", TaskState::Todo, Some(until)),
                 task("undated", "Missing return date", TaskState::Snoozed, None),
             ],
-            &[project],
+            &[workspace],
             None,
             &[],
         );
@@ -981,10 +982,10 @@ mod tests {
     }
 
     #[test]
-    fn calendar_applies_shared_project_and_label_filters() {
+    fn calendar_applies_shared_workspace_and_label_filters() {
         let until = current_date().with_time(Time::from_hms(8, 0, 0).unwrap());
         let mut matching = task("matching", "Matching", TaskState::Snoozed, Some(until));
-        matching.project_id = Some("project-2".into());
+        matching.workspace_id = Some("workspace-2".into());
         matching.tag_ids = vec!["api".into(), "urgent".into()];
         let mut wrong_labels = task(
             "wrong-labels",
@@ -992,28 +993,28 @@ mod tests {
             TaskState::Snoozed,
             Some(until),
         );
-        wrong_labels.project_id = Some("project-2".into());
+        wrong_labels.workspace_id = Some("workspace-2".into());
         wrong_labels.tag_ids = vec!["api".into()];
-        let mut wrong_project = task(
-            "wrong-project",
-            "Wrong project",
+        let mut wrong_workspace = task(
+            "wrong-workspace",
+            "Wrong workspace",
             TaskState::Snoozed,
             Some(until),
         );
-        wrong_project.project_id = Some("project-1".into());
-        wrong_project.tag_ids = vec!["api".into(), "urgent".into()];
+        wrong_workspace.workspace_id = Some("workspace-1".into());
+        wrong_workspace.tag_ids = vec!["api".into(), "urgent".into()];
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
-            tasks: vec![matching, wrong_labels, wrong_project],
+            tasks: vec![matching, wrong_labels, wrong_workspace],
             people: Vec::new(),
-            projects: vec![
-                Project::new(
-                    "project-1".into(),
+            workspaces: vec![
+                Workspace::new(
+                    "workspace-1".into(),
                     "ONE".into(),
                     "One".into(),
                     String::new(),
                 ),
-                Project::new(
-                    "project-2".into(),
+                Workspace::new(
+                    "workspace-2".into(),
                     "TWO".into(),
                     "Two".into(),
                     String::new(),
@@ -1024,13 +1025,13 @@ mod tests {
                 Tag::new("urgent".into(), "Urgent".into()),
             ],
         });
-        let project_filter = Rc::new(RefCell::new(Some("project-2".into())));
+        let workspace_filter = Rc::new(RefCell::new(Some("workspace-2".into())));
         let label_filter = Rc::new(RefCell::new(vec!["api".into(), "urgent".into()]));
         let mut workspace = CalendarWorkspace::new_with_create_context_and_filters(
             context,
             true,
             CalendarCreateContext::new(),
-            Rc::clone(&project_filter),
+            Rc::clone(&workspace_filter),
             Rc::clone(&label_filter),
         );
         workspace.calendar_mut().on_key(Key::Char('D'));
@@ -1040,15 +1041,15 @@ mod tests {
         let filtered = rendered_text(&workspace, area);
         assert!(filtered.contains("Matching"));
         assert!(!filtered.contains("Wrong labels"));
-        assert!(!filtered.contains("Wrong project"));
+        assert!(!filtered.contains("Wrong workspace"));
 
-        *project_filter.borrow_mut() = None;
+        *workspace_filter.borrow_mut() = None;
         label_filter.borrow_mut().clear();
         assert!(workspace.sync_filter_change());
         let unfiltered = rendered_text(&workspace, area);
         assert!(unfiltered.contains("Matching"));
         assert!(unfiltered.contains("Wrong labels"));
-        assert!(unfiltered.contains("Wrong project"));
+        assert!(unfiltered.contains("Wrong workspace"));
     }
 
     #[test]
@@ -1056,7 +1057,7 @@ mod tests {
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
             tasks: Vec::new(),
             people: Vec::new(),
-            projects: Vec::new(),
+            workspaces: Vec::new(),
             tags: Vec::new(),
         });
         let mut workspace = CalendarWorkspace::new(context, true);
@@ -1090,7 +1091,7 @@ mod tests {
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
             tasks: Vec::new(),
             people: Vec::new(),
-            projects: Vec::new(),
+            workspaces: Vec::new(),
             tags: Vec::new(),
         });
         let create_context = CalendarCreateContext::new();
@@ -1139,7 +1140,7 @@ mod tests {
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
             tasks,
             people: Vec::new(),
-            projects: Vec::new(),
+            workspaces: Vec::new(),
             tags: Vec::new(),
         });
         let mut workspace = CalendarWorkspace::new(context.clone(), true);
@@ -1175,7 +1176,7 @@ mod tests {
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
             tasks: Vec::new(),
             people: Vec::new(),
-            projects: Vec::new(),
+            workspaces: Vec::new(),
             tags: Vec::new(),
         });
         let mut workspace = CalendarWorkspace::new(context, true);
@@ -1198,7 +1199,7 @@ mod tests {
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
             tasks: Vec::new(),
             people: Vec::new(),
-            projects: Vec::new(),
+            workspaces: Vec::new(),
             tags: Vec::new(),
         });
         let mut workspace = CalendarWorkspace::new(context, true);
@@ -1229,7 +1230,7 @@ mod tests {
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
             tasks: Vec::new(),
             people: Vec::new(),
-            projects: Vec::new(),
+            workspaces: Vec::new(),
             tags: Vec::new(),
         });
         let mut workspace = CalendarWorkspace::new(context.clone(), true);
@@ -1250,7 +1251,7 @@ mod tests {
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
             tasks: Vec::new(),
             people: Vec::new(),
-            projects: Vec::new(),
+            workspaces: Vec::new(),
             tags: Vec::new(),
         });
         let mut workspace = CalendarWorkspace::new(context.clone(), true);
@@ -1294,7 +1295,7 @@ mod tests {
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
             tasks: Vec::new(),
             people: Vec::new(),
-            projects: Vec::new(),
+            workspaces: Vec::new(),
             tags: Vec::new(),
         });
         let mut workspace = CalendarWorkspace::new(context.clone(), true);
@@ -1333,7 +1334,7 @@ mod tests {
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
             tasks: Vec::new(),
             people: Vec::new(),
-            projects: Vec::new(),
+            workspaces: Vec::new(),
             tags: Vec::new(),
         });
         let mut workspace = CalendarWorkspace::new(context.clone(), true);
@@ -1366,7 +1367,7 @@ mod tests {
         let (_runtime, context, store) = test_context(WorkspaceSnapshot {
             tasks: Vec::new(),
             people: Vec::new(),
-            projects: Vec::new(),
+            workspaces: Vec::new(),
             tags: Vec::new(),
         });
         let eight = workspace_time(8);
@@ -1427,7 +1428,7 @@ mod tests {
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
             tasks: Vec::new(),
             people: Vec::new(),
-            projects: Vec::new(),
+            workspaces: Vec::new(),
             tags: Vec::new(),
         });
         let mut workspace = CalendarWorkspace::new(context.clone(), true);
@@ -1456,7 +1457,7 @@ mod tests {
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
             tasks: Vec::new(),
             people: Vec::new(),
-            projects: Vec::new(),
+            workspaces: Vec::new(),
             tags: Vec::new(),
         });
         let mut workspace = CalendarWorkspace::new(context.clone(), true);
@@ -1542,7 +1543,7 @@ mod tests {
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
             tasks: Vec::new(),
             people: Vec::new(),
-            projects: Vec::new(),
+            workspaces: Vec::new(),
             tags: Vec::new(),
         });
         let mut workspace = CalendarWorkspace::new(context.clone(), true);
@@ -1595,7 +1596,7 @@ mod tests {
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
             tasks: Vec::new(),
             people: Vec::new(),
-            projects: Vec::new(),
+            workspaces: Vec::new(),
             tags: Vec::new(),
         });
         let mut workspace = CalendarWorkspace::new(context.clone(), true);
@@ -1648,7 +1649,7 @@ mod tests {
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
             tasks: Vec::new(),
             people: Vec::new(),
-            projects: Vec::new(),
+            workspaces: Vec::new(),
             tags: Vec::new(),
         });
         let mut workspace = CalendarWorkspace::new(context.clone(), true);
@@ -1714,7 +1715,7 @@ mod tests {
         let (_runtime, context, store) = test_context(WorkspaceSnapshot {
             tasks: Vec::new(),
             people: Vec::new(),
-            projects: Vec::new(),
+            workspaces: Vec::new(),
             tags: Vec::new(),
         });
         store

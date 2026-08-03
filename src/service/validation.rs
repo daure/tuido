@@ -1,12 +1,12 @@
 use std::collections::HashSet;
 
 use super::{
-    ServiceError, ServiceResult, TaskPatch, TaskUpdate, TaskView, WorkspaceFilter, WorkspaceView,
+    ServiceError, ServiceResult, TaskPatch, TaskUpdate, TaskView, WorkspaceFilter, WorkspaceGraph,
 };
 
 pub(super) fn validate_workspace_filter(
     filter: &WorkspaceFilter,
-    workspace: &WorkspaceView,
+    workspace: &WorkspaceGraph,
 ) -> ServiceResult<()> {
     for state in &filter.states {
         let state = crate::domain::TaskState::parse(state)
@@ -43,12 +43,12 @@ pub(super) fn validate_workspace_filter(
             .map(|person| person.value.id.as_str()),
     )?;
     ensure_known_filter_ids(
-        "project_ids",
-        &filter.project_ids,
+        "workspace_ids",
+        &filter.workspace_ids,
         workspace
-            .projects
+            .workspaces
             .iter()
-            .map(|project| project.value.id.as_str()),
+            .map(|workspace| workspace.value.id.as_str()),
     )?;
     ensure_known_filter_ids(
         "tag_ids",
@@ -99,7 +99,7 @@ pub(super) fn task_matches_workspace_filter(task: &TaskView, filter: &WorkspaceF
         return false;
     }
     if !relation_matches(&filter.person_ids, &task.people_ids)
-        || !optional_relation_matches(&filter.project_ids, task.project_id.as_deref())
+        || !optional_relation_matches(&filter.workspace_ids, task.workspace_id.as_deref())
         || !relation_matches(&filter.tag_ids, &task.tag_ids)
     {
         return false;
@@ -233,12 +233,12 @@ pub(super) fn validate_required(field: &str, value: &str) -> ServiceResult<()> {
     }
 }
 
-pub(super) fn validate_project_key(value: &str) -> ServiceResult<()> {
-    if crate::domain::Project::is_valid_key(value) {
+pub(super) fn validate_workspace_key(value: &str) -> ServiceResult<()> {
+    if crate::domain::Workspace::is_valid_key(value) {
         Ok(())
     } else {
         Err(ServiceError::Invalid(
-            "project key must be 2-5 characters without spaces".into(),
+            "workspace key must be 2-5 characters without spaces".into(),
         ))
     }
 }

@@ -9,12 +9,12 @@ use tuicore::{
 
 use crate::{
     app::{AppMsg, task_detail::detail_form},
-    domain::{Person, Project, Tag, Task, TaskPatch, TaskState},
+    domain::{Person, Tag, Task, TaskPatch, TaskState, Workspace},
     ui::save_status::SaveStatusLine,
 };
 
 pub(crate) type PatchSink = Rc<RefCell<Vec<TaskPatch>>>;
-pub(crate) type TaskDetailCatalogs<'a> = (&'a [Task], &'a [Person], &'a [Project], &'a [Tag]);
+pub(crate) type TaskDetailCatalogs<'a> = (&'a [Task], &'a [Person], &'a [Workspace], &'a [Tag]);
 
 pub(crate) struct TaskDetailForm {
     root: Flex<AppMsg>,
@@ -23,7 +23,7 @@ pub(crate) struct TaskDetailForm {
     pub(crate) task_snapshot: Option<Task>,
     pub(crate) tasks_snapshot: Vec<Task>,
     pub(crate) people_snapshot: Vec<Person>,
-    pub(crate) projects_snapshot: Vec<Project>,
+    pub(crate) workspaces_snapshot: Vec<Workspace>,
     pub(crate) tags_snapshot: Vec<Tag>,
     pub(crate) patches: PatchSink,
     checklist_highlighted_id: Rc<RefCell<Option<String>>>,
@@ -36,7 +36,7 @@ impl TaskDetailForm {
         task: Option<&Task>,
         tasks: &[Task],
         people: &[Person],
-        projects: &[Project],
+        workspaces: &[Workspace],
         tags: &[Tag],
         save_error: Option<&str>,
     ) -> Self {
@@ -48,7 +48,7 @@ impl TaskDetailForm {
                 "form",
                 detail_form(
                     task,
-                    (tasks, people, projects, tags),
+                    (tasks, people, workspaces, tags),
                     Rc::clone(&patches),
                     Rc::clone(&checklist_highlighted_id),
                     None,
@@ -61,7 +61,7 @@ impl TaskDetailForm {
             task_snapshot: task.cloned(),
             tasks_snapshot: tasks.to_vec(),
             people_snapshot: people.to_vec(),
-            projects_snapshot: projects.to_vec(),
+            workspaces_snapshot: workspaces.to_vec(),
             tags_snapshot: tags.to_vec(),
             patches,
             checklist_highlighted_id,
@@ -89,7 +89,7 @@ impl TaskDetailForm {
         save_error: Option<&str>,
         ctx: &mut EventCtx<AppMsg>,
     ) {
-        let (tasks, people, projects, tags) = catalogs;
+        let (tasks, people, workspaces, tags) = catalogs;
         if self.task_id.as_deref() != task.map(|task| task.id.as_str()) {
             *self.checklist_highlighted_id.borrow_mut() = None;
         }
@@ -99,7 +99,7 @@ impl TaskDetailForm {
         self.task_snapshot = task.cloned();
         self.tasks_snapshot = tasks.to_vec();
         self.people_snapshot = people.to_vec();
-        self.projects_snapshot = projects.to_vec();
+        self.workspaces_snapshot = workspaces.to_vec();
         self.tags_snapshot = tags.to_vec();
         self.save_status = SaveStatusLine::new(save_error);
         let highlighted_issue_link_task_id = self.pending_issue_link_highlight.take();

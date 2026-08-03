@@ -601,7 +601,7 @@ mod tests {
         let (_runtime, context, store) = test_context(WorkspaceSnapshot {
             tasks: vec![],
             people: vec![person],
-            projects: vec![],
+            workspaces: vec![],
             tags: vec![],
         });
         let mut workspace = PeopleWorkspace::new(context);
@@ -630,7 +630,7 @@ mod tests {
         let (_runtime, context, store) = test_context(WorkspaceSnapshot {
             tasks: vec![],
             people: vec![person.clone()],
-            projects: vec![],
+            workspaces: vec![],
             tags: vec![],
         });
         let mut workspace = PeopleWorkspace::new(context);
@@ -641,7 +641,7 @@ mod tests {
             snapshot: WorkspaceSnapshot {
                 tasks: vec![],
                 people: vec![refreshed],
-                projects: vec![],
+                workspaces: vec![],
                 tags: vec![],
             },
             revision: 1,
@@ -668,7 +668,7 @@ mod tests {
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
             tasks: vec![],
             people: vec![person],
-            projects: vec![],
+            workspaces: vec![],
             tags: vec![],
         });
         let mut workspace = PeopleWorkspace::new(context);
@@ -708,7 +708,7 @@ mod tests {
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
             tasks: vec![],
             people: vec![],
-            projects: vec![],
+            workspaces: vec![],
             tags: vec![],
         });
         let mut dialog = dialog(context);
@@ -741,7 +741,7 @@ mod tests {
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
             tasks: vec![],
             people: vec![person],
-            projects: vec![],
+            workspaces: vec![],
             tags: vec![],
         });
         let mut dialog = dialog(context);
@@ -832,7 +832,7 @@ mod tests {
         let (_runtime, context, store) = test_context(WorkspaceSnapshot {
             tasks: vec![],
             people: vec![Person::new("person-1".into(), "Ada".into(), String::new())],
-            projects: vec![],
+            workspaces: vec![],
             tags: vec![],
         });
         let mut workspace = PeopleWorkspace::new(context);
@@ -865,7 +865,7 @@ mod tests {
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
             tasks: vec![],
             people: vec![Person::new("person-1".into(), "Ada".into(), String::new())],
-            projects: vec![],
+            workspaces: vec![],
             tags: vec![],
         });
         let mut workspace = PeopleWorkspace::new(context);
@@ -898,7 +898,7 @@ mod tests {
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
             tasks: vec![],
             people: vec![Person::new("person-1".into(), "Ada".into(), String::new())],
-            projects: vec![],
+            workspaces: vec![],
             tags: vec![],
         });
         let mut workspace = PeopleWorkspace::new(context);
@@ -928,7 +928,7 @@ mod tests {
                 Person::new("person-1".into(), "Ada".into(), String::new()),
                 Person::new("person-2".into(), "Grace".into(), String::new()),
             ],
-            projects: vec![],
+            workspaces: vec![],
             tags: vec![],
         });
         let mut workspace = PeopleWorkspace::new(context);
@@ -955,7 +955,7 @@ mod tests {
         let (_runtime, context, store) = test_context(WorkspaceSnapshot {
             tasks: vec![],
             people: vec![Person::new("person-1".into(), "Ada".into(), String::new())],
-            projects: vec![],
+            workspaces: vec![],
             tags: vec![],
         });
         let mut workspace = PeopleWorkspace::new(context);

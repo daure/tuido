@@ -2,7 +2,7 @@ use super::*;
 
 pub(super) enum AppDialog {
     People(Box<people::PeopleDialog>),
-    Projects(Box<projects::ProjectsDialog>),
+    Workspaces(Box<workspaces::WorkspacesDialog>),
     Tags(Box<tags::TagsDialog>),
     CreateManagement(DialogHost<CreateManagementDialog, AppMsg>),
     DeleteManagement(ConfirmationDialog<AppMsg>),
@@ -22,7 +22,9 @@ pub(super) fn empty_app_dialog() -> AppDialog {
 pub(super) fn management_dialog(context: AppContext, kind: ManagementDialogKind) -> AppDialog {
     match kind {
         ManagementDialogKind::People => AppDialog::People(Box::new(people::dialog(context))),
-        ManagementDialogKind::Projects => AppDialog::Projects(Box::new(projects::dialog(context))),
+        ManagementDialogKind::Workspaces => {
+            AppDialog::Workspaces(Box::new(workspaces::dialog(context)))
+        }
         ManagementDialogKind::Tags => AppDialog::Tags(Box::new(tags::dialog(context))),
     }
 }
@@ -31,7 +33,7 @@ impl TuiNode<AppMsg> for AppDialog {
     fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
         match self {
             Self::People(dialog) => dialog.measure(proposal),
-            Self::Projects(dialog) => dialog.measure(proposal),
+            Self::Workspaces(dialog) => dialog.measure(proposal),
             Self::Tags(dialog) => dialog.measure(proposal),
             Self::CreateManagement(dialog) => measure_dialog_host(dialog, proposal),
             Self::DeleteManagement(dialog) => dialog.measure(proposal),
@@ -48,7 +50,7 @@ impl TuiNode<AppMsg> for AppDialog {
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
         match self {
             Self::People(dialog) => dialog.layout(area, ctx),
-            Self::Projects(dialog) => dialog.layout(area, ctx),
+            Self::Workspaces(dialog) => dialog.layout(area, ctx),
             Self::Tags(dialog) => dialog.layout(area, ctx),
             Self::CreateManagement(dialog) => dialog.layout(area, ctx),
             Self::DeleteManagement(dialog) => dialog.layout(area, ctx),
@@ -65,7 +67,7 @@ impl TuiNode<AppMsg> for AppDialog {
     fn render<'a>(&'a self, frame: &mut Frame, area: Rect, ctx: &mut RenderCtx<'a>) {
         match self {
             Self::People(dialog) => dialog.render(frame, area, ctx),
-            Self::Projects(dialog) => dialog.render(frame, area, ctx),
+            Self::Workspaces(dialog) => dialog.render(frame, area, ctx),
             Self::Tags(dialog) => dialog.render(frame, area, ctx),
             Self::CreateManagement(dialog) => dialog.render(frame, area, ctx),
             Self::DeleteManagement(dialog) => dialog.render(frame, area),
@@ -82,7 +84,7 @@ impl TuiNode<AppMsg> for AppDialog {
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<AppMsg>) -> EventOutcome {
         match self {
             Self::People(dialog) => dialog.event(event, ctx),
-            Self::Projects(dialog) => dialog.event(event, ctx),
+            Self::Workspaces(dialog) => dialog.event(event, ctx),
             Self::Tags(dialog) => dialog.event(event, ctx),
             Self::CreateManagement(dialog) => dialog.event(event, ctx),
             Self::DeleteManagement(dialog) => dialog.event(event, ctx),
@@ -104,7 +106,7 @@ impl TuiNode<AppMsg> for AppDialog {
     ) -> EventOutcome {
         match self {
             Self::People(dialog) => dialog.dispatch_event(route, event, ctx),
-            Self::Projects(dialog) => dialog.dispatch_event(route, event, ctx),
+            Self::Workspaces(dialog) => dialog.dispatch_event(route, event, ctx),
             Self::Tags(dialog) => dialog.dispatch_event(route, event, ctx),
             Self::CreateManagement(dialog) => dialog.dispatch_event(route, event, ctx),
             Self::DeleteManagement(dialog) => dialog.dispatch_event(route, event, ctx),
@@ -121,7 +123,7 @@ impl TuiNode<AppMsg> for AppDialog {
     fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<AppMsg>) {
         match self {
             Self::People(dialog) => dialog.dispatch_focus(target, focused, ctx),
-            Self::Projects(dialog) => dialog.dispatch_focus(target, focused, ctx),
+            Self::Workspaces(dialog) => dialog.dispatch_focus(target, focused, ctx),
             Self::Tags(dialog) => dialog.dispatch_focus(target, focused, ctx),
             Self::CreateManagement(dialog) => dialog.dispatch_focus(target, focused, ctx),
             Self::DeleteManagement(dialog) => dialog.dispatch_focus(target, focused, ctx),
@@ -138,7 +140,7 @@ impl TuiNode<AppMsg> for AppDialog {
     fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
         match self {
             Self::People(dialog) => dialog.tick(dt, settings),
-            Self::Projects(dialog) => dialog.tick(dt, settings),
+            Self::Workspaces(dialog) => dialog.tick(dt, settings),
             Self::Tags(dialog) => dialog.tick(dt, settings),
             Self::CreateManagement(dialog) => dialog.tick(dt, settings),
             Self::DeleteManagement(dialog) => dialog.tick(dt, settings),
@@ -155,7 +157,7 @@ impl TuiNode<AppMsg> for AppDialog {
     fn init(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
         match self {
             Self::People(dialog) => dialog.init(ctx),
-            Self::Projects(dialog) => dialog.init(ctx),
+            Self::Workspaces(dialog) => dialog.init(ctx),
             Self::Tags(dialog) => dialog.init(ctx),
             Self::CreateManagement(dialog) => dialog.init(ctx),
             Self::DeleteManagement(dialog) => dialog.init(ctx),
@@ -172,7 +174,7 @@ impl TuiNode<AppMsg> for AppDialog {
     fn mount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
         match self {
             Self::People(dialog) => dialog.mount(ctx),
-            Self::Projects(dialog) => dialog.mount(ctx),
+            Self::Workspaces(dialog) => dialog.mount(ctx),
             Self::Tags(dialog) => dialog.mount(ctx),
             Self::CreateManagement(dialog) => dialog.mount(ctx),
             Self::DeleteManagement(dialog) => dialog.mount(ctx),
@@ -189,7 +191,7 @@ impl TuiNode<AppMsg> for AppDialog {
     fn unmount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
         match self {
             Self::People(dialog) => dialog.unmount(ctx),
-            Self::Projects(dialog) => dialog.unmount(ctx),
+            Self::Workspaces(dialog) => dialog.unmount(ctx),
             Self::Tags(dialog) => dialog.unmount(ctx),
             Self::CreateManagement(dialog) => dialog.unmount(ctx),
             Self::DeleteManagement(dialog) => dialog.unmount(ctx),
@@ -206,7 +208,7 @@ impl TuiNode<AppMsg> for AppDialog {
     fn destroy(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
         match self {
             Self::People(dialog) => dialog.destroy(ctx),
-            Self::Projects(dialog) => dialog.destroy(ctx),
+            Self::Workspaces(dialog) => dialog.destroy(ctx),
             Self::Tags(dialog) => dialog.destroy(ctx),
             Self::CreateManagement(dialog) => dialog.destroy(ctx),
             Self::DeleteManagement(dialog) => dialog.destroy(ctx),

@@ -32,7 +32,7 @@ What it costs: Requires review rituals and resurfacing rules.
 
 #### Context Graph
 
-What it is: Maintain people, teams, systems, projects/labels, tickets, docs, and old items.
+What it is: Maintain people, teams, systems, workspaces/labels, tickets, docs, and old items.
 
 What it buys: AI can infer better; filtering/search become powerful.
 
@@ -121,7 +121,7 @@ context:
   people
   teams
   systems
-  project_labels
+  workspace_labels
   tickets
   docs
   links
@@ -156,7 +156,7 @@ Use a provider-neutral interface. Do not use opencode/pi as the core library unl
 
 ```text
 ClarifyProvider:
-  input: raw inbox text + known people/systems/projects/tickets
+  input: raw inbox text + known people/systems/workspaces/tickets
   output: suggested items with confidence, explanation, type, size, and optional time hints
 ```
 
@@ -186,7 +186,7 @@ The user owns final selection. AI does not assign priority labels, does not auto
 
 - Should `next` be visible as a list, or should only Clarify Queue feed Doing?
 - What exact sections should exist outside the board: Snoozed, Someday, Reference, People, Review?
-- Should `project_labels`, `teams`, `people`, `systems`, `tickets`, and `docs` all use the same reference model internally?
+- Should `workspace_labels`, `teams`, `people`, `systems`, `tickets`, and `docs` all use the same reference model internally?
 - What confidence threshold should AI suggestions need before being preselected versus shown as alternatives?
 - What local data should AI be allowed to read by default, and what should require explicit confirmation?
 - Should clarified items support recurrence, or should recurrence wait until after snooze/defer is stable?
@@ -197,7 +197,7 @@ The user owns final selection. AI does not assign priority labels, does not auto
 
 - Only clarified items can be snoozed. Raw inbox items must be clarified first.
 - When a snoozed item returns, it appears at the top of the clarified items list where it can be pulled into active work again.
-- `project_labels` is a first-class field, like `teams`, `people`, and `systems`; it is not a loose tag blob.
+- `workspace_labels` is a first-class field, like `teams`, `people`, and `systems`; it is not a loose tag blob.
 - AI providers should be integrated through an adapter layer. Initial target providers include AWS Bedrock, OpenAI OAuth, and Antigravity/Gemini OAuth.
 - Actionable items use size (`small`, `medium`, `big`) instead of priority labels.
 - Daily planning follows a lightweight 1-3-5 model, with one frog task highlighted as the first meaningful task to tackle.

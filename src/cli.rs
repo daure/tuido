@@ -3,7 +3,7 @@ use std::{error::Error, fs, net::SocketAddr, path::PathBuf, process::Command, th
 use clap::{Parser, Subcommand};
 
 const ABOUT: &str =
-    "Keyboard-first task manager with MCP access to tasks, people, projects, and tags.
+    "Keyboard-first task manager with MCP access to tasks, people, workspaces, and tags.
 
 Run `tuido` for TUI. MCP clients normally spawn stdio server with config:
   {\"command\": \"tuido\", \"args\": [\"mcp\"]}
@@ -26,7 +26,7 @@ pub struct Cli {
 enum Commands {
     #[command(
         about = "Run protocol-only MCP server over stdin/stdout",
-        long_about = "Run tasks, people, projects, and tags MCP server over stdio. stdout is reserved for JSON-RPC protocol output; diagnostics belong on stderr."
+        long_about = "Run tasks, people, workspaces, and tags MCP server over stdio. stdout is reserved for JSON-RPC protocol output; diagnostics belong on stderr."
     )]
     Mcp,
     #[command(

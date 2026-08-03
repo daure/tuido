@@ -3,13 +3,13 @@ use std::collections::HashMap;
 use time::PrimitiveDateTime;
 use tuicore::{ChipColorRole, DispatchOutcome};
 
-pub(crate) const DEFAULT_PROJECT_SETTING: &str = "tasks.default_project";
+pub(crate) const DEFAULT_WORKSPACE_SETTING: &str = "tasks.default_workspace";
 
 #[derive(Debug, Clone)]
 pub struct WorkspaceSnapshot {
     pub tasks: Vec<Task>,
     pub people: Vec<Person>,
-    pub projects: Vec<Project>,
+    pub workspaces: Vec<Workspace>,
     pub tags: Vec<Tag>,
 }
 
@@ -17,11 +17,11 @@ pub struct WorkspaceSnapshot {
 pub struct AppState {
     pub tasks: Vec<Task>,
     pub people: Vec<Person>,
-    pub projects: Vec<Project>,
+    pub workspaces: Vec<Workspace>,
     pub tags: Vec<Tag>,
     pub selected_task_id: Option<String>,
     pub selected_person_id: Option<String>,
-    pub selected_project_id: Option<String>,
+    pub selected_workspace_id: Option<String>,
     pub selected_tag_id: Option<String>,
     pub save_errors: HashMap<SaveTarget, String>,
     pub app_setting_errors: HashMap<String, String>,
@@ -49,11 +49,14 @@ impl AppState {
         Self {
             selected_task_id: snapshot.tasks.first().map(|task| task.id.clone()),
             selected_person_id: snapshot.people.first().map(|person| person.id.clone()),
-            selected_project_id: snapshot.projects.first().map(|project| project.id.clone()),
+            selected_workspace_id: snapshot
+                .workspaces
+                .first()
+                .map(|workspace| workspace.id.clone()),
             selected_tag_id: snapshot.tags.first().map(|tag| tag.id.clone()),
             tasks: snapshot.tasks,
             people: snapshot.people,
-            projects: snapshot.projects,
+            workspaces: snapshot.workspaces,
             tags: snapshot.tags,
             last_custom_snooze,
             save_errors: HashMap::new(),
@@ -85,9 +88,9 @@ impl AppState {
         })
     }
 
-    pub fn project_save_error(&self, project_id: &str) -> Option<&str> {
-        self.save_error_for(project_id, |field| {
-            matches!(field, SaveEntityField::Project(_))
+    pub fn workspace_save_error(&self, workspace_id: &str) -> Option<&str> {
+        self.save_error_for(workspace_id, |field| {
+            matches!(field, SaveEntityField::Workspace(_))
         })
     }
 
@@ -109,33 +112,33 @@ impl AppState {
                 .filter(|task| task.people_ids.iter().any(|id| id == person_id))
                 .map(|task| task.id.clone())
                 .collect(),
-            lead_project_ids: self
-                .projects
+            lead_workspace_ids: self
+                .workspaces
                 .iter()
-                .filter(|project| project.lead_person_id.as_deref() == Some(person_id))
-                .map(|project| project.id.clone())
+                .filter(|workspace| workspace.lead_person_id.as_deref() == Some(person_id))
+                .map(|workspace| workspace.id.clone())
                 .collect(),
         })
     }
 
-    pub fn project_deletion(&self, project_id: &str) -> Option<ProjectDeletion> {
-        let project = self
-            .projects
+    pub fn workspace_deletion(&self, workspace_id: &str) -> Option<WorkspaceDeletion> {
+        let workspace = self
+            .workspaces
             .iter()
-            .find(|project| project.id == project_id)?
+            .find(|workspace| workspace.id == workspace_id)?
             .clone();
-        Some(ProjectDeletion {
-            project,
+        Some(WorkspaceDeletion {
+            workspace,
             task_ids: self
                 .tasks
                 .iter()
-                .filter(|task| task.project_id.as_deref() == Some(project_id))
+                .filter(|task| task.workspace_id.as_deref() == Some(workspace_id))
                 .map(|task| task.id.clone())
                 .collect(),
             was_default: self
                 .app_setting_values
-                .get(DEFAULT_PROJECT_SETTING)
-                .is_some_and(|value| value == project_id),
+                .get(DEFAULT_WORKSPACE_SETTING)
+                .is_some_and(|value| value == workspace_id),
         })
     }
 
@@ -181,13 +184,13 @@ pub enum AppEvent {
         person_id: String,
         patch: PersonPatch,
     },
-    ProjectCreated(Project),
-    ProjectDeleted(String),
-    ProjectRestored(ProjectDeletion),
-    SelectProject(String),
-    PatchProject {
-        project_id: String,
-        patch: ProjectPatch,
+    WorkspaceCreated(Workspace),
+    WorkspaceDeleted(String),
+    WorkspaceRestored(WorkspaceDeletion),
+    SelectWorkspace(String),
+    PatchWorkspace {
+        workspace_id: String,
+        patch: WorkspacePatch,
     },
     TagCreated(Tag),
     TagDeleted(String),
@@ -231,7 +234,7 @@ pub enum AppEvent {
 pub enum SaveEntityField {
     Task(TaskField),
     Person(PersonField),
-    Project(ProjectField),
+    Workspace(WorkspaceField),
     Tag(TagField),
 }
 
@@ -256,10 +259,10 @@ impl SaveTarget {
         }
     }
 
-    pub fn project(entity_id: String, field: ProjectField) -> Self {
+    pub fn workspace(entity_id: String, field: WorkspaceField) -> Self {
         Self {
             entity_id,
-            field: SaveEntityField::Project(field),
+            field: SaveEntityField::Workspace(field),
         }
     }
 
@@ -375,9 +378,9 @@ pub fn reduce_app_state(state: &mut AppState, event: AppEvent) -> DispatchOutcom
             for task in &mut state.tasks {
                 task.people_ids.retain(|id| id != &person_id);
             }
-            for project in &mut state.projects {
-                if project.lead_person_id.as_deref() == Some(&person_id) {
-                    project.lead_person_id = None;
+            for workspace in &mut state.workspaces {
+                if workspace.lead_person_id.as_deref() == Some(&person_id) {
+                    workspace.lead_person_id = None;
                 }
             }
             state.version += 1;
@@ -392,9 +395,9 @@ pub fn reduce_app_state(state: &mut AppState, event: AppEvent) -> DispatchOutcom
                     task.people_ids.push(person_id.clone());
                 }
             }
-            for project in &mut state.projects {
-                if deletion.lead_project_ids.contains(&project.id) {
-                    project.lead_person_id = Some(person_id.clone());
+            for workspace in &mut state.workspaces {
+                if deletion.lead_workspace_ids.contains(&workspace.id) {
+                    workspace.lead_person_id = Some(person_id.clone());
                 }
             }
             state.version += 1;
@@ -422,59 +425,59 @@ pub fn reduce_app_state(state: &mut AppState, event: AppEvent) -> DispatchOutcom
             state.version += 1;
             DispatchOutcome::layout()
         }
-        AppEvent::ProjectCreated(project) => {
-            state.selected_project_id = Some(project.id.clone());
-            state.projects.push(project);
+        AppEvent::WorkspaceCreated(workspace) => {
+            state.selected_workspace_id = Some(workspace.id.clone());
+            state.workspaces.push(workspace);
             state.version += 1;
             DispatchOutcome::layout()
         }
-        AppEvent::ProjectDeleted(project_id) => {
+        AppEvent::WorkspaceDeleted(workspace_id) => {
             let Some(index) = state
-                .projects
+                .workspaces
                 .iter()
-                .position(|project| project.id == project_id)
+                .position(|workspace| workspace.id == workspace_id)
             else {
                 return DispatchOutcome::unchanged();
             };
-            state.projects.remove(index);
+            state.workspaces.remove(index);
             state
                 .save_errors
-                .retain(|target, _| target.entity_id != project_id);
-            if state.selected_project_id.as_deref() == Some(&project_id) {
-                state.selected_project_id = state
-                    .projects
+                .retain(|target, _| target.entity_id != workspace_id);
+            if state.selected_workspace_id.as_deref() == Some(&workspace_id) {
+                state.selected_workspace_id = state
+                    .workspaces
                     .get(index)
-                    .or_else(|| state.projects.last())
-                    .map(|project| project.id.clone());
+                    .or_else(|| state.workspaces.last())
+                    .map(|workspace| workspace.id.clone());
             }
             for task in &mut state.tasks {
-                if task.project_id.as_deref() == Some(&project_id) {
-                    task.project_id = None;
+                if task.workspace_id.as_deref() == Some(&workspace_id) {
+                    task.workspace_id = None;
                 }
             }
             if state
                 .app_setting_values
-                .get(DEFAULT_PROJECT_SETTING)
-                .is_some_and(|value| value == &project_id)
+                .get(DEFAULT_WORKSPACE_SETTING)
+                .is_some_and(|value| value == &workspace_id)
             {
                 for values in [
                     &mut state.app_setting_values,
                     &mut state.app_setting_confirmed_values,
                     &mut state.app_setting_desired_values,
                 ] {
-                    values.insert(DEFAULT_PROJECT_SETTING.to_string(), String::new());
+                    values.insert(DEFAULT_WORKSPACE_SETTING.to_string(), String::new());
                 }
             }
             state.version += 1;
             DispatchOutcome::layout()
         }
-        AppEvent::ProjectRestored(deletion) => {
-            let project_id = deletion.project.id.clone();
-            state.selected_project_id = Some(project_id.clone());
-            state.projects.push(deletion.project);
+        AppEvent::WorkspaceRestored(deletion) => {
+            let workspace_id = deletion.workspace.id.clone();
+            state.selected_workspace_id = Some(workspace_id.clone());
+            state.workspaces.push(deletion.workspace);
             for task in &mut state.tasks {
                 if deletion.task_ids.contains(&task.id) {
-                    task.project_id = Some(project_id.clone());
+                    task.workspace_id = Some(workspace_id.clone());
                 }
             }
             if deletion.was_default {
@@ -483,29 +486,32 @@ pub fn reduce_app_state(state: &mut AppState, event: AppEvent) -> DispatchOutcom
                     &mut state.app_setting_confirmed_values,
                     &mut state.app_setting_desired_values,
                 ] {
-                    values.insert(DEFAULT_PROJECT_SETTING.to_string(), project_id.clone());
+                    values.insert(DEFAULT_WORKSPACE_SETTING.to_string(), workspace_id.clone());
                 }
             }
             state.version += 1;
             DispatchOutcome::layout()
         }
-        AppEvent::SelectProject(project_id) => {
-            if state.selected_project_id.as_deref() == Some(&project_id) {
+        AppEvent::SelectWorkspace(workspace_id) => {
+            if state.selected_workspace_id.as_deref() == Some(&workspace_id) {
                 DispatchOutcome::unchanged()
             } else {
-                state.selected_project_id = Some(project_id);
+                state.selected_workspace_id = Some(workspace_id);
                 DispatchOutcome::layout()
             }
         }
-        AppEvent::PatchProject { project_id, patch } => {
+        AppEvent::PatchWorkspace {
+            workspace_id,
+            patch,
+        } => {
             let Some(index) = state
-                .projects
+                .workspaces
                 .iter()
-                .position(|project| project.id == project_id)
+                .position(|workspace| workspace.id == workspace_id)
             else {
                 return DispatchOutcome::unchanged();
             };
-            if !apply_project_patch(&mut state.projects[index], &patch) {
+            if !apply_workspace_patch(&mut state.workspaces[index], &patch) {
                 return DispatchOutcome::unchanged();
             }
             state.version += 1;
@@ -692,17 +698,17 @@ pub fn reduce_app_state(state: &mut AppState, event: AppEvent) -> DispatchOutcom
         } => {
             let selected_task = state.selected_task_id.clone();
             let selected_person = state.selected_person_id.clone();
-            let selected_project = state.selected_project_id.clone();
+            let selected_workspace = state.selected_workspace_id.clone();
             let selected_tag = state.selected_tag_id.clone();
             state.tasks = snapshot.tasks;
             state.people = snapshot.people;
-            state.projects = snapshot.projects;
+            state.workspaces = snapshot.workspaces;
             state.tags = snapshot.tags;
             state.selected_task_id = retained_selection(selected_task, &state.tasks, |v| &v.id);
             state.selected_person_id =
                 retained_selection(selected_person, &state.people, |v| &v.id);
-            state.selected_project_id =
-                retained_selection(selected_project, &state.projects, |v| &v.id);
+            state.selected_workspace_id =
+                retained_selection(selected_workspace, &state.workspaces, |v| &v.id);
             state.selected_tag_id = retained_selection(selected_tag, &state.tags, |v| &v.id);
             state.workspace_revision = revision;
             state.entity_revisions = entity_revisions;
@@ -754,7 +760,7 @@ pub struct Task {
     pub priority: TaskPriority,
     pub snoozed_until: Option<PrimitiveDateTime>,
     pub people_ids: Vec<String>,
-    pub project_id: Option<String>,
+    pub workspace_id: Option<String>,
     pub tag_ids: Vec<String>,
     pub checklist: Vec<ChecklistItem>,
     pub links: Vec<String>,
@@ -775,7 +781,7 @@ impl Task {
             priority: TaskPriority::Medium,
             snoozed_until: None,
             people_ids: Vec::new(),
-            project_id: None,
+            workspace_id: None,
             tag_ids: Vec::new(),
             checklist: Vec::new(),
             links: Vec::new(),
@@ -843,8 +849,8 @@ impl TaskRelationKind {
     }
 }
 
-pub(crate) fn task_identifier(number: i64, project_key: Option<&str>) -> String {
-    project_key
+pub(crate) fn task_identifier(number: i64, workspace_key: Option<&str>) -> String {
+    workspace_key
         .filter(|key| !key.is_empty())
         .map_or_else(|| number.to_string(), |key| format!("{key}-{number}"))
 }
@@ -861,12 +867,12 @@ pub(crate) fn task_number(identifier: &str) -> Option<i64> {
         .filter(|number| *number > 0)
 }
 
-pub(crate) fn task_display_id(task: &Task, project: Option<&Project>) -> String {
+pub(crate) fn task_display_id(task: &Task, workspace: Option<&Workspace>) -> String {
     let number = task_number(&task.id)
         .map(|number| number.to_string())
         .unwrap_or_else(|| task.id.clone());
-    project.map_or(number.clone(), |project| {
-        format!("{}-{number}", project.key)
+    workspace.map_or(number.clone(), |workspace| {
+        format!("{}-{number}", workspace.key)
     })
 }
 
@@ -915,11 +921,11 @@ impl Person {
 pub struct PersonDeletion {
     pub person: Person,
     pub task_ids: Vec<String>,
-    pub lead_project_ids: Vec<String>,
+    pub lead_workspace_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Project {
+pub struct Workspace {
     pub id: String,
     pub key: String,
     pub name: String,
@@ -927,7 +933,7 @@ pub struct Project {
     pub lead_person_id: Option<String>,
 }
 
-impl Project {
+impl Workspace {
     pub fn new(id: String, key: String, name: String, description: String) -> Self {
         Self {
             id,
@@ -949,8 +955,8 @@ impl Project {
 }
 
 #[derive(Debug, Clone)]
-pub struct ProjectDeletion {
-    pub project: Project,
+pub struct WorkspaceDeletion {
+    pub workspace: Workspace,
     pub task_ids: Vec<String>,
     pub was_default: bool,
 }
@@ -984,7 +990,7 @@ pub enum TaskField {
     Size,
     Priority,
     People,
-    Projects,
+    Workspaces,
     Tags,
     Checklist,
     Links,
@@ -1001,7 +1007,7 @@ pub enum PersonField {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ProjectField {
+pub enum WorkspaceField {
     Key,
     Name,
     Description,
@@ -1021,7 +1027,7 @@ pub enum TaskPatch {
     Size(TaskSize),
     Priority(TaskPriority),
     People(Vec<String>),
-    Project(Option<String>),
+    Workspace(Option<String>),
     Tags(Vec<Tag>),
     Checklist(Vec<ChecklistItem>),
     Links(Vec<String>),
@@ -1042,7 +1048,7 @@ impl TaskPatch {
             Self::Size(_) => TaskField::Size,
             Self::Priority(_) => TaskField::Priority,
             Self::People(_) => TaskField::People,
-            Self::Project(_) => TaskField::Projects,
+            Self::Workspace(_) => TaskField::Workspaces,
             Self::Tags(_) => TaskField::Tags,
             Self::Checklist(_) => TaskField::Checklist,
             Self::Links(_) => TaskField::Links,
@@ -1072,7 +1078,7 @@ impl PersonPatch {
 }
 
 #[derive(Debug, Clone)]
-pub enum ProjectPatch {
+pub enum WorkspacePatch {
     Key(String),
     Name(String),
     Description(String),
@@ -1092,13 +1098,13 @@ impl TagPatch {
     }
 }
 
-impl ProjectPatch {
-    pub fn field(&self) -> ProjectField {
+impl WorkspacePatch {
+    pub fn field(&self) -> WorkspaceField {
         match self {
-            Self::Key(_) => ProjectField::Key,
-            Self::Name(_) => ProjectField::Name,
-            Self::Description(_) => ProjectField::Description,
-            Self::LeadPerson(_) => ProjectField::LeadPerson,
+            Self::Key(_) => WorkspaceField::Key,
+            Self::Name(_) => WorkspaceField::Name,
+            Self::Description(_) => WorkspaceField::Description,
+            Self::LeadPerson(_) => WorkspaceField::LeadPerson,
         }
     }
 }
@@ -1263,8 +1269,8 @@ fn apply_task_patch(task: &mut Task, available_tags: &mut Vec<Tag>, patch: &Task
             task.people_ids = ids.clone();
             true
         }
-        TaskPatch::Project(id) if task.project_id != *id => {
-            task.project_id = id.clone();
+        TaskPatch::Workspace(id) if task.workspace_id != *id => {
+            task.workspace_id = id.clone();
             true
         }
         TaskPatch::Tags(tags) => {
@@ -1393,26 +1399,26 @@ fn apply_person_patch(person: &mut Person, patch: &PersonPatch) -> bool {
     }
 }
 
-fn apply_project_patch(project: &mut Project, patch: &ProjectPatch) -> bool {
+fn apply_workspace_patch(workspace: &mut Workspace, patch: &WorkspacePatch) -> bool {
     match patch {
-        ProjectPatch::Key(key)
-            if Project::is_valid_key(key) && project.key != Project::normalize_key(key) =>
+        WorkspacePatch::Key(key)
+            if Workspace::is_valid_key(key) && workspace.key != Workspace::normalize_key(key) =>
         {
-            project.key = Project::normalize_key(key);
+            workspace.key = Workspace::normalize_key(key);
             true
         }
-        ProjectPatch::Name(name) if project.name != name.trim() && !name.trim().is_empty() => {
-            project.name = name.trim().to_string();
+        WorkspacePatch::Name(name) if workspace.name != name.trim() && !name.trim().is_empty() => {
+            workspace.name = name.trim().to_string();
             true
         }
-        ProjectPatch::Description(description) if project.description != *description => {
-            project.description = description.clone();
+        WorkspacePatch::Description(description) if workspace.description != *description => {
+            workspace.description = description.clone();
             true
         }
-        ProjectPatch::LeadPerson(lead_person_id)
-            if project.lead_person_id.as_ref() != lead_person_id.as_ref() =>
+        WorkspacePatch::LeadPerson(lead_person_id)
+            if workspace.lead_person_id.as_ref() != lead_person_id.as_ref() =>
         {
-            project.lead_person_id = lead_person_id.clone();
+            workspace.lead_person_id = lead_person_id.clone();
             true
         }
         _ => false,
@@ -1437,7 +1443,7 @@ mod tests {
         let mut state = AppState::from_snapshot(WorkspaceSnapshot {
             tasks: Vec::new(),
             people: Vec::new(),
-            projects: Vec::new(),
+            workspaces: Vec::new(),
             tags: Vec::new(),
         });
         state
@@ -1511,7 +1517,7 @@ mod tests {
         let mut state = AppState::from_snapshot(WorkspaceSnapshot {
             tasks: Vec::new(),
             people: Vec::new(),
-            projects: Vec::new(),
+            workspaces: Vec::new(),
             tags: Vec::new(),
         });
 
@@ -1552,7 +1558,7 @@ mod tests {
         let mut state = AppState::from_snapshot(WorkspaceSnapshot {
             tasks: Vec::new(),
             people: Vec::new(),
-            projects: Vec::new(),
+            workspaces: Vec::new(),
             tags: Vec::new(),
         });
         let target = SaveTarget::task("T-1".to_string(), TaskField::Description);
@@ -1615,7 +1621,7 @@ mod tests {
         let mut state = AppState::from_snapshot(WorkspaceSnapshot {
             tasks: vec![first, second],
             people: Vec::new(),
-            projects: Vec::new(),
+            workspaces: Vec::new(),
             tags: Vec::new(),
         });
 
@@ -1651,7 +1657,7 @@ mod tests {
         let mut state = AppState::from_snapshot(WorkspaceSnapshot {
             tasks: vec![first, second],
             people: Vec::new(),
-            projects: Vec::new(),
+            workspaces: Vec::new(),
             tags: Vec::new(),
         });
 
@@ -1667,7 +1673,7 @@ mod tests {
         let mut state = AppState::from_snapshot(WorkspaceSnapshot {
             tasks: vec![task],
             people: Vec::new(),
-            projects: Vec::new(),
+            workspaces: Vec::new(),
             tags: Vec::new(),
         });
         let until = time::macros::datetime!(2026-07-24 8:00);
@@ -1699,7 +1705,7 @@ mod tests {
         let mut state = AppState::from_snapshot(WorkspaceSnapshot {
             tasks: vec![task],
             people: Vec::new(),
-            projects: Vec::new(),
+            workspaces: Vec::new(),
             tags: Vec::new(),
         });
         state.last_custom_snooze = Some(until);
@@ -1735,7 +1741,7 @@ mod tests {
         let mut state = AppState::from_snapshot(WorkspaceSnapshot {
             tasks: vec![first, second],
             people: Vec::new(),
-            projects: Vec::new(),
+            workspaces: Vec::new(),
             tags: Vec::new(),
         });
 
@@ -1776,8 +1782,8 @@ mod tests {
         let mut state = AppState::from_snapshot(WorkspaceSnapshot {
             tasks: Vec::new(),
             people: vec![Person::new("person-1".into(), "Ada".into(), String::new())],
-            projects: vec![Project::new(
-                "project-1".into(),
+            workspaces: vec![Workspace::new(
+                "workspace-1".into(),
                 "CORE".into(),
                 "Core".into(),
                 String::new(),
@@ -1795,8 +1801,8 @@ mod tests {
         );
         reduce_app_state(
             &mut state,
-            AppEvent::ProjectCreated(Project::new(
-                "project-2".into(),
+            AppEvent::WorkspaceCreated(Workspace::new(
+                "workspace-2".into(),
                 "APP".into(),
                 "App".into(),
                 String::new(),
@@ -1808,59 +1814,59 @@ mod tests {
         );
 
         assert_eq!(state.selected_person_id.as_deref(), Some("person-2"));
-        assert_eq!(state.selected_project_id.as_deref(), Some("project-2"));
+        assert_eq!(state.selected_workspace_id.as_deref(), Some("workspace-2"));
         assert_eq!(state.selected_tag_id.as_deref(), Some("tag-2"));
 
         reduce_app_state(&mut state, AppEvent::PersonDeleted("person-2".into()));
-        reduce_app_state(&mut state, AppEvent::ProjectDeleted("project-2".into()));
+        reduce_app_state(&mut state, AppEvent::WorkspaceDeleted("workspace-2".into()));
         reduce_app_state(&mut state, AppEvent::TagDeleted("tag-2".into()));
 
         assert_eq!(state.selected_person_id.as_deref(), Some("person-1"));
-        assert_eq!(state.selected_project_id.as_deref(), Some("project-1"));
+        assert_eq!(state.selected_workspace_id.as_deref(), Some("workspace-1"));
         assert_eq!(state.selected_tag_id.as_deref(), Some("tag-1"));
     }
 
     #[test]
-    fn project_keys_are_uppercase_after_creation() {
-        let project = Project::new(
-            "project-1".into(),
+    fn workspace_keys_are_uppercase_after_creation() {
+        let workspace = Workspace::new(
+            "workspace-1".into(),
             "core".into(),
             "Core".into(),
             String::new(),
         );
-        assert_eq!(project.key, "CORE");
-        assert!(Project::is_valid_key("AB"));
-        assert!(Project::is_valid_key("ABCDE"));
+        assert_eq!(workspace.key, "CORE");
+        assert!(Workspace::is_valid_key("AB"));
+        assert!(Workspace::is_valid_key("ABCDE"));
         for invalid in ["A", "ABCDEF", "A B", " AB", "AB "] {
-            assert!(!Project::is_valid_key(invalid), "accepted {invalid:?}");
+            assert!(!Workspace::is_valid_key(invalid), "accepted {invalid:?}");
         }
     }
 
     #[test]
     fn person_delete_clears_and_failed_delete_restores_references() {
-        let mut project = Project::new(
-            "project-1".into(),
+        let mut workspace = Workspace::new(
+            "workspace-1".into(),
             "CORE".into(),
             "Core".into(),
             String::new(),
         );
-        project.lead_person_id = Some("person-1".into());
+        workspace.lead_person_id = Some("person-1".into());
         let mut state = AppState::from_snapshot(WorkspaceSnapshot {
             tasks: Vec::new(),
             people: vec![Person::new("person-1".into(), "Ada".into(), String::new())],
-            projects: vec![project],
+            workspaces: vec![workspace],
             tags: Vec::new(),
         });
 
         let deletion = state.person_deletion("person-1").unwrap();
         reduce_app_state(&mut state, AppEvent::PersonDeleted("person-1".into()));
 
-        assert_eq!(state.projects[0].lead_person_id, None);
+        assert_eq!(state.workspaces[0].lead_person_id, None);
 
         reduce_app_state(&mut state, AppEvent::PersonRestored(deletion));
 
         assert_eq!(
-            state.projects[0].lead_person_id.as_deref(),
+            state.workspaces[0].lead_person_id.as_deref(),
             Some("person-1")
         );
     }
@@ -1874,7 +1880,7 @@ fn completing_snoozed_task_clears_snooze_timestamp() {
     let mut state = AppState::from_snapshot(WorkspaceSnapshot {
         tasks: vec![task],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
 

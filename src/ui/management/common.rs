@@ -115,8 +115,8 @@ pub(super) fn management_empty_state(
     let message = match (kind, has_entities) {
         (ManagementDialogKind::People, false) => "No people yet",
         (ManagementDialogKind::People, true) => "No people match your search",
-        (ManagementDialogKind::Projects, false) => "No projects yet",
-        (ManagementDialogKind::Projects, true) => "No projects match your search",
+        (ManagementDialogKind::Workspaces, false) => "No workspaces yet",
+        (ManagementDialogKind::Workspaces, true) => "No workspaces match your search",
         (ManagementDialogKind::Tags, false) => "No tags yet",
         (ManagementDialogKind::Tags, true) => "No tags match your search",
     };

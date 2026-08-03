@@ -11,8 +11,9 @@ use uuid::Uuid;
 
 use crate::{
     domain::{
-        ChecklistItem, Person, PersonPatch, Project, ProjectPatch, Tag, TagPatch, Task, TaskPatch,
-        TaskRank, TaskRelation, TaskRelationKind, WorkspaceSnapshot, task_identifier, task_number,
+        ChecklistItem, Person, PersonPatch, Tag, TagPatch, Task, TaskPatch, TaskRank, TaskRelation,
+        TaskRelationKind, Workspace, WorkspacePatch, WorkspaceSnapshot, task_identifier,
+        task_number,
     },
     storage::{self, SqlDialect, Storage},
 };
@@ -21,9 +22,9 @@ mod settings;
 mod validation;
 
 use validation::{
-    task_matches_workspace_filter, validate_project_key, validate_required,
-    validate_task_checklist, validate_task_patch, validate_task_temporal_fields,
-    validate_task_update, validate_workspace_filter,
+    task_matches_workspace_filter, validate_required, validate_task_checklist, validate_task_patch,
+    validate_task_temporal_fields, validate_task_update, validate_workspace_filter,
+    validate_workspace_key,
 };
 
 pub type ServiceResult<T> = Result<T, ServiceError>;
@@ -98,13 +99,13 @@ pub(crate) struct ConsistentWorkspace {
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
-pub struct WorkspaceView {
+pub struct WorkspaceGraph {
     /// Internal change token for workspace refresh detection, not task metadata.
     #[schemars(schema_with = "revision_schema")]
     pub revision: u64,
     pub tasks: Vec<Versioned<TaskView>>,
     pub people: Vec<Versioned<PersonView>>,
-    pub projects: Vec<Versioned<ProjectView>>,
+    pub workspaces: Vec<Versioned<WorkspaceView>>,
     pub tags: Vec<Versioned<TagView>>,
 }
 
@@ -122,14 +123,14 @@ pub struct WorkspaceFilter {
     pub sizes: Vec<String>,
     /// Match tasks involving any of these people. People are not assignees or owners.
     pub person_ids: Vec<String>,
-    pub project_ids: Vec<String>,
+    pub workspace_ids: Vec<String>,
     pub tag_ids: Vec<String>,
     pub query: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct TaskView {
-    /// Stable task ID formatted as PROJECT_KEY-number, or number when no project was set at creation.
+    /// Stable task ID formatted as WORKSPACE_KEY-number, or number when no workspace was set at creation.
     pub id: String,
     /// Creation time as Unix epoch nanoseconds.
     pub created_at: String,
@@ -144,7 +145,7 @@ pub struct TaskView {
     /// People involved in this task besides the workspace owner. These are related people, not
     /// assignees or owners.
     pub people_ids: Vec<String>,
-    pub project_id: Option<String>,
+    pub workspace_id: Option<String>,
     pub tag_ids: Vec<String>,
     /// Ordered checklist tree. Children are ordered as shown in the task detail view.
     pub checklist: Vec<ChecklistItemView>,
@@ -157,8 +158,40 @@ pub struct TaskView {
 
 #[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct TaskRelationView {
-    pub task_id: String,
     pub relation_type: String,
+    pub task: LinkedTaskView,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
+pub struct LinkedTaskView {
+    pub workspace_id: Option<String>,
+    pub id: String,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct TaskDetailsView {
+    pub id: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub title: String,
+    pub state: String,
+    pub size: String,
+    pub priority: String,
+    pub snoozed_until: Option<String>,
+    pub people_ids: Vec<String>,
+    pub workspace_id: Option<String>,
+    pub tag_ids: Vec<String>,
+    pub checklist: Vec<ChecklistItemView>,
+    pub links: Vec<String>,
+    pub relations: Vec<TaskRelationDetailsView>,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct TaskRelationDetailsView {
+    pub relation_type: String,
+    pub task: TaskView,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -196,7 +229,7 @@ pub struct PersonView {
     pub active: bool,
 }
 #[derive(Debug, Clone, Serialize, JsonSchema)]
-pub struct ProjectView {
+pub struct WorkspaceView {
     pub id: String,
     pub key: String,
     pub name: String,
@@ -228,7 +261,7 @@ pub struct TaskCreate {
     #[serde(default)]
     /// People involved in this task besides the workspace owner; not assignees or owners.
     pub people_ids: Vec<String>,
-    pub project_id: Option<String>,
+    pub workspace_id: Option<String>,
     #[serde(default)]
     pub tag_ids: Vec<String>,
     #[serde(default)]
@@ -247,7 +280,7 @@ fn default_priority() -> String {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct TaskUpdate {
-    /// Task ID formatted as PROJECT_KEY-number, or number for an unprefixed task.
+    /// Task ID formatted as WORKSPACE_KEY-number, or number for an unprefixed task.
     pub id: String,
     #[schemars(schema_with = "revision_schema")]
     pub expected_revision: u64,
@@ -263,7 +296,7 @@ pub struct TaskUpdate {
     #[serde(default)]
     /// People involved in this task besides the workspace owner; not assignees or owners.
     pub people_ids: Vec<String>,
-    pub project_id: Option<String>,
+    pub workspace_id: Option<String>,
     #[serde(default)]
     pub tag_ids: Vec<String>,
     #[serde(default)]
@@ -291,8 +324,8 @@ fn default_true() -> bool {
     true
 }
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct ProjectInput {
-    /// Project code used as the prefix for new task IDs. Must be 2-5 characters without whitespace.
+pub struct WorkspaceInput {
+    /// Workspace code used as the prefix for new task IDs. Must be 2-5 characters without whitespace.
     #[schemars(extend("minLength" = 2, "maxLength" = 5, "pattern" = "^\\S+$"))]
     pub key: String,
     pub name: String,
@@ -395,16 +428,37 @@ impl TuidoService {
         tx.commit().await.map_err(storage_error)
     }
 
-    pub async fn workspace(&self) -> ServiceResult<WorkspaceView> {
+    pub async fn workspace(&self) -> ServiceResult<WorkspaceGraph> {
         let consistent = self.consistent_workspace().await?;
         let snapshot = consistent.snapshot;
         let revisions = consistent.entity_revisions;
-        Ok(WorkspaceView {
+        let linked_tasks = snapshot
+            .tasks
+            .iter()
+            .map(|task| {
+                (
+                    task.id.clone(),
+                    LinkedTaskView {
+                        workspace_id: task.workspace_id.clone(),
+                        id: task.id.clone(),
+                        title: task.title.clone(),
+                    },
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        Ok(WorkspaceGraph {
             revision: consistent.revision,
             tasks: snapshot
                 .tasks
                 .into_iter()
-                .map(|v| versioned("task", v.id.clone(), task_view(v), &revisions))
+                .map(|v| {
+                    versioned(
+                        "task",
+                        v.id.clone(),
+                        task_view(v, &linked_tasks),
+                        &revisions,
+                    )
+                })
                 .collect::<ServiceResult<_>>()?,
             people: snapshot
                 .people
@@ -424,14 +478,14 @@ impl TuidoService {
                     )
                 })
                 .collect::<ServiceResult<_>>()?,
-            projects: snapshot
-                .projects
+            workspaces: snapshot
+                .workspaces
                 .into_iter()
                 .map(|v| {
                     versioned(
-                        "project",
+                        "workspace",
                         v.id.clone(),
-                        ProjectView {
+                        WorkspaceView {
                             id: v.id,
                             key: v.key,
                             name: v.name,
@@ -463,7 +517,7 @@ impl TuidoService {
     pub async fn filtered_workspace(
         &self,
         filter: WorkspaceFilter,
-    ) -> ServiceResult<WorkspaceView> {
+    ) -> ServiceResult<WorkspaceGraph> {
         let mut workspace = self.workspace().await?;
         validate_workspace_filter(&filter, &workspace)?;
         workspace
@@ -523,7 +577,7 @@ impl TuidoService {
         }
         for (kind, table) in [
             ("person", "people"),
-            ("project", "projects"),
+            ("workspace", "workspaces"),
             ("tag", "tags"),
         ] {
             let sql = format!("SELECT id, revision FROM {table}");
@@ -557,10 +611,10 @@ impl TuidoService {
         normalize_task_relations(&mut task.relations);
         validation::validate_task_links(&task.links)?;
         validate_task_checklist(&task.checklist)?;
-        if task.project_id.is_none() {
-            task.project_id = self.default_project_id().await?;
+        if task.workspace_id.is_none() {
+            task.workspace_id = self.default_workspace_id().await?;
         }
-        let project_key = self.project_key(task.project_id.as_deref()).await?;
+        let workspace_key = self.workspace_key(task.workspace_id.as_deref()).await?;
         let sql = format!(
             "INSERT INTO tasks (id, key_prefix, rank, title, state, workflow_state, rejected, size, priority, snoozed_until, description, created_at, updated_at) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
             self.dialect.placeholder(1),
@@ -582,7 +636,7 @@ impl TuidoService {
         task.updated_at.clone_from(&now);
         let mut tx = self.pool.begin().await.map_err(storage_error)?;
         let number = self.next_task_number(&mut tx).await?;
-        task.id = task_identifier(number, project_key.as_deref());
+        task.id = task_identifier(number, workspace_key.as_deref());
         bump_workspace(&mut tx, self.dialect).await?;
         let row = sqlx::query("SELECT COALESCE(MAX(rank), 0) + 1 AS rank FROM tasks")
             .fetch_one(&mut *tx)
@@ -591,7 +645,7 @@ impl TuidoService {
         task.rank = row.try_get("rank").map_err(storage_error)?;
         sqlx::query(AssertSqlSafe(sql.as_str()))
             .bind(number)
-            .bind(project_key.as_deref().unwrap_or_default())
+            .bind(workspace_key.as_deref().unwrap_or_default())
             .bind(task.rank)
             .bind(&task.title)
             .bind(storage_legacy_state(task.state.id()))
@@ -614,7 +668,7 @@ impl TuidoService {
             &task.people_ids,
         )
         .await?;
-        self.replace_task_project(&mut tx, &task.id, task.project_id.as_deref())
+        self.replace_task_workspace(&mut tx, &task.id, task.workspace_id.as_deref())
             .await?;
         self.replace_links(&mut tx, "task_tags", "tag_id", &task.id, &task.tag_ids)
             .await?;
@@ -628,10 +682,7 @@ impl TuidoService {
         self.bump_related_task_revisions(&mut tx, &task.id, affected)
             .await?;
         tx.commit().await.map_err(storage_error)?;
-        Ok(Versioned {
-            revision: 1,
-            value: task_view(task),
-        })
+        self.get_task(&task.id).await
     }
 
     pub async fn create_task(&self, input: TaskCreate) -> ServiceResult<Versioned<TaskView>> {
@@ -658,7 +709,7 @@ impl TuidoService {
             priority,
             snoozed_until,
             people_ids: input.people_ids,
-            project_id: input.project_id,
+            workspace_id: input.workspace_id,
             tag_ids: input.tag_ids,
             checklist: Vec::new(),
             links: input.links,
@@ -720,7 +771,7 @@ impl TuidoService {
             &input.people_ids,
         )
         .await?;
-        self.replace_task_project(&mut tx, &input.id, input.project_id.as_deref())
+        self.replace_task_workspace(&mut tx, &input.id, input.workspace_id.as_deref())
             .await?;
         self.replace_links(&mut tx, "task_tags", "tag_id", &input.id, &input.tag_ids)
             .await?;
@@ -762,8 +813,8 @@ impl TuidoService {
                 self.replace_links(&mut tx, "task_people", "person_id", &id, &ids)
                     .await?
             }
-            TaskPatch::Project(project_id) => {
-                self.replace_task_project(&mut tx, &id, project_id.as_deref())
+            TaskPatch::Workspace(workspace_id) => {
+                self.replace_task_workspace(&mut tx, &id, workspace_id.as_deref())
                     .await?
             }
             TaskPatch::Tags(tags) => {
@@ -1008,6 +1059,44 @@ impl TuidoService {
             })
     }
 
+    pub async fn get_task_details(&self, id: &str) -> ServiceResult<Versioned<TaskDetailsView>> {
+        let number = parse_task_number(id)?;
+        let workspace = self.workspace().await?;
+        let task = workspace
+            .tasks
+            .iter()
+            .find(|task| task_number(&task.value.id) == Some(number))
+            .cloned()
+            .ok_or_else(|| ServiceError::NotFound {
+                entity: "task",
+                id: id.into(),
+            })?;
+        let relations = task
+            .value
+            .relations
+            .iter()
+            .map(|relation| {
+                workspace
+                    .tasks
+                    .iter()
+                    .find(|candidate| candidate.value.id == relation.task.id)
+                    .map(|linked| TaskRelationDetailsView {
+                        relation_type: relation.relation_type.clone(),
+                        task: linked.value.clone(),
+                    })
+                    .ok_or_else(|| ServiceError::NotFound {
+                        entity: "task",
+                        id: relation.task.id.clone(),
+                    })
+            })
+            .collect::<ServiceResult<Vec<_>>>()?;
+
+        Ok(Versioned {
+            revision: task.revision,
+            value: task_details_view(task.value, relations),
+        })
+    }
+
     pub async fn create_person(&self, input: PersonInput) -> ServiceResult<Versioned<PersonView>> {
         let person = Person {
             id: Uuid::new_v4().to_string(),
@@ -1109,35 +1198,35 @@ impl TuidoService {
         self.delete("people", "person", id, expected).await
     }
 
-    pub async fn create_project(
+    pub async fn create_workspace(
         &self,
-        input: ProjectInput,
-    ) -> ServiceResult<Versioned<ProjectView>> {
-        let mut project = Project::new(
+        input: WorkspaceInput,
+    ) -> ServiceResult<Versioned<WorkspaceView>> {
+        let mut workspace = Workspace::new(
             Uuid::new_v4().to_string(),
             input.key,
             input.name,
             input.description,
         );
-        project.lead_person_id = input.lead_person_id;
-        self.create_project_entity(project).await
+        workspace.lead_person_id = input.lead_person_id;
+        self.create_workspace_entity(workspace).await
     }
-    pub(crate) async fn create_project_entity(
+    pub(crate) async fn create_workspace_entity(
         &self,
-        project: Project,
-    ) -> ServiceResult<Versioned<ProjectView>> {
-        if !Project::is_valid_key(&project.key) {
+        workspace: Workspace,
+    ) -> ServiceResult<Versioned<WorkspaceView>> {
+        if !Workspace::is_valid_key(&workspace.key) {
             return Err(ServiceError::Invalid(
-                "project key must be 2-5 characters without spaces".into(),
+                "workspace key must be 2-5 characters without spaces".into(),
             ));
         }
-        if project.name.is_empty() {
+        if workspace.name.is_empty() {
             return Err(ServiceError::Invalid(
-                "project key and name are required".into(),
+                "workspace key and name are required".into(),
             ));
         }
         let sql = format!(
-            "INSERT INTO projects (id, key, name, description, lead_person_id) VALUES ({}, {}, {}, {}, {})",
+            "INSERT INTO workspaces (id, key, name, description, lead_person_id) VALUES ({}, {}, {}, {}, {})",
             self.dialect.placeholder(1),
             self.dialect.placeholder(2),
             self.dialect.placeholder(3),
@@ -1146,11 +1235,11 @@ impl TuidoService {
         );
         let mut tx = self.pool.begin().await.map_err(storage_error)?;
         sqlx::query(AssertSqlSafe(sql.as_str()))
-            .bind(&project.id)
-            .bind(&project.key)
-            .bind(&project.name)
-            .bind(&project.description)
-            .bind(&project.lead_person_id)
+            .bind(&workspace.id)
+            .bind(&workspace.key)
+            .bind(&workspace.name)
+            .bind(&workspace.description)
+            .bind(&workspace.lead_person_id)
             .execute(&mut *tx)
             .await
             .map_err(storage_error)?;
@@ -1158,30 +1247,30 @@ impl TuidoService {
         tx.commit().await.map_err(storage_error)?;
         Ok(Versioned {
             revision: 1,
-            value: ProjectView {
-                id: project.id,
-                key: project.key,
-                name: project.name,
-                description: project.description,
-                lead_person_id: project.lead_person_id,
+            value: WorkspaceView {
+                id: workspace.id,
+                key: workspace.key,
+                name: workspace.name,
+                description: workspace.description,
+                lead_person_id: workspace.lead_person_id,
             },
         })
     }
-    pub async fn update_project(
+    pub async fn update_workspace(
         &self,
         id: &str,
         expected: u64,
-        input: ProjectInput,
-    ) -> ServiceResult<Versioned<ProjectView>> {
-        validate_project_key(&input.key)?;
-        validate_required("project name", &input.name)?;
+        input: WorkspaceInput,
+    ) -> ServiceResult<Versioned<WorkspaceView>> {
+        validate_workspace_key(&input.key)?;
+        validate_required("workspace name", &input.name)?;
         self.update_simple(
-            "projects",
-            "project",
+            "workspaces",
+            "workspace",
             id,
             expected,
             &[
-                ("key", Value::Text(Project::normalize_key(&input.key))),
+                ("key", Value::Text(Workspace::normalize_key(&input.key))),
                 ("name", Value::Text(input.name.trim().into())),
                 ("description", Value::Text(input.description)),
                 ("lead_person_id", Value::Optional(input.lead_person_id)),
@@ -1190,38 +1279,38 @@ impl TuidoService {
         .await?;
         self.workspace()
             .await?
-            .projects
+            .workspaces
             .into_iter()
             .find(|v| v.value.id == id)
             .ok_or_else(|| ServiceError::NotFound {
-                entity: "project",
+                entity: "workspace",
                 id: id.into(),
             })
     }
-    pub(crate) async fn patch_project(
+    pub(crate) async fn patch_workspace(
         &self,
         id: String,
         expected: u64,
-        patch: ProjectPatch,
+        patch: WorkspacePatch,
     ) -> ServiceResult<u64> {
         match &patch {
-            ProjectPatch::Key(value) => validate_project_key(value)?,
-            ProjectPatch::Name(value) => validate_required("project name", value)?,
-            ProjectPatch::Description(_) | ProjectPatch::LeadPerson(_) => {}
+            WorkspacePatch::Key(value) => validate_workspace_key(value)?,
+            WorkspacePatch::Name(value) => validate_required("workspace name", value)?,
+            WorkspacePatch::Description(_) | WorkspacePatch::LeadPerson(_) => {}
         }
         let input = match patch {
-            ProjectPatch::Key(v) => ("key", Value::Text(Project::normalize_key(&v))),
-            ProjectPatch::Name(v) => ("name", Value::Text(v.trim().into())),
-            ProjectPatch::Description(v) => ("description", Value::Text(v)),
-            ProjectPatch::LeadPerson(v) => ("lead_person_id", Value::Optional(v)),
+            WorkspacePatch::Key(v) => ("key", Value::Text(Workspace::normalize_key(&v))),
+            WorkspacePatch::Name(v) => ("name", Value::Text(v.trim().into())),
+            WorkspacePatch::Description(v) => ("description", Value::Text(v)),
+            WorkspacePatch::LeadPerson(v) => ("lead_person_id", Value::Optional(v)),
         };
-        self.update_simple("projects", "project", &id, expected, &[input])
+        self.update_simple("workspaces", "workspace", &id, expected, &[input])
             .await?;
         Ok(expected + 1)
     }
 
-    pub async fn delete_project(&self, id: &str, expected: u64) -> ServiceResult<()> {
-        self.delete("projects", "project", id, expected).await
+    pub async fn delete_workspace(&self, id: &str, expected: u64) -> ServiceResult<()> {
+        self.delete("workspaces", "workspace", id, expected).await
     }
 
     pub async fn create_tag(&self, input: TagInput) -> ServiceResult<Versioned<TagView>> {
@@ -1301,16 +1390,16 @@ impl TuidoService {
         self.delete("tags", "tag", id, expected).await
     }
 
-    async fn project_key(&self, project_id: Option<&str>) -> ServiceResult<Option<String>> {
-        let Some(project_id) = project_id else {
+    async fn workspace_key(&self, workspace_id: Option<&str>) -> ServiceResult<Option<String>> {
+        let Some(workspace_id) = workspace_id else {
             return Ok(None);
         };
         let sql = format!(
-            "SELECT key FROM projects WHERE id = {}",
+            "SELECT key FROM workspaces WHERE id = {}",
             self.dialect.placeholder(1)
         );
         sqlx::query(AssertSqlSafe(sql.as_str()))
-            .bind(project_id)
+            .bind(workspace_id)
             .fetch_optional(&self.pool)
             .await
             .map_err(storage_error)?
@@ -1474,15 +1563,15 @@ impl TuidoService {
         Ok(())
     }
 
-    async fn replace_task_project(
+    async fn replace_task_workspace(
         &self,
         tx: &mut Transaction<'_, Any>,
         task_id: &str,
-        project_id: Option<&str>,
+        workspace_id: Option<&str>,
     ) -> ServiceResult<()> {
         let task_number = parse_task_number(task_id)?;
         let delete = format!(
-            "DELETE FROM task_projects WHERE task_id = {}",
+            "DELETE FROM task_workspaces WHERE task_id = {}",
             self.dialect.placeholder(1)
         );
         sqlx::query(AssertSqlSafe(delete.as_str()))
@@ -1490,15 +1579,15 @@ impl TuidoService {
             .execute(&mut **tx)
             .await
             .map_err(storage_error)?;
-        if let Some(project_id) = project_id {
+        if let Some(workspace_id) = workspace_id {
             let insert = format!(
-                "INSERT INTO task_projects (task_id, project_id, sort_order) VALUES ({}, {}, 0)",
+                "INSERT INTO task_workspaces (task_id, workspace_id, sort_order) VALUES ({}, {}, 0)",
                 self.dialect.placeholder(1),
                 self.dialect.placeholder(2)
             );
             sqlx::query(AssertSqlSafe(insert.as_str()))
                 .bind(task_number)
-                .bind(project_id)
+                .bind(workspace_id)
                 .execute(&mut **tx)
                 .await
                 .map_err(storage_error)?;
@@ -1728,11 +1817,11 @@ impl TuidoService {
         let cleanup = match table {
             "people" => vec![
                 "DELETE FROM task_people WHERE person_id = ",
-                "UPDATE projects SET lead_person_id = NULL WHERE lead_person_id = ",
+                "UPDATE workspaces SET lead_person_id = NULL WHERE lead_person_id = ",
             ],
-            "projects" => vec![
-                "DELETE FROM task_projects WHERE project_id = ",
-                "DELETE FROM app_settings WHERE key = 'tasks.default_project' AND value = ",
+            "workspaces" => vec![
+                "DELETE FROM task_workspaces WHERE workspace_id = ",
+                "DELETE FROM app_settings WHERE key = 'tasks.default_workspace' AND value = ",
             ],
             "tags" => vec!["DELETE FROM task_tags WHERE tag_id = "],
             _ => Vec::new(),
@@ -1778,10 +1867,10 @@ impl TuidoService {
         let statements = match table {
             "people" => vec![
                 "UPDATE tasks SET revision = revision + 1 WHERE id IN (SELECT task_id FROM task_people WHERE person_id = ",
-                "UPDATE projects SET revision = revision + 1 WHERE lead_person_id = ",
+                "UPDATE workspaces SET revision = revision + 1 WHERE lead_person_id = ",
             ],
-            "projects" => vec![
-                "UPDATE tasks SET revision = revision + 1 WHERE id IN (SELECT task_id FROM task_projects WHERE project_id = ",
+            "workspaces" => vec![
+                "UPDATE tasks SET revision = revision + 1 WHERE id IN (SELECT task_id FROM task_workspaces WHERE workspace_id = ",
             ],
             "tags" => vec![
                 "UPDATE tasks SET revision = revision + 1 WHERE id IN (SELECT task_id FROM task_tags WHERE tag_id = ",
@@ -1857,7 +1946,7 @@ fn versioned<T>(
         .map(|revision| Versioned { revision, value })
         .ok_or(ServiceError::NotFound { entity, id })
 }
-fn task_view(v: Task) -> TaskView {
+fn task_view(v: Task, linked_tasks: &HashMap<String, LinkedTaskView>) -> TaskView {
     let checklist = checklist_views(&v.checklist, None);
     TaskView {
         id: v.id,
@@ -1869,19 +1958,44 @@ fn task_view(v: Task) -> TaskView {
         priority: v.priority.id().into(),
         snoozed_until: v.snoozed_until.map(crate::snooze::format_datetime),
         people_ids: v.people_ids,
-        project_id: v.project_id,
+        workspace_id: v.workspace_id,
         tag_ids: v.tag_ids,
         checklist,
         links: v.links,
         relations: v
             .relations
             .into_iter()
-            .map(|relation| TaskRelationView {
-                task_id: relation.task_id,
-                relation_type: relation.kind.id().to_string(),
+            .filter_map(|relation| {
+                linked_tasks
+                    .get(&relation.task_id)
+                    .cloned()
+                    .map(|task| TaskRelationView {
+                        relation_type: relation.kind.id().to_string(),
+                        task,
+                    })
             })
             .collect(),
         description: v.description,
+    }
+}
+
+fn task_details_view(task: TaskView, relations: Vec<TaskRelationDetailsView>) -> TaskDetailsView {
+    TaskDetailsView {
+        id: task.id,
+        created_at: task.created_at,
+        updated_at: task.updated_at,
+        title: task.title,
+        state: task.state,
+        size: task.size,
+        priority: task.priority,
+        snoozed_until: task.snoozed_until,
+        people_ids: task.people_ids,
+        workspace_id: task.workspace_id,
+        tag_ids: task.tag_ids,
+        checklist: task.checklist,
+        links: task.links,
+        relations,
+        description: task.description,
     }
 }
 
@@ -2057,7 +2171,7 @@ async fn apply_task_patch(
             ],
         ),
         TaskPatch::People(_)
-        | TaskPatch::Project(_)
+        | TaskPatch::Workspace(_)
         | TaskPatch::Tags(_)
         | TaskPatch::Checklist(_)
         | TaskPatch::Links(_)

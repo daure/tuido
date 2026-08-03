@@ -1,7 +1,7 @@
 use std::{collections::HashMap, time::Duration};
 
 use super::{AppMsg, PatchSink, task_state_icon};
-use crate::domain::{Project, Task, TaskPatch, TaskRelation, TaskRelationKind, task_display_id};
+use crate::domain::{Task, TaskPatch, TaskRelation, TaskRelationKind, Workspace, task_display_id};
 use ratatui::{Frame, layout::Constraint, layout::Rect};
 use tuicore::{
     AnimationSettings, Column, DataViewTypedEvent, EventCtx, EventOutcome, EventRoute, FocusCtx,
@@ -29,21 +29,23 @@ impl TaskRelationsInput {
     pub(super) fn new(
         task: &Task,
         tasks: &[Task],
-        projects: &[Project],
+        workspaces: &[Workspace],
         patch_sink: PatchSink,
         highlighted_task_id: Option<&str>,
     ) -> Self {
         let task_labels = tasks
             .iter()
-            .map(|task| (task.id.clone(), task_label(task, projects)))
+            .map(|task| (task.id.clone(), task_label(task, workspaces)))
             .collect::<HashMap<_, _>>();
         let task_references = tasks
             .iter()
             .map(|task| {
-                let project = task.project_id.as_deref().and_then(|project_id| {
-                    projects.iter().find(|project| project.id == project_id)
+                let workspace = task.workspace_id.as_deref().and_then(|workspace_id| {
+                    workspaces
+                        .iter()
+                        .find(|workspace| workspace.id == workspace_id)
                 });
-                (task.id.clone(), task_display_id(task, project))
+                (task.id.clone(), task_display_id(task, workspace))
             })
             .collect::<HashMap<_, _>>();
         let mut rows = task
@@ -282,12 +284,13 @@ fn sort_issue_links(rows: &mut [TaskRelationRow]) {
     });
 }
 
-fn task_label(task: &Task, projects: &[Project]) -> String {
-    let project = task
-        .project_id
-        .as_deref()
-        .and_then(|project_id| projects.iter().find(|project| project.id == project_id));
-    let reference = task_display_id(task, project);
+fn task_label(task: &Task, workspaces: &[Workspace]) -> String {
+    let workspace = task.workspace_id.as_deref().and_then(|workspace_id| {
+        workspaces
+            .iter()
+            .find(|workspace| workspace.id == workspace_id)
+    });
+    let reference = task_display_id(task, workspace);
     format!(
         "{} {reference} - {}",
         task_state_icon(task.state),
@@ -491,9 +494,9 @@ mod tests {
     }
 
     #[test]
-    fn task_options_show_state_project_task_number_and_title() {
-        let project = Project::new(
-            "project".into(),
+    fn task_options_show_state_workspace_task_number_and_title() {
+        let workspace = Workspace::new(
+            "workspace".into(),
             "core".into(),
             "Core".into(),
             String::new(),
@@ -505,24 +508,24 @@ mod tests {
             TaskSize::Small,
         );
         task.state = TaskState::Todo;
-        task.project_id = Some(project.id.clone());
+        task.workspace_id = Some(workspace.id.clone());
 
-        assert_eq!(task_label(&task, &[project]), " CORE-42 - Ship it");
+        assert_eq!(task_label(&task, &[workspace]), " CORE-42 - Ship it");
     }
 
     #[test]
     fn editing_issue_link_target_preserves_data_view_row_id() {
         let mut row = TaskRelationRow {
-            id: "projected-task".into(),
+            id: "workspaceed-task".into(),
             relation: TaskRelation {
-                task_id: "projected-task".into(),
+                task_id: "workspaceed-task".into(),
                 kind: TaskRelationKind::Blocks,
             },
             target_reference: "APP-2".into(),
-            target_label: "APP-2 - Projected".into(),
+            target_label: "APP-2 - Workspaceed".into(),
         };
         let references = HashMap::from([("3".into(), "3".into())]);
-        let labels = HashMap::from([("3".into(), "3 - No project".into())]);
+        let labels = HashMap::from([("3".into(), "3 - No workspace".into())]);
 
         apply_issue_link_edit(
             &mut row,
@@ -531,11 +534,11 @@ mod tests {
             &labels,
         );
 
-        assert_eq!(row.id, "projected-task");
+        assert_eq!(row.id, "workspaceed-task");
         assert_eq!(row.relation.task_id, "3");
         assert_eq!(row.relation.kind, TaskRelationKind::RelatesTo);
         assert_eq!(row.target_reference, "3");
-        assert_eq!(row.target_label, "3 - No project");
+        assert_eq!(row.target_label, "3 - No workspace");
     }
 
     #[test]

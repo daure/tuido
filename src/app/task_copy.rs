@@ -2,27 +2,27 @@ use std::collections::HashMap;
 
 use serde::Serialize;
 
-use crate::domain::{Person, Project, Tag, Task, task_display_id};
+use crate::domain::{Person, Tag, Task, Workspace, task_display_id};
 
 #[derive(Clone, Default)]
 pub(super) struct TaskCopyContext {
     people: HashMap<String, Person>,
-    projects: HashMap<String, Project>,
+    workspaces: HashMap<String, Workspace>,
     tags: HashMap<String, Tag>,
 }
 
 impl TaskCopyContext {
-    pub(super) fn new(people: &[Person], projects: &[Project], tags: &[Tag]) -> Self {
+    pub(super) fn new(people: &[Person], workspaces: &[Workspace], tags: &[Tag]) -> Self {
         Self {
             people: people
                 .iter()
                 .cloned()
                 .map(|person| (person.id.clone(), person))
                 .collect(),
-            projects: projects
+            workspaces: workspaces
                 .iter()
                 .cloned()
-                .map(|project| (project.id.clone(), project))
+                .map(|workspace| (workspace.id.clone(), workspace))
                 .collect(),
             tags: tags
                 .iter()
@@ -40,11 +40,11 @@ impl TaskCopyContext {
     }
 
     pub(super) fn display_id(&self, task: &Task) -> String {
-        let project = task
-            .project_id
+        let workspace = task
+            .workspace_id
             .as_deref()
-            .and_then(|project_id| self.projects.get(project_id));
-        task_display_id(task, project)
+            .and_then(|workspace_id| self.workspaces.get(workspace_id));
+        task_display_id(task, workspace)
     }
 
     fn person<'a>(
@@ -70,7 +70,7 @@ struct TaskExport<'a> {
     priority: &'static str,
     snoozed_until: Option<String>,
     people: Vec<PersonExport<'a>>,
-    project: Option<ProjectExport<'a>>,
+    workspace: Option<WorkspaceExport<'a>>,
     tags: Vec<TagExport<'a>>,
     links: Vec<String>,
 }
@@ -82,20 +82,20 @@ impl<'a> TaskExport<'a> {
             .iter()
             .map(|id| context.person(task, id, "person"))
             .collect::<Result<_, _>>()?;
-        let project = task
-            .project_id
+        let workspace = task
+            .workspace_id
             .as_deref()
             .map(|id| {
-                let project = context
-                    .projects
+                let workspace = context
+                    .workspaces
                     .get(id)
-                    .ok_or_else(|| CopyError::unresolved(task, "project", id))?;
-                let lead = project
+                    .ok_or_else(|| CopyError::unresolved(task, "workspace", id))?;
+                let lead = workspace
                     .lead_person_id
                     .as_deref()
-                    .map(|lead_id| context.person(task, lead_id, "project_lead_person"))
+                    .map(|lead_id| context.person(task, lead_id, "workspace_lead_person"))
                     .transpose()?;
-                Ok(ProjectExport::new(project, lead))
+                Ok(WorkspaceExport::new(workspace, lead))
             })
             .transpose()?;
         let tags = task
@@ -119,7 +119,7 @@ impl<'a> TaskExport<'a> {
             priority: task.priority.id(),
             snoozed_until: task.snoozed_until.map(crate::snooze::format_datetime),
             people,
-            project,
+            workspace,
             tags,
             links: task
                 .links
@@ -150,7 +150,7 @@ impl<'a> From<&'a Person> for PersonExport<'a> {
 }
 
 #[derive(Serialize)]
-struct ProjectExport<'a> {
+struct WorkspaceExport<'a> {
     id: &'a str,
     key: &'a str,
     name: &'a str,
@@ -158,13 +158,13 @@ struct ProjectExport<'a> {
     lead: Option<PersonExport<'a>>,
 }
 
-impl<'a> ProjectExport<'a> {
-    fn new(project: &'a Project, lead: Option<PersonExport<'a>>) -> Self {
+impl<'a> WorkspaceExport<'a> {
+    fn new(workspace: &'a Workspace, lead: Option<PersonExport<'a>>) -> Self {
         Self {
-            id: &project.id,
-            key: &project.key,
-            name: &project.name,
-            description: &project.description,
+            id: &workspace.id,
+            key: &workspace.key,
+            name: &workspace.name,
+            description: &workspace.description,
             lead,
         }
     }

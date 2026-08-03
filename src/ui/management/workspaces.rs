@@ -20,26 +20,26 @@ use super::common::{
 use crate::{
     app::{AppContext, AppMsg},
     app_keymap::{self, keys},
-    domain::{AppEvent, Person, Project, ProjectPatch},
+    domain::{AppEvent, Person, Workspace, WorkspacePatch},
     persistence_coordinator::PersistenceCommand,
     ui::save_status::SaveStatusLine,
 };
 
-type ProjectTable = DataView<Project, String>;
-type ProjectPatchSink = Rc<RefCell<Vec<ProjectPatch>>>;
-pub(crate) type ProjectsDialog = DialogHost<ProjectsWorkspace, AppMsg>;
+type WorkspaceTable = DataView<Workspace, String>;
+type WorkspacePatchSink = Rc<RefCell<Vec<WorkspacePatch>>>;
+pub(crate) type WorkspacesDialog = DialogHost<WorkspaceManagement, AppMsg>;
 
-pub(crate) fn dialog(context: AppContext) -> ProjectsDialog {
+pub(crate) fn dialog(context: AppContext) -> WorkspacesDialog {
     Dialog::new()
-        .top_left("Projects")
+        .top_left("Workspaces")
         .close_on_unfocus_from_descendants(true)
         .on_close(|_| AppMsg::CloseDialog)
-        .host(ProjectsWorkspace::new(context))
+        .host(WorkspaceManagement::new(context))
 }
 
-pub(crate) struct ProjectsWorkspace {
+pub(crate) struct WorkspaceManagement {
     context: AppContext,
-    split: ManagementPane<ProjectTable, ProjectDetailForm>,
+    split: ManagementPane<WorkspaceTable, WorkspaceDetailForm>,
     observed_version: u64,
     observed_external_refresh_version: u64,
     table_focused: bool,
@@ -48,9 +48,9 @@ pub(crate) struct ProjectsWorkspace {
     detail_people: Vec<(String, String)>,
 }
 
-impl ProjectsWorkspace {
+impl WorkspaceManagement {
     fn new(context: AppContext) -> Self {
-        let split = project_split(&context);
+        let split = workspace_split(&context);
         let store = context.store.borrow();
         let state = store.state();
         let observed_version = state.version;
@@ -83,16 +83,16 @@ impl ProjectsWorkspace {
         let protect_detail = external_refresh
             && (self.detail_draft_protected || self.context.coordinator.borrow().has_pending());
         let external_refresh_version = state.external_refresh_version;
-        let rows = state.projects.clone();
-        let has_projects = !rows.is_empty();
+        let rows = state.workspaces.clone();
+        let has_workspaces = !rows.is_empty();
         let people = state.people.clone();
-        let selected_id = state.selected_project_id.clone();
+        let selected_id = state.selected_workspace_id.clone();
         drop(store);
         if table_people_changed {
             let transform_mode = self.split.first().transform_mode();
             let transform = self.split.first().transform_state().clone();
             let highlighted_id = self.split.first().highlighted_id();
-            let mut table = project_table(rows, &people, selected_id.as_deref());
+            let mut table = workspace_table(rows, &people, selected_id.as_deref());
             table.set_transform_mode(transform_mode);
             table.set_search_query(transform.search);
             for filter in transform.filters {
@@ -109,8 +109,8 @@ impl ProjectsWorkspace {
         self.split
             .first_mut()
             .set_empty_state(management_empty_state(
-                ManagementDialogKind::Projects,
-                has_projects,
+                ManagementDialogKind::Workspaces,
+                has_workspaces,
             ));
         if let Some(id) = selected_id.as_ref() {
             self.split.first_mut().highlight_id(id);
@@ -118,25 +118,25 @@ impl ProjectsWorkspace {
         }
         self.split.first_mut().take_events();
         let visible_id = self.split.first().highlighted_id();
-        let (project, error) = {
+        let (workspace, error) = {
             let store = self.context.store.borrow();
             let state = store.state();
-            let project = visible_id
+            let workspace = visible_id
                 .as_deref()
-                .and_then(|id| state.projects.iter().find(|project| project.id == id))
+                .and_then(|id| state.workspaces.iter().find(|workspace| workspace.id == id))
                 .cloned();
             let error = visible_id
                 .as_deref()
-                .and_then(|id| state.project_save_error(id))
+                .and_then(|id| state.workspace_save_error(id))
                 .map(str::to_string);
-            (project, error)
+            (workspace, error)
         };
-        if self.split.second().project_id.as_deref() != visible_id.as_deref()
+        if self.split.second().workspace_id.as_deref() != visible_id.as_deref()
             || (external_refresh && !protect_detail)
             || (detail_people_changed && !self.detail_draft_protected && !protect_detail)
         {
-            self.split.second_mut().set_project(
-                project.as_ref(),
+            self.split.second_mut().set_workspace(
+                workspace.as_ref(),
                 &people,
                 error.as_deref(),
                 &mut EventCtx::default(),
@@ -159,14 +159,14 @@ impl ProjectsWorkspace {
             match &event {
                 DataViewTypedEvent::HighlightChanged { row_id: Some(id) }
                 | DataViewTypedEvent::Activated { row_id: id } => {
-                    selected_changed |= self.select_project(id, ctx);
+                    selected_changed |= self.select_workspace(id, ctx);
                     focus_detail |= matches!(event, DataViewTypedEvent::Activated { .. });
                 }
                 DataViewTypedEvent::HighlightChanged { row_id: None } => {
                     let people = self.context.store.borrow().state().people.clone();
                     self.split
                         .second_mut()
-                        .set_project(None, &people, None, ctx);
+                        .set_workspace(None, &people, None, ctx);
                     self.detail_draft_protected = false;
                     selected_changed |= self.split.set_detail_visible(false);
                 }
@@ -183,48 +183,48 @@ impl ProjectsWorkspace {
             ctx.request_redraw();
         }
     }
-    fn select_project(&mut self, id: &str, ctx: &mut EventCtx<AppMsg>) -> bool {
+    fn select_workspace(&mut self, id: &str, ctx: &mut EventCtx<AppMsg>) -> bool {
         let outcome = self
             .context
             .store
             .borrow_mut()
-            .dispatch(AppEvent::SelectProject(id.to_string()));
+            .dispatch(AppEvent::SelectWorkspace(id.to_string()));
         let store = self.context.store.borrow();
         let state = store.state();
-        let project = state
-            .projects
+        let workspace = state
+            .workspaces
             .iter()
-            .find(|project| project.id == id)
+            .find(|workspace| workspace.id == id)
             .cloned();
         let people = state.people.clone();
-        let error = project
+        let error = workspace
             .as_ref()
-            .and_then(|project| state.project_save_error(&project.id))
+            .and_then(|workspace| state.workspace_save_error(&workspace.id))
             .map(str::to_string);
         drop(store);
         self.split
             .second_mut()
-            .set_project(project.as_ref(), &people, error.as_deref(), ctx);
-        let visibility_changed = self.split.set_detail_visible(project.is_some());
+            .set_workspace(workspace.as_ref(), &people, error.as_deref(), ctx);
+        let visibility_changed = self.split.set_detail_visible(workspace.is_some());
         outcome.changed || visibility_changed
     }
     fn sync_detail_changes(&mut self) -> bool {
         let patches = self.split.second_mut().take_patches();
         let mut changed = false;
-        for (project_id, patch) in patches {
+        for (workspace_id, patch) in patches {
             let outcome = self
                 .context
                 .store
                 .borrow_mut()
-                .dispatch(AppEvent::PatchProject {
-                    project_id: project_id.clone(),
+                .dispatch(AppEvent::PatchWorkspace {
+                    workspace_id: workspace_id.clone(),
                     patch: patch.clone(),
                 });
             if outcome.changed {
                 self.context
                     .coordinator
                     .borrow_mut()
-                    .submit(PersistenceCommand::PatchProject(project_id, patch));
+                    .submit(PersistenceCommand::PatchWorkspace(workspace_id, patch));
                 changed = true;
             }
         }
@@ -232,12 +232,12 @@ impl ProjectsWorkspace {
             self.detail_draft_protected = false;
             let store = self.context.store.borrow();
             let state = store.state();
-            self.split.first_mut().set_rows(state.projects.clone());
+            self.split.first_mut().set_rows(state.workspaces.clone());
             self.split.second_mut().set_save_error(
                 state
-                    .selected_project_id
+                    .selected_workspace_id
                     .as_deref()
-                    .and_then(|id| state.project_save_error(id)),
+                    .and_then(|id| state.workspace_save_error(id)),
             );
             self.observed_version = state.version;
         }
@@ -264,7 +264,7 @@ impl ProjectsWorkspace {
             )
         {
             ctx.emit(AppMsg::OpenDeleteManagement {
-                kind: ManagementDialogKind::Projects,
+                kind: ManagementDialogKind::Workspaces,
                 entity_id,
             });
             ctx.stop_propagation();
@@ -281,7 +281,7 @@ fn people_signature(people: &[Person]) -> Vec<(String, String)> {
         .collect()
 }
 
-impl TuiNode<AppMsg> for ProjectsWorkspace {
+impl TuiNode<AppMsg> for WorkspaceManagement {
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
         self.sync_store_version();
         self.split.layout(area, ctx)
@@ -346,29 +346,29 @@ impl TuiNode<AppMsg> for ProjectsWorkspace {
     }
 }
 
-struct ProjectDetailForm {
+struct WorkspaceDetailForm {
     root: Flex<AppMsg>,
-    project_id: Option<String>,
-    patches: ProjectPatchSink,
+    workspace_id: Option<String>,
+    patches: WorkspacePatchSink,
     save_status: SaveStatusLine,
 }
-impl ProjectDetailForm {
-    fn new(project: Option<&Project>, people: &[Person], error: Option<&str>) -> Self {
+impl WorkspaceDetailForm {
+    fn new(workspace: Option<&Workspace>, people: &[Person], error: Option<&str>) -> Self {
         let patches = Rc::new(RefCell::new(Vec::new()));
         let status = SaveStatusLine::new(error);
         Self {
             root: Flex::column().child(
                 "form",
-                project_detail_form(project, people, Rc::clone(&patches), status.clone()),
+                workspace_detail_form(workspace, people, Rc::clone(&patches), status.clone()),
                 FlexItem::content(),
             ),
-            project_id: project.map(|project| project.id.clone()),
+            workspace_id: workspace.map(|workspace| workspace.id.clone()),
             patches,
             save_status: status,
         }
     }
-    fn take_patches(&mut self) -> Vec<(String, ProjectPatch)> {
-        let Some(id) = self.project_id.clone() else {
+    fn take_patches(&mut self) -> Vec<(String, WorkspacePatch)> {
+        let Some(id) = self.workspace_id.clone() else {
             self.patches.borrow_mut().clear();
             return Vec::new();
         };
@@ -378,21 +378,21 @@ impl ProjectDetailForm {
             .map(|patch| (id.clone(), patch))
             .collect()
     }
-    fn set_project(
+    fn set_workspace(
         &mut self,
-        project: Option<&Project>,
+        workspace: Option<&Workspace>,
         people: &[Person],
         error: Option<&str>,
         ctx: &mut EventCtx<AppMsg>,
     ) {
         self.patches = Rc::new(RefCell::new(Vec::new()));
-        self.project_id = project.map(|project| project.id.clone());
+        self.workspace_id = workspace.map(|workspace| workspace.id.clone());
         self.save_status = SaveStatusLine::new(error);
         self.root
             .replace(
                 "form",
-                project_detail_form(
-                    project,
+                workspace_detail_form(
+                    workspace,
                     people,
                     Rc::clone(&self.patches),
                     self.save_status.clone(),
@@ -400,13 +400,13 @@ impl ProjectDetailForm {
                 FlexItem::content(),
                 ctx,
             )
-            .expect("project detail form host should contain form child");
+            .expect("workspace detail form host should contain form child");
     }
     fn set_save_error(&self, error: Option<&str>) {
         self.save_status.set_error(error);
     }
 }
-impl TuiNode<AppMsg> for ProjectDetailForm {
+impl TuiNode<AppMsg> for WorkspaceDetailForm {
     fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
         self.root.measure(proposal)
     }
@@ -448,35 +448,40 @@ impl TuiNode<AppMsg> for ProjectDetailForm {
     }
 }
 
-fn project_split(context: &AppContext) -> ManagementPane<ProjectTable, ProjectDetailForm> {
+fn workspace_split(context: &AppContext) -> ManagementPane<WorkspaceTable, WorkspaceDetailForm> {
     let store = context.store.borrow();
     let state = store.state();
-    let selected = state.selected_project_id.as_deref();
-    let project = selected.and_then(|id| state.projects.iter().find(|project| project.id == id));
-    let detail = ProjectDetailForm::new(
-        project,
+    let selected = state.selected_workspace_id.as_deref();
+    let workspace =
+        selected.and_then(|id| state.workspaces.iter().find(|workspace| workspace.id == id));
+    let detail = WorkspaceDetailForm::new(
+        workspace,
         &state.people,
-        project.and_then(|project| state.project_save_error(&project.id)),
+        workspace.and_then(|workspace| state.workspace_save_error(&workspace.id)),
     );
     ManagementPane::new(
-        project_table(state.projects.clone(), &state.people, selected),
+        workspace_table(state.workspaces.clone(), &state.people, selected),
         detail,
-        ManagementDialogKind::Projects,
+        ManagementDialogKind::Workspaces,
     )
-    .detail_visible(project.is_some())
+    .detail_visible(workspace.is_some())
 }
 
-fn project_table(rows: Vec<Project>, people: &[Person], selected: Option<&str>) -> ProjectTable {
-    let has_projects = !rows.is_empty();
+fn workspace_table(
+    rows: Vec<Workspace>,
+    people: &[Person],
+    selected: Option<&str>,
+) -> WorkspaceTable {
+    let has_workspaces = !rows.is_empty();
     let names: HashMap<String, String> = people
         .iter()
         .map(|person| (person.id.clone(), person.name.clone()))
         .collect();
     let filter_names = names.clone();
-    let mut table = DataView::new(rows, |row: &Project| row.id.clone())
+    let mut table = DataView::new(rows, |row: &Workspace| row.id.clone())
         .empty_state(management_empty_state(
-            ManagementDialogKind::Projects,
-            has_projects,
+            ManagementDialogKind::Workspaces,
+            has_workspaces,
         ))
         .headers(true)
         .action_bar(true)
@@ -485,21 +490,24 @@ fn project_table(rows: Vec<Project>, people: &[Person], selected: Option<&str>) 
         .selection_mode(SelectionMode::Single)
         .selection_trigger(SelectionTrigger::OnNavigate)
         .columns(vec![
-            Column::text("key", "Key", Constraint::Percentage(20), |row: &Project| {
-                row.key.clone()
-            })
+            Column::text(
+                "key",
+                "Key",
+                Constraint::Percentage(20),
+                |row: &Workspace| row.key.clone(),
+            )
             .sortable(|row| row.key.clone()),
             Column::text(
                 "name",
-                "Project",
+                "Workspace",
                 Constraint::Percentage(45),
-                |row: &Project| row.name.clone(),
+                |row: &Workspace| row.name.clone(),
             ),
             Column::text(
                 "lead",
                 "Lead",
                 Constraint::Percentage(35),
-                move |row: &Project| {
+                move |row: &Workspace| {
                     row.lead_person_id
                         .as_ref()
                         .and_then(|id| names.get(id))
@@ -521,16 +529,16 @@ fn project_table(rows: Vec<Project>, people: &[Person], selected: Option<&str>) 
     table
 }
 
-type ProjectKeyCommit = Box<dyn Fn(&str)>;
+type WorkspaceKeyCommit = Box<dyn Fn(&str)>;
 
-pub(crate) struct ProjectKeyInput {
+pub(crate) struct WorkspaceKeyInput {
     input: TextInput<AppMsg>,
     committed_value: String,
-    on_commit: Option<ProjectKeyCommit>,
-    on_invalid: Option<ProjectKeyCommit>,
+    on_commit: Option<WorkspaceKeyCommit>,
+    on_invalid: Option<WorkspaceKeyCommit>,
 }
 
-impl ProjectKeyInput {
+impl WorkspaceKeyInput {
     pub(crate) fn new(input: TextInput<AppMsg>) -> Self {
         let committed_value = input.current_value().to_string();
         Self {
@@ -552,7 +560,7 @@ impl ProjectKeyInput {
     }
 }
 
-impl TuiNode<AppMsg> for ProjectKeyInput {
+impl TuiNode<AppMsg> for WorkspaceKeyInput {
     fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
         self.input.measure(proposal)
     }
@@ -577,8 +585,8 @@ impl TuiNode<AppMsg> for ProjectKeyInput {
         let outcome = self.input.event(event, ctx);
         if commit {
             let value = self.input.current_value().to_string();
-            if Project::is_valid_key(&value) {
-                self.committed_value = Project::normalize_key(&value);
+            if Workspace::is_valid_key(&value) {
+                self.committed_value = Workspace::normalize_key(&value);
                 self.input.set_value(self.committed_value.clone());
                 if let Some(on_commit) = &self.on_commit {
                     on_commit(&self.committed_value);
@@ -589,7 +597,7 @@ impl TuiNode<AppMsg> for ProjectKeyInput {
                     on_invalid(&self.committed_value);
                 }
                 ctx.notify(tuicore::Notification::warning(
-                    "Invalid project key",
+                    "Invalid workspace key",
                     "Use 2-5 characters without spaces.",
                 ));
                 ctx.request_redraw();
@@ -623,13 +631,13 @@ impl TuiNode<AppMsg> for ProjectKeyInput {
     }
 }
 
-fn project_detail_form(
-    project: Option<&Project>,
+fn workspace_detail_form(
+    workspace: Option<&Workspace>,
     people: &[Person],
-    patches: ProjectPatchSink,
+    patches: WorkspacePatchSink,
     status: SaveStatusLine,
 ) -> Flex<AppMsg> {
-    let Some(project) = project else {
+    let Some(workspace) = workspace else {
         return Flex::column();
     };
     Flex::column()
@@ -637,20 +645,20 @@ fn project_detail_form(
         .child("save-status", status, FlexItem::content())
         .child(
             "key",
-            ProjectKeyInput::new(
+            WorkspaceKeyInput::new(
                 TextInput::new()
-                    .value(project.key.clone())
-                    .placeholder("Project key")
+                    .value(workspace.key.clone())
+                    .placeholder("Workspace key")
                     .panel("Key")
                     .max_len(5)
-                    .hotkey(keys::PROJECT_KEY_FIELD.hotkey()),
+                    .hotkey(keys::WORKSPACE_KEY_FIELD.hotkey()),
             )
             .on_commit({
                 let patches = Rc::clone(&patches);
                 move |value| {
                     patches
                         .borrow_mut()
-                        .push(ProjectPatch::Key(value.to_string()));
+                        .push(WorkspacePatch::Key(value.to_string()));
                 }
             }),
             FlexItem::fixed(3),
@@ -659,17 +667,17 @@ fn project_detail_form(
             "name",
             RequiredTextInput::new(
                 TextInput::new()
-                    .value(project.name.clone())
-                    .placeholder("Project name")
+                    .value(workspace.name.clone())
+                    .placeholder("Workspace name")
                     .panel("Name")
-                    .hotkey(keys::PROJECT_NAME_FIELD.hotkey()),
-                "Invalid project name",
+                    .hotkey(keys::WORKSPACE_NAME_FIELD.hotkey()),
+                "Invalid workspace name",
                 {
                     let patches = Rc::clone(&patches);
                     move |value| {
                         patches
                             .borrow_mut()
-                            .push(ProjectPatch::Name(value.to_string()));
+                            .push(WorkspacePatch::Name(value.to_string()));
                     }
                 },
             ),
@@ -678,15 +686,17 @@ fn project_detail_form(
         .child(
             "description",
             TextareaInput::new()
-                .value(project.description.clone())
-                .placeholder("Project description")
+                .value(workspace.description.clone())
+                .placeholder("Workspace description")
                 .panel("Description")
-                .hotkey(keys::PROJECT_DESCRIPTION_FIELD.hotkey())
-                .editor_hotkey(keys::PROJECT_DESCRIPTION_EDITOR.hotkey())
+                .hotkey(keys::WORKSPACE_DESCRIPTION_FIELD.hotkey())
+                .editor_hotkey(keys::WORKSPACE_DESCRIPTION_EDITOR.hotkey())
                 .on_edit_end({
                     let patches = Rc::clone(&patches);
                     move |value| {
-                        patches.borrow_mut().push(ProjectPatch::Description(value));
+                        patches
+                            .borrow_mut()
+                            .push(WorkspacePatch::Description(value));
                         AppMsg::Noop
                     }
                 })
@@ -698,12 +708,12 @@ fn project_detail_form(
             "lead",
             dropdown_single_optional(
                 "Lead",
-                "Select project lead",
+                "Select workspace lead",
                 person_choices(people),
-                project.lead_person_id.as_deref(),
-                move |id| patches.borrow_mut().push(ProjectPatch::LeadPerson(id)),
+                workspace.lead_person_id.as_deref(),
+                move |id| patches.borrow_mut().push(WorkspacePatch::LeadPerson(id)),
             )
-            .hotkey(keys::PROJECT_LEAD_FIELD.hotkey()),
+            .hotkey(keys::WORKSPACE_LEAD_FIELD.hotkey()),
             FlexItem::fixed(3),
         )
 }
@@ -718,10 +728,10 @@ mod tests {
     use tuicore::{FocusRequest, HotkeyEvent, Key, KeyEvent, KeyModifiers};
 
     #[test]
-    fn invalid_project_key_commit_restores_original_and_notifies() {
+    fn invalid_workspace_key_commit_restores_original_and_notifies() {
         let reverted = Rc::new(RefCell::new(None));
         let mut input =
-            ProjectKeyInput::new(TextInput::new().value("CORE").focused(true).max_len(5))
+            WorkspaceKeyInput::new(TextInput::new().value("CORE").focused(true).max_len(5))
                 .on_invalid({
                     let reverted = Rc::clone(&reverted);
                     move |value| *reverted.borrow_mut() = Some(value.to_string())
@@ -746,14 +756,14 @@ mod tests {
         assert_eq!(
             effects.notifications,
             vec![tuicore::Notification::warning(
-                "Invalid project key",
+                "Invalid workspace key",
                 "Use 2-5 characters without spaces.",
             )]
         );
     }
 
     #[test]
-    fn management_workspace_renders_and_edits_project() {
+    fn management_workspace_renders_and_edits_workspace() {
         let person = Person {
             id: "person-1".into(),
             name: "Ada".into(),
@@ -761,8 +771,8 @@ mod tests {
             about: "Owns architecture decisions".into(),
             active: true,
         };
-        let project = Project {
-            id: "project-1".into(),
+        let workspace = Workspace {
+            id: "workspace-1".into(),
             key: "CORE".into(),
             name: "Core".into(),
             description: "Platform".into(),
@@ -771,14 +781,14 @@ mod tests {
         let (_runtime, context, store) = test_context(WorkspaceSnapshot {
             tasks: vec![],
             people: vec![person],
-            projects: vec![project],
+            workspaces: vec![workspace],
             tags: vec![],
         });
-        let mut workspace = ProjectsWorkspace::new(context);
+        let mut workspace = WorkspaceManagement::new(context);
         let area = Rect::new(0, 0, 100, 30);
         workspace.layout(area, &mut LayoutCtx::new());
         let text = rendered_text(&workspace, area);
-        for expected in ["Project", "CORE", "Core", "Ada", "Description"] {
+        for expected in ["Workspace", "CORE", "Core", "Ada", "Description"] {
             assert!(text.contains(expected), "missing {expected}");
         }
         workspace
@@ -786,28 +796,28 @@ mod tests {
             .second_mut()
             .patches
             .borrow_mut()
-            .push(ProjectPatch::Name("Foundation".into()));
+            .push(WorkspacePatch::Name("Foundation".into()));
         assert!(workspace.sync_detail_changes());
-        assert_eq!(store.borrow().state().projects[0].name, "Foundation");
+        assert_eq!(store.borrow().state().workspaces[0].name, "Foundation");
     }
 
     #[test]
-    fn local_person_rename_updates_project_table_and_lead_choice() {
+    fn local_person_rename_updates_workspace_table_and_lead_choice() {
         let person = Person::new("person-1".into(), "Ada".into(), String::new());
-        let mut project = Project::new(
-            "project-1".into(),
+        let mut workspace = Workspace::new(
+            "workspace-1".into(),
             "CORE".into(),
             "Core".into(),
             String::new(),
         );
-        project.lead_person_id = Some(person.id.clone());
+        workspace.lead_person_id = Some(person.id.clone());
         let (_runtime, context, store) = test_context(WorkspaceSnapshot {
             tasks: vec![],
             people: vec![person],
-            projects: vec![project],
+            workspaces: vec![workspace],
             tags: vec![],
         });
-        let mut workspace = ProjectsWorkspace::new(context);
+        let mut workspace = WorkspaceManagement::new(context);
         store.borrow_mut().dispatch(AppEvent::PatchPerson {
             person_id: "person-1".into(),
             patch: PersonPatch::Name("Grace".into()),
@@ -825,22 +835,22 @@ mod tests {
     }
 
     #[test]
-    fn local_person_deletion_removes_stale_project_lead_name() {
+    fn local_person_deletion_removes_stale_workspace_lead_name() {
         let person = Person::new("person-1".into(), "Ada".into(), String::new());
-        let mut project = Project::new(
-            "project-1".into(),
+        let mut workspace = Workspace::new(
+            "workspace-1".into(),
             "CORE".into(),
             "Core".into(),
             String::new(),
         );
-        project.lead_person_id = Some(person.id.clone());
+        workspace.lead_person_id = Some(person.id.clone());
         let (_runtime, context, store) = test_context(WorkspaceSnapshot {
             tasks: vec![],
             people: vec![person],
-            projects: vec![project],
+            workspaces: vec![workspace],
             tags: vec![],
         });
-        let mut workspace = ProjectsWorkspace::new(context);
+        let mut workspace = WorkspaceManagement::new(context);
         store
             .borrow_mut()
             .dispatch(AppEvent::PersonDeleted("person-1".into()));
@@ -850,13 +860,13 @@ mod tests {
         let text = rendered_text(&workspace, area);
 
         assert!(!text.contains("Ada"));
-        assert_eq!(store.borrow().state().projects[0].lead_person_id, None);
+        assert_eq!(store.borrow().state().workspaces[0].lead_person_id, None);
     }
 
     #[test]
-    fn delete_hotkey_requests_confirmation_for_selected_project() {
-        let project = Project::new(
-            "project-1".into(),
+    fn delete_hotkey_requests_confirmation_for_selected_workspace() {
+        let workspace = Workspace::new(
+            "workspace-1".into(),
             "CORE".into(),
             "Core".into(),
             String::new(),
@@ -864,10 +874,10 @@ mod tests {
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
             tasks: vec![],
             people: vec![],
-            projects: vec![project],
+            workspaces: vec![workspace],
             tags: vec![],
         });
-        let mut workspace = ProjectsWorkspace::new(context);
+        let mut workspace = WorkspaceManagement::new(context);
         workspace.table_focused = true;
         let mut ctx = EventCtx::default();
 
@@ -884,16 +894,16 @@ mod tests {
         assert!(matches!(
             ctx.messages(),
             [AppMsg::OpenDeleteManagement {
-                kind: ManagementDialogKind::Projects,
+                kind: ManagementDialogKind::Workspaces,
                 entity_id,
-            }] if entity_id == "project-1"
+            }] if entity_id == "workspace-1"
         ));
     }
 
     #[test]
-    fn delete_hotkey_does_nothing_when_search_has_no_highlighted_project() {
-        let project = Project::new(
-            "project-1".into(),
+    fn delete_hotkey_does_nothing_when_search_has_no_highlighted_workspace() {
+        let workspace = Workspace::new(
+            "workspace-1".into(),
             "CORE".into(),
             "Core".into(),
             String::new(),
@@ -901,16 +911,16 @@ mod tests {
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
             tasks: vec![],
             people: vec![],
-            projects: vec![project],
+            workspaces: vec![workspace],
             tags: vec![],
         });
-        let mut workspace = ProjectsWorkspace::new(context);
+        let mut workspace = WorkspaceManagement::new(context);
         workspace.table_focused = true;
         workspace.split.first_mut().set_search_query("App");
         workspace.sync_table_events(&mut EventCtx::default());
         let area = Rect::new(0, 0, 100, 30);
         workspace.layout(area, &mut LayoutCtx::new());
-        assert!(rendered_text(&workspace, area).contains("No projects match your search"));
+        assert!(rendered_text(&workspace, area).contains("No workspaces match your search"));
         let mut ctx = EventCtx::default();
 
         let outcome = workspace.handle_workspace_event(
@@ -927,19 +937,19 @@ mod tests {
     }
 
     #[test]
-    fn search_match_after_no_match_shows_different_project_detail() {
+    fn search_match_after_no_match_shows_different_workspace_detail() {
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
             tasks: vec![],
             people: vec![],
-            projects: vec![
-                Project::new(
-                    "project-1".into(),
+            workspaces: vec![
+                Workspace::new(
+                    "workspace-1".into(),
                     "CORE".into(),
                     "Core".into(),
                     String::new(),
                 ),
-                Project::new(
-                    "project-2".into(),
+                Workspace::new(
+                    "workspace-2".into(),
                     "APP".into(),
                     "App".into(),
                     String::new(),
@@ -947,7 +957,7 @@ mod tests {
             ],
             tags: vec![],
         });
-        let mut workspace = ProjectsWorkspace::new(context);
+        let mut workspace = WorkspaceManagement::new(context);
         let mut ctx = EventCtx::default();
 
         workspace.split.first_mut().set_search_query("nobody");
@@ -957,30 +967,30 @@ mod tests {
 
         assert_eq!(
             workspace.split.first().highlighted_id().as_deref(),
-            Some("project-2")
+            Some("workspace-2")
         );
         assert_eq!(
-            workspace.split.second().project_id.as_deref(),
-            Some("project-2")
+            workspace.split.second().workspace_id.as_deref(),
+            Some("workspace-2")
         );
         assert!(workspace.split.is_detail_visible());
     }
 
     #[test]
-    fn person_refresh_preserves_project_search_and_visible_detail() {
+    fn person_refresh_preserves_workspace_search_and_visible_detail() {
         let person = Person::new("person-1".into(), "Ada".into(), String::new());
         let (_runtime, context, store) = test_context(WorkspaceSnapshot {
             tasks: vec![],
             people: vec![person],
-            projects: vec![
-                Project::new(
-                    "project-1".into(),
+            workspaces: vec![
+                Workspace::new(
+                    "workspace-1".into(),
                     "CORE".into(),
                     "Core".into(),
                     String::new(),
                 ),
-                Project::new(
-                    "project-2".into(),
+                Workspace::new(
+                    "workspace-2".into(),
                     "APP".into(),
                     "App".into(),
                     String::new(),
@@ -988,7 +998,7 @@ mod tests {
             ],
             tags: vec![],
         });
-        let mut workspace = ProjectsWorkspace::new(context);
+        let mut workspace = WorkspaceManagement::new(context);
         workspace.split.first_mut().set_search_query("App");
         workspace.sync_table_events(&mut EventCtx::default());
         store.borrow_mut().dispatch(AppEvent::PatchPerson {
@@ -1001,18 +1011,18 @@ mod tests {
         assert_eq!(workspace.split.first().transform_state().search, "App");
         assert_eq!(
             workspace.split.first().highlighted_id().as_deref(),
-            Some("project-2")
+            Some("workspace-2")
         );
         assert_eq!(
-            workspace.split.second().project_id.as_deref(),
-            Some("project-2")
+            workspace.split.second().workspace_id.as_deref(),
+            Some("workspace-2")
         );
         assert!(workspace.split.is_detail_visible());
     }
 
     #[test]
-    fn projects_table_disables_filter_mode() {
-        let mut table = project_table(Vec::new(), &[], None);
+    fn workspaces_table_disables_filter_mode() {
+        let mut table = workspace_table(Vec::new(), &[], None);
 
         let outcome = table.on_key(tuicore::Key::Char('f'), Rect::new(0, 0, 80, 20));
 
@@ -1022,23 +1032,23 @@ mod tests {
     }
 
     #[test]
-    fn newly_created_project_is_selected_and_shown_in_detail() {
+    fn newly_created_workspace_is_selected_and_shown_in_detail() {
         let (_runtime, context, store) = test_context(WorkspaceSnapshot {
             tasks: vec![],
             people: vec![],
-            projects: vec![Project::new(
-                "project-1".into(),
+            workspaces: vec![Workspace::new(
+                "workspace-1".into(),
                 "CORE".into(),
                 "Core".into(),
                 String::new(),
             )],
             tags: vec![],
         });
-        let mut workspace = ProjectsWorkspace::new(context);
+        let mut workspace = WorkspaceManagement::new(context);
         store
             .borrow_mut()
-            .dispatch(AppEvent::ProjectCreated(Project::new(
-                "project-2".into(),
+            .dispatch(AppEvent::WorkspaceCreated(Workspace::new(
+                "workspace-2".into(),
                 "APP".into(),
                 "App".into(),
                 String::new(),
@@ -1048,22 +1058,22 @@ mod tests {
 
         assert_eq!(
             workspace.split.first().highlighted_id().as_deref(),
-            Some("project-2")
+            Some("workspace-2")
         );
         assert_eq!(
             workspace.split.first().selected_id().as_deref(),
-            Some("project-2")
+            Some("workspace-2")
         );
         assert_eq!(
-            workspace.split.second().project_id.as_deref(),
-            Some("project-2")
+            workspace.split.second().workspace_id.as_deref(),
+            Some("workspace-2")
         );
     }
 
     #[test]
-    fn escape_from_project_detail_focuses_table_before_closing_dialog() {
-        let project = Project::new(
-            "project-1".into(),
+    fn escape_from_workspace_detail_focuses_table_before_closing_dialog() {
+        let workspace = Workspace::new(
+            "workspace-1".into(),
             "CORE".into(),
             "Core".into(),
             "Platform".into(),
@@ -1071,7 +1081,7 @@ mod tests {
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
             tasks: vec![],
             people: vec![],
-            projects: vec![project],
+            workspaces: vec![workspace],
             tags: vec![],
         });
         let mut dialog = dialog(context);
@@ -1087,7 +1097,7 @@ mod tests {
                     .iter()
                     .any(|key| key.as_str() == "description")
             })
-            .expect("project description should be focusable")
+            .expect("workspace description should be focusable")
             .clone();
 
         for key in [
@@ -1111,23 +1121,23 @@ mod tests {
     }
 
     #[test]
-    fn project_detail_controls_register_requested_hotkeys() {
-        let project = Project::new(
-            "project-1".into(),
+    fn workspace_detail_controls_register_requested_hotkeys() {
+        let workspace = Workspace::new(
+            "workspace-1".into(),
             "CORE".into(),
             "Core".into(),
             "Platform".into(),
         );
-        let mut detail = ProjectDetailForm::new(Some(&project), &[], None);
+        let mut detail = WorkspaceDetailForm::new(Some(&workspace), &[], None);
         let mut layout = LayoutCtx::new();
         detail.layout(Rect::new(0, 0, 80, 24), &mut layout);
 
         for hotkey in [
-            keys::PROJECT_KEY_FIELD.hotkey(),
-            keys::PROJECT_NAME_FIELD.hotkey(),
-            keys::PROJECT_DESCRIPTION_FIELD.hotkey(),
-            keys::PROJECT_DESCRIPTION_EDITOR.hotkey(),
-            keys::PROJECT_LEAD_FIELD.hotkey(),
+            keys::WORKSPACE_KEY_FIELD.hotkey(),
+            keys::WORKSPACE_NAME_FIELD.hotkey(),
+            keys::WORKSPACE_DESCRIPTION_FIELD.hotkey(),
+            keys::WORKSPACE_DESCRIPTION_EDITOR.hotkey(),
+            keys::WORKSPACE_LEAD_FIELD.hotkey(),
         ] {
             assert_eq!(
                 layout
@@ -1146,14 +1156,14 @@ mod tests {
             .find(|target| {
                 target
                     .hotkey_sequences
-                    .contains(&keys::PROJECT_DESCRIPTION_EDITOR.hotkey())
+                    .contains(&keys::WORKSPACE_DESCRIPTION_EDITOR.hotkey())
             })
             .expect("description editor hotkey should have a target");
         let mut ctx = EventCtx::default();
         let outcome = detail.dispatch_event(
             &EventRoute::new(description.path.clone()),
             &TuiEvent::Hotkey(HotkeyEvent::Commit(
-                keys::PROJECT_DESCRIPTION_EDITOR.hotkey(),
+                keys::WORKSPACE_DESCRIPTION_EDITOR.hotkey(),
             )),
             &mut ctx,
         );

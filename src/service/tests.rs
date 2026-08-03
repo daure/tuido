@@ -26,7 +26,7 @@ fn task_create(title: &str) -> TaskCreate {
         priority: "medium".into(),
         snoozed_until: None,
         people_ids: Vec::new(),
-        project_id: None,
+        workspace_id: None,
         tag_ids: Vec::new(),
         links: Vec::new(),
     }
@@ -43,7 +43,7 @@ fn omitted_task_state_defaults_to_backlog() {
 }
 
 #[test]
-fn task_ids_are_sequential_and_use_the_project_key_prefix() {
+fn task_ids_are_sequential_and_use_the_workspace_key_prefix() {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -53,7 +53,7 @@ fn task_ids_are_sequential_and_use_the_project_key_prefix() {
         for key in ["A", "ABCDEF", "A B", " AB", "AB "] {
             assert!(matches!(
                 service
-                    .create_project(ProjectInput {
+                    .create_workspace(WorkspaceInput {
                         key: key.into(),
                         name: "Invalid".into(),
                         description: String::new(),
@@ -63,8 +63,8 @@ fn task_ids_are_sequential_and_use_the_project_key_prefix() {
                 Err(ServiceError::Invalid(_))
             ));
         }
-        let project = service
-            .create_project(ProjectInput {
+        let workspace = service
+            .create_workspace(WorkspaceInput {
                 key: "core".into(),
                 name: "Core".into(),
                 description: String::new(),
@@ -73,7 +73,7 @@ fn task_ids_are_sequential_and_use_the_project_key_prefix() {
             .await
             .unwrap();
         let mut first = task_create("First");
-        first.project_id = Some(project.value.id);
+        first.workspace_id = Some(workspace.value.id);
 
         let first = service.create_task(first).await.unwrap();
         let second = service.create_task(task_create("Second")).await.unwrap();
@@ -195,15 +195,15 @@ fn app_settings_are_persisted_and_replace_previous_values() {
 }
 
 #[test]
-fn default_project_is_applied_to_new_tasks_and_can_be_unset() {
+fn default_workspace_is_applied_to_new_tasks_and_can_be_unset() {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
     runtime.block_on(async {
         let service = test_service().await;
-        let project = service
-            .create_project(ProjectInput {
+        let workspace = service
+            .create_workspace(WorkspaceInput {
                 key: "DEF".into(),
                 name: "Default".into(),
                 description: String::new(),
@@ -213,23 +213,29 @@ fn default_project_is_applied_to_new_tasks_and_can_be_unset() {
             .unwrap();
 
         service
-            .set_app_setting(crate::domain::DEFAULT_PROJECT_SETTING, &project.value.id)
+            .set_app_setting(
+                crate::domain::DEFAULT_WORKSPACE_SETTING,
+                &workspace.value.id,
+            )
             .await
             .unwrap();
         let defaulted = service.create_task(task_create("Defaulted")).await.unwrap();
-        assert_eq!(defaulted.value.project_id, Some(project.value.id.clone()));
+        assert_eq!(
+            defaulted.value.workspace_id,
+            Some(workspace.value.id.clone())
+        );
 
         service
-            .set_app_setting(crate::domain::DEFAULT_PROJECT_SETTING, "")
+            .set_app_setting(crate::domain::DEFAULT_WORKSPACE_SETTING, "")
             .await
             .unwrap();
         let unset = service.create_task(task_create("Unset")).await.unwrap();
-        assert_eq!(unset.value.project_id, None);
+        assert_eq!(unset.value.workspace_id, None);
     });
 }
 
 #[test]
-fn task_project_relation_rejects_a_second_project() {
+fn task_workspace_relation_rejects_a_second_workspace() {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -237,7 +243,7 @@ fn task_project_relation_rejects_a_second_project() {
     runtime.block_on(async {
         let service = test_service().await;
         let first = service
-            .create_project(ProjectInput {
+            .create_workspace(WorkspaceInput {
                 key: "ONE".into(),
                 name: "One".into(),
                 description: String::new(),
@@ -246,7 +252,7 @@ fn task_project_relation_rejects_a_second_project() {
             .await
             .unwrap();
         let second = service
-            .create_project(ProjectInput {
+            .create_workspace(WorkspaceInput {
                 key: "TWO".into(),
                 name: "Two".into(),
                 description: String::new(),
@@ -254,12 +260,12 @@ fn task_project_relation_rejects_a_second_project() {
             })
             .await
             .unwrap();
-        let mut input = task_create("Single project");
-        input.project_id = Some(first.value.id);
+        let mut input = task_create("Single workspace");
+        input.workspace_id = Some(first.value.id);
         let task = service.create_task(input).await.unwrap();
 
         let duplicate = sqlx::query(
-            "INSERT INTO task_projects (task_id, project_id, sort_order) VALUES (?, ?, 1)",
+            "INSERT INTO task_workspaces (task_id, workspace_id, sort_order) VALUES (?, ?, 1)",
         )
         .bind(task.value.id)
         .bind(second.value.id)
@@ -286,7 +292,7 @@ fn explicit_expiry_processing_unsnoozes_due_tasks() {
             priority: "medium".into(),
             snoozed_until: Some(snoozed_until.into()),
             people_ids: Vec::new(),
-            project_id: None,
+            workspace_id: None,
             tag_ids: Vec::new(),
             links: Vec::new(),
         };
@@ -354,7 +360,7 @@ fn backlog_tasks_round_trip_through_persistence() {
                 priority: "medium".into(),
                 snoozed_until: None,
                 people_ids: Vec::new(),
-                project_id: None,
+                workspace_id: None,
                 tag_ids: Vec::new(),
                 links: Vec::new(),
             })
@@ -390,7 +396,7 @@ fn task_tags_by_label_reuse_create_replace_clear_and_rollback_atomically() {
                 priority: "medium".into(),
                 snoozed_until: None,
                 people_ids: Vec::new(),
-                project_id: None,
+                workspace_id: None,
                 tag_ids: Vec::new(),
                 links: Vec::new(),
             })
@@ -486,8 +492,8 @@ fn filtered_workspace_filters_tasks_and_returns_complete_entity_catalogs() {
             })
             .await
             .unwrap();
-        let project = service
-            .create_project(ProjectInput {
+        let workspace = service
+            .create_workspace(WorkspaceInput {
                 key: "LNCH".into(),
                 name: "Launch".into(),
                 description: String::new(),
@@ -496,7 +502,7 @@ fn filtered_workspace_filters_tasks_and_returns_complete_entity_catalogs() {
             .await
             .unwrap();
         service
-            .create_project(ProjectInput {
+            .create_workspace(WorkspaceInput {
                 key: "OTHER".into(),
                 name: "Unrelated".into(),
                 description: String::new(),
@@ -523,7 +529,7 @@ fn filtered_workspace_filters_tasks_and_returns_complete_entity_catalogs() {
                 priority: "high".into(),
                 snoozed_until: None,
                 people_ids: Vec::new(),
-                project_id: Some(project.value.id.clone()),
+                workspace_id: Some(workspace.value.id.clone()),
                 tag_ids: vec![tag.value.id.clone()],
                 links: Vec::new(),
             })
@@ -538,7 +544,7 @@ fn filtered_workspace_filters_tasks_and_returns_complete_entity_catalogs() {
                 priority: "medium".into(),
                 snoozed_until: None,
                 people_ids: Vec::new(),
-                project_id: None,
+                workspace_id: None,
                 tag_ids: Vec::new(),
                 links: Vec::new(),
             })
@@ -550,7 +556,7 @@ fn filtered_workspace_filters_tasks_and_returns_complete_entity_catalogs() {
                 states: vec!["todo".into()],
                 priorities: vec!["high".into()],
                 sizes: vec!["small".into()],
-                project_ids: vec![project.value.id.clone()],
+                workspace_ids: vec![workspace.value.id.clone()],
                 tag_ids: vec![tag.value.id.clone()],
                 query: Some("selection".into()),
                 ..WorkspaceFilter::default()
@@ -566,7 +572,7 @@ fn filtered_workspace_filters_tasks_and_returns_complete_entity_catalogs() {
                 .iter()
                 .any(|candidate| candidate.value.id == person.value.id)
         );
-        assert_eq!(workspace.projects.len(), 2);
+        assert_eq!(workspace.workspaces.len(), 2);
         assert_eq!(workspace.tags.len(), 2);
 
         let with_resolved = service
@@ -626,7 +632,7 @@ fn public_task_inputs_reject_legacy_state_aliases() {
                     priority: "medium".into(),
                     snoozed_until: None,
                     people_ids: Vec::new(),
-                    project_id: None,
+                    workspace_id: None,
                     tag_ids: Vec::new(),
                     links: Vec::new(),
                 })
@@ -651,7 +657,7 @@ fn public_task_inputs_reject_legacy_state_aliases() {
                 priority: "medium".into(),
                 snoozed_until: None,
                 people_ids: Vec::new(),
-                project_id: None,
+                workspace_id: None,
                 tag_ids: Vec::new(),
                 links: Vec::new(),
             })
@@ -667,7 +673,7 @@ fn public_task_inputs_reject_legacy_state_aliases() {
                 priority: "medium".into(),
                 snoozed_until: None,
                 people_ids: Vec::new(),
-                project_id: None,
+                workspace_id: None,
                 tag_ids: Vec::new(),
                 links: Vec::new(),
                 relations: Vec::new(),
@@ -792,7 +798,7 @@ fn malformed_task_snooze_update_is_rejected_without_poisoning_workspace() {
                 priority: "medium".into(),
                 snoozed_until: Some("not-a-date".into()),
                 people_ids: Vec::new(),
-                project_id: None,
+                workspace_id: None,
                 tag_ids: Vec::new(),
                 links: Vec::new(),
                 relations: Vec::new(),
@@ -884,14 +890,14 @@ fn cascade_deletes_increment_every_affected_revision() {
         let service = test_service().await;
         let person = Person::new("person".into(), "Ada".into(), String::new());
         service.create_person_entity(person).await.unwrap();
-        let mut project = Project::new(
-            "project".into(),
+        let mut workspace = Workspace::new(
+            "workspace".into(),
             "CORE".into(),
             "Core".into(),
             String::new(),
         );
-        project.lead_person_id = Some("person".into());
-        service.create_project_entity(project).await.unwrap();
+        workspace.lead_person_id = Some("person".into());
+        service.create_workspace_entity(workspace).await.unwrap();
         service
             .create_tag_entity(Tag::new("tag".into(), "api".into()))
             .await
@@ -903,25 +909,25 @@ fn cascade_deletes_increment_every_affected_revision() {
             TaskSize::Small,
         );
         task.people_ids = vec!["person".into()];
-        task.project_id = Some("project".into());
+        task.workspace_id = Some("workspace".into());
         task.tag_ids = vec!["tag".into()];
         service.create_task_entity(task).await.unwrap();
 
         service.delete_person("person", 1).await.unwrap();
         assert_eq!(service.get_task("CORE-1").await.unwrap().revision, 2);
-        let project = service
+        let workspace = service
             .workspace()
             .await
             .unwrap()
-            .projects
+            .workspaces
             .into_iter()
             .next()
             .unwrap();
-        assert_eq!(project.revision, 2);
-        assert_eq!(project.value.lead_person_id, None);
+        assert_eq!(workspace.revision, 2);
+        assert_eq!(workspace.value.lead_person_id, None);
         assert!(matches!(
             service
-                .patch_project("project".into(), 1, ProjectPatch::Name("Stale".into()))
+                .patch_workspace("workspace".into(), 1, WorkspacePatch::Name("Stale".into()))
                 .await,
             Err(ServiceError::Conflict {
                 actual: Some(2),
@@ -929,7 +935,7 @@ fn cascade_deletes_increment_every_affected_revision() {
             })
         ));
 
-        service.delete_project("project", 2).await.unwrap();
+        service.delete_workspace("workspace", 2).await.unwrap();
         assert_eq!(service.get_task("CORE-1").await.unwrap().revision, 3);
         service.delete_tag("tag", 1).await.unwrap();
         assert_eq!(service.get_task("CORE-1").await.unwrap().revision, 4);
@@ -958,8 +964,8 @@ fn empty_management_updates_are_rejected() {
             .await
             .unwrap();
         service
-            .create_project_entity(Project::new(
-                "project".into(),
+            .create_workspace_entity(Workspace::new(
+                "workspace".into(),
                 "CORE".into(),
                 "Core".into(),
                 String::new(),
@@ -980,7 +986,7 @@ fn empty_management_updates_are_rejected() {
         for key in ["A", "ABCDEF", "A B", " AB", "AB "] {
             assert!(matches!(
                 service
-                    .patch_project("project".into(), 1, ProjectPatch::Key(key.into()))
+                    .patch_workspace("workspace".into(), 1, WorkspacePatch::Key(key.into()))
                     .await,
                 Err(ServiceError::Invalid(_))
             ));
@@ -995,15 +1001,15 @@ fn empty_management_updates_are_rejected() {
 }
 
 #[test]
-fn project_key_can_be_edited_when_valid() {
+fn workspace_key_can_be_edited_when_valid() {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
     runtime.block_on(async {
         let service = test_service().await;
-        let project = service
-            .create_project(ProjectInput {
+        let workspace = service
+            .create_workspace(WorkspaceInput {
                 key: "CORE".into(),
                 name: "Core".into(),
                 description: String::new(),
@@ -1013,19 +1019,23 @@ fn project_key_can_be_edited_when_valid() {
             .unwrap();
 
         service
-            .patch_project(project.value.id.clone(), 1, ProjectPatch::Key("api".into()))
+            .patch_workspace(
+                workspace.value.id.clone(),
+                1,
+                WorkspacePatch::Key("api".into()),
+            )
             .await
             .unwrap();
 
-        let project = service
+        let workspace = service
             .workspace()
             .await
             .unwrap()
-            .projects
+            .workspaces
             .into_iter()
-            .find(|candidate| candidate.value.id == project.value.id)
+            .find(|candidate| candidate.value.id == workspace.value.id)
             .unwrap();
-        assert_eq!(project.value.key, "API");
+        assert_eq!(workspace.value.key, "API");
     });
 }
 
@@ -1106,7 +1116,10 @@ fn task_relations_are_bidirectional_and_replaceable_from_either_task() {
     runtime.block_on(async {
         let service = test_service().await;
         let first = service.create_task(task_create("First")).await.unwrap();
-        let second = service.create_task(task_create("Second")).await.unwrap();
+        let mut second_input = task_create("Second");
+        second_input.description = "Linked task details".into();
+        second_input.links = vec!["https://example.com/second".into()];
+        let second = service.create_task(second_input).await.unwrap();
 
         service
             .set_task_relations(
@@ -1125,9 +1138,28 @@ fn task_relations_are_bidirectional_and_replaceable_from_either_task() {
         assert_eq!(first.revision, 2);
         assert_eq!(second.revision, 2);
         assert_eq!(first.value.relations[0].relation_type, "blocks");
-        assert_eq!(first.value.relations[0].task_id, second.value.id);
+        assert_eq!(first.value.relations[0].task.id, second.value.id);
+        assert_eq!(first.value.relations[0].task.title, second.value.title);
+        assert_eq!(
+            first.value.relations[0].task.workspace_id,
+            second.value.workspace_id
+        );
         assert_eq!(second.value.relations[0].relation_type, "is_blocked_by");
-        assert_eq!(second.value.relations[0].task_id, first.value.id);
+        assert_eq!(second.value.relations[0].task.id, first.value.id);
+
+        let details = service.get_task_details(&first.value.id).await.unwrap();
+        let linked = &details.value.relations[0].task;
+        assert_eq!(linked.id, second.value.id);
+        assert_eq!(linked.title, "Second");
+        assert_eq!(linked.description, "Linked task details");
+        assert_eq!(linked.links, vec!["https://example.com/second"]);
+        assert_eq!(linked.relations[0].task.id, first.value.id);
+        let json = serde_json::to_value(details).unwrap();
+        assert!(
+            json["value"]["relations"][0]["task"]["relations"][0]["task"]
+                .get("relations")
+                .is_none()
+        );
 
         service
             .set_task_relations(second.value.id.clone(), second.revision, Vec::new())
@@ -1164,7 +1196,7 @@ fn full_task_update_replaces_relations_and_bumps_related_revision() {
                 priority: first.value.priority,
                 snoozed_until: first.value.snoozed_until,
                 people_ids: first.value.people_ids,
-                project_id: first.value.project_id,
+                workspace_id: first.value.workspace_id,
                 tag_ids: first.value.tag_ids,
                 links: first.value.links,
                 relations: vec![TaskRelationInput {
@@ -1176,7 +1208,7 @@ fn full_task_update_replaces_relations_and_bumps_related_revision() {
             .await
             .unwrap();
 
-        assert_eq!(updated.value.relations[0].task_id, second.value.id);
+        assert_eq!(updated.value.relations[0].task.id, second.value.id);
         assert_eq!(updated.value.relations[0].relation_type, "blocks");
         let second = service.get_task(&second.value.id).await.unwrap();
         assert_eq!(second.revision, 2);

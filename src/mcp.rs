@@ -13,13 +13,13 @@ use serde::{Deserialize, Serialize};
 use crate::{
     domain::{TaskPatch, TaskState},
     service::{
-        ChecklistItemInput, PersonInput, PersonView, ProjectInput, ProjectView, ServiceError,
-        TagInput, TagView, TaskCreate, TaskRelationInput, TaskUpdate, TaskView, TuidoService,
-        Versioned, WorkspaceFilter, WorkspaceView,
+        ChecklistItemInput, PersonInput, PersonView, ServiceError, TagInput, TagView, TaskCreate,
+        TaskDetailsView, TaskRelationInput, TaskUpdate, TaskView, TuidoService, Versioned,
+        WorkspaceFilter, WorkspaceGraph, WorkspaceInput, WorkspaceView,
     },
 };
 
-const MCP_INSTRUCTIONS: &str = "Read and mutate Tuido tasks, task checklists, people, projects, and tags. Task IDs use PROJECT_KEY-number, or number when no project was set at creation. Replace checklists as complete ordered trees rather than issuing granular item actions. Treat task state as user-facing Status, not Type or Workflow. Task people are people involved besides the workspace owner; never describe them as assignees or owners. Revisions are internal optimistic-concurrency tokens: use the latest entity revision as expected_revision for mutations, but omit revisions from user-facing task tables and summaries unless the user asks for them.";
+const MCP_INSTRUCTIONS: &str = "Read and mutate Tuido tasks, task checklists, people, workspaces, and tags. Task IDs use WORKSPACE_KEY-number, or number when no workspace was set at creation. Replace checklists as complete ordered trees rather than issuing granular item actions. Treat task state as user-facing Status, not Type or Workflow. Task people are people involved besides the workspace owner; never describe them as assignees or owners. Revisions are internal optimistic-concurrency tokens: use the latest entity revision as expected_revision for mutations, but omit revisions from user-facing task tables and summaries unless the user asks for them.";
 
 #[derive(Clone)]
 struct McpServer {
@@ -39,6 +39,11 @@ impl McpServer {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct Id {
     id: String,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+struct WorkspaceKey {
+    /// Unique workspace key, normalized to uppercase.
+    key: String,
 }
 #[derive(Debug, Deserialize, JsonSchema)]
 struct Expected {
@@ -102,12 +107,12 @@ struct PersonUpdate {
     value: PersonInput,
 }
 #[derive(Debug, Deserialize, JsonSchema)]
-struct ProjectUpdate {
+struct WorkspaceUpdate {
     id: String,
     #[schemars(schema_with = "crate::service::revision_schema")]
     expected_revision: u64,
     #[serde(flatten)]
-    value: ProjectInput,
+    value: WorkspaceInput,
 }
 #[derive(Debug, Deserialize, JsonSchema)]
 struct TagUpdate {
@@ -130,8 +135,15 @@ struct PeopleList {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-struct ProjectList {
-    projects: Vec<Versioned<ProjectView>>,
+struct WorkspaceList {
+    workspaces: Vec<Versioned<WorkspaceDetailsView>>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct WorkspaceDetailsView {
+    #[serde(flatten)]
+    workspace: WorkspaceView,
+    tasks: Vec<Versioned<TaskView>>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -146,12 +158,12 @@ fn mcp_error(error: ServiceError) -> String {
 #[tool_router]
 impl McpServer {
     #[tool(
-        description = "Get a normalized workspace graph. Excludes done and rejected tasks by default; set include_resolved=true to include them. Filters apply to tasks using OR within each property and AND across properties. People, projects, and tags always contain the complete workspace catalogs so their IDs can be used when creating or updating tasks. Task state is user-facing status. Task people are involved people besides the workspace owner, never assignees. Revisions are internal concurrency tokens and should normally be omitted from user-facing summaries."
+        description = "Get a normalized workspace graph. Excludes done and rejected tasks by default; set include_resolved=true to include them. Filters apply to tasks using OR within each property and AND across properties. People, workspaces, and tags always contain the complete workspace catalogs so their IDs can be used when creating or updating tasks. Task state is user-facing status. Task people are involved people besides the workspace owner, never assignees. Revisions are internal concurrency tokens and should normally be omitted from user-facing summaries."
     )]
     async fn get_workspace(
         &self,
         Parameters(filter): Parameters<WorkspaceFilter>,
-    ) -> Result<Json<WorkspaceView>, String> {
+    ) -> Result<Json<WorkspaceGraph>, String> {
         preflight_task_expirations(&self.service).await?;
         self.service
             .filtered_workspace(filter)
@@ -159,14 +171,16 @@ impl McpServer {
             .map(Json)
             .map_err(mcp_error)
     }
-    #[tool(description = "Get one task by id with current revision")]
+    #[tool(
+        description = "Get one task by id with current revision and full details for directly linked issues"
+    )]
     async fn get_task(
         &self,
         Parameters(v): Parameters<Id>,
-    ) -> Result<Json<Versioned<TaskView>>, String> {
+    ) -> Result<Json<Versioned<TaskDetailsView>>, String> {
         preflight_task_expirations(&self.service).await?;
         self.service
-            .get_task(&v.id)
+            .get_task_details(&v.id)
             .await
             .map(Json)
             .map_err(mcp_error)
@@ -406,57 +420,69 @@ impl McpServer {
             .map_err(mcp_error)
     }
 
-    #[tool(description = "List projects with revisions")]
-    async fn list_projects(&self) -> Result<Json<ProjectList>, String> {
-        Ok(Json(ProjectList {
-            projects: self.service.workspace().await.map_err(mcp_error)?.projects,
+    #[tool(
+        description = "Get all workspaces with their tasks. Task issue links contain only relation type and linked task workspace/id/title."
+    )]
+    async fn get_all_workspaces(&self) -> Result<Json<WorkspaceList>, String> {
+        preflight_task_expirations(&self.service).await?;
+        let graph = self.service.workspace().await.map_err(mcp_error)?;
+        Ok(Json(WorkspaceList {
+            workspaces: graph
+                .workspaces
+                .iter()
+                .cloned()
+                .map(|workspace| workspace_details(&graph, workspace))
+                .collect(),
         }))
     }
-    #[tool(description = "Get project by id")]
-    async fn get_project(
+    #[tool(
+        description = "Get workspace by its unique key with its tasks. Task issue links contain only relation type and linked task workspace/id/title."
+    )]
+    async fn get_workspace_by_key(
         &self,
-        Parameters(v): Parameters<Id>,
-    ) -> Result<Json<Versioned<ProjectView>>, String> {
-        self.service
-            .workspace()
-            .await
-            .map_err(mcp_error)?
-            .projects
-            .into_iter()
-            .find(|x| x.value.id == v.id)
+        Parameters(v): Parameters<WorkspaceKey>,
+    ) -> Result<Json<Versioned<WorkspaceDetailsView>>, String> {
+        preflight_task_expirations(&self.service).await?;
+        let graph = self.service.workspace().await.map_err(mcp_error)?;
+        graph
+            .workspaces
+            .iter()
+            .find(|x| x.value.key.eq_ignore_ascii_case(v.key.trim()))
+            .cloned()
+            .map(|workspace| workspace_details(&graph, workspace))
             .map(Json)
-            .ok_or_else(|| "project not found".into())
+            .ok_or_else(|| "workspace not found".into())
     }
-    #[tool(description = "Create project")]
-    async fn create_project(
+    #[tool(description = "Create workspace")]
+    async fn create_workspace(
         &self,
-        Parameters(v): Parameters<ProjectInput>,
-    ) -> Result<Json<Versioned<ProjectView>>, String> {
+        Parameters(v): Parameters<WorkspaceInput>,
+    ) -> Result<Json<Versioned<WorkspaceView>>, String> {
         self.service
-            .create_project(v)
-            .await
-            .map(Json)
-            .map_err(mcp_error)
-    }
-    #[tool(description = "Replace project fields conditionally")]
-    async fn update_project(
-        &self,
-        Parameters(v): Parameters<ProjectUpdate>,
-    ) -> Result<Json<Versioned<ProjectView>>, String> {
-        self.service
-            .update_project(&v.id, v.expected_revision, v.value)
+            .create_workspace(v)
             .await
             .map(Json)
             .map_err(mcp_error)
     }
-    #[tool(description = "Delete project conditionally")]
-    async fn delete_project(
+    #[tool(description = "Replace workspace fields conditionally")]
+    async fn update_workspace(
+        &self,
+        Parameters(v): Parameters<WorkspaceUpdate>,
+    ) -> Result<Json<Versioned<WorkspaceView>>, String> {
+        self.service
+            .update_workspace(&v.id, v.expected_revision, v.value)
+            .await
+            .map(Json)
+            .map_err(mcp_error)
+    }
+    #[tool(description = "Delete workspace conditionally")]
+    async fn delete_workspace(
         &self,
         Parameters(v): Parameters<Expected>,
     ) -> Result<Json<DeletionResult>, String> {
-        let result = deletion_result("project", &v);
+        let result = deletion_result("workspace", &v);
         self.service
-            .delete_project(&v.id, v.expected_revision)
+            .delete_workspace(&v.id, v.expected_revision)
             .await
             .map(|_| Json(result))
             .map_err(mcp_error)
@@ -516,6 +542,25 @@ impl McpServer {
             .await
             .map(|_| Json(result))
             .map_err(mcp_error)
+    }
+}
+
+fn workspace_details(
+    graph: &WorkspaceGraph,
+    workspace: Versioned<WorkspaceView>,
+) -> Versioned<WorkspaceDetailsView> {
+    let tasks = graph
+        .tasks
+        .iter()
+        .filter(|task| task.value.workspace_id.as_deref() == Some(&workspace.value.id))
+        .cloned()
+        .collect();
+    Versioned {
+        revision: workspace.revision,
+        value: WorkspaceDetailsView {
+            workspace: workspace.value,
+            tasks,
+        },
     }
 }
 
@@ -782,7 +827,22 @@ mod tests {
                 ))
                 .await
                 .unwrap();
+            service
+                .create_workspace(WorkspaceInput {
+                    key: "CORE".into(),
+                    name: "Core".into(),
+                    description: String::new(),
+                    lead_person_id: None,
+                })
+                .await
+                .unwrap();
             let server = McpServer::new(service);
+
+            let workspace = server
+                .get_workspace_by_key(Parameters(WorkspaceKey { key: "core".into() }))
+                .await
+                .unwrap();
+            assert_eq!(workspace.0.value.workspace.key, "CORE");
 
             let responses = [
                 serde_json::to_value(
@@ -794,13 +854,96 @@ mod tests {
                 )
                 .unwrap(),
                 serde_json::to_value(server.list_people().await.unwrap().0).unwrap(),
-                serde_json::to_value(server.list_projects().await.unwrap().0).unwrap(),
+                serde_json::to_value(server.get_all_workspaces().await.unwrap().0).unwrap(),
                 serde_json::to_value(server.list_tags().await.unwrap().0).unwrap(),
             ];
 
             for response in responses {
                 assert!(response.is_object());
             }
+        });
+    }
+
+    #[test]
+    fn workspace_reads_use_compact_issue_links_and_task_read_expands_direct_links() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let service = TuidoService::connect_url("sqlite::memory:").await.unwrap();
+            let workspace = service
+                .create_workspace(WorkspaceInput {
+                    key: "CORE".into(),
+                    name: "Core".into(),
+                    description: String::new(),
+                    lead_person_id: None,
+                })
+                .await
+                .unwrap();
+            let create = |title: &str, description: &str| TaskCreate {
+                title: title.into(),
+                description: description.into(),
+                size: "small".into(),
+                state: "todo".into(),
+                priority: "medium".into(),
+                snoozed_until: None,
+                people_ids: Vec::new(),
+                workspace_id: Some(workspace.value.id.clone()),
+                tag_ids: Vec::new(),
+                links: Vec::new(),
+            };
+            let first = service.create_task(create("First", "")).await.unwrap();
+            let second = service
+                .create_task(create("Second", "Full linked details"))
+                .await
+                .unwrap();
+            service
+                .set_task_relations(
+                    first.value.id.clone(),
+                    first.revision,
+                    vec![TaskRelationInput {
+                        task_id: second.value.id.clone(),
+                        relation_type: "blocks".into(),
+                    }],
+                )
+                .await
+                .unwrap();
+            let server = McpServer::new(service);
+
+            let all = serde_json::to_value(server.get_all_workspaces().await.unwrap().0).unwrap();
+            let by_key = serde_json::to_value(
+                server
+                    .get_workspace_by_key(Parameters(WorkspaceKey { key: "CORE".into() }))
+                    .await
+                    .unwrap()
+                    .0,
+            )
+            .unwrap();
+            for task in [
+                &all["workspaces"][0]["value"]["tasks"][0],
+                &by_key["value"]["tasks"][0],
+            ] {
+                let relation = &task["value"]["relations"][0];
+                assert_eq!(relation["relation_type"], "blocks");
+                assert_eq!(relation["task"]["workspace_id"], workspace.value.id);
+                assert_eq!(relation["task"]["id"], second.value.id);
+                assert_eq!(relation["task"]["title"], "Second");
+                assert!(relation["task"].get("description").is_none());
+            }
+
+            let task = serde_json::to_value(
+                server
+                    .get_task(Parameters(Id { id: first.value.id }))
+                    .await
+                    .unwrap()
+                    .0,
+            )
+            .unwrap();
+            let linked = &task["value"]["relations"][0]["task"];
+            assert_eq!(linked["description"], "Full linked details");
+            assert_eq!(linked["relations"][0]["task"]["id"], "CORE-1");
+            assert!(linked["relations"][0]["task"].get("relations").is_none());
         });
     }
 
@@ -840,7 +983,7 @@ mod tests {
                     priority: "medium".into(),
                     snoozed_until: Some("malformed".into()),
                     people_ids: Vec::new(),
-                    project_id: None,
+                    workspace_id: None,
                     tag_ids: Vec::new(),
                     links: Vec::new(),
                     relations: Vec::new(),
@@ -898,7 +1041,7 @@ mod tests {
                 priority: "medium".into(),
                 snoozed_until: Some("2000-01-01T00:00:00".into()),
                 people_ids: Vec::new(),
-                project_id: None,
+                workspace_id: None,
                 tag_ids: Vec::new(),
                 links: Vec::new(),
             };
@@ -958,7 +1101,7 @@ mod tests {
                     priority: "medium".into(),
                     snoozed_until: Some("2000-01-01T00:00:00".into()),
                     people_ids: Vec::new(),
-                    project_id: None,
+                    workspace_id: None,
                     tag_ids: Vec::new(),
                     links: Vec::new(),
                 }))
@@ -1018,7 +1161,7 @@ mod tests {
                     priority: "medium".into(),
                     snoozed_until: None,
                     people_ids: Vec::new(),
-                    project_id: None,
+                    workspace_id: None,
                     tag_ids: Vec::new(),
                     links: Vec::new(),
                 }))
@@ -1058,7 +1201,7 @@ mod tests {
                     priority: "medium".into(),
                     snoozed_until: None,
                     people_ids: Vec::new(),
-                    project_id: None,
+                    workspace_id: None,
                     tag_ids: Vec::new(),
                     links: vec![
                         "https://z.example/item".into(),
@@ -1129,7 +1272,7 @@ mod tests {
                     priority: "medium".into(),
                     snoozed_until: None,
                     people_ids: Vec::new(),
-                    project_id: None,
+                    workspace_id: None,
                     tag_ids: Vec::new(),
                     links: Vec::new(),
                 }))

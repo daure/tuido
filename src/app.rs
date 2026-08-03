@@ -13,9 +13,9 @@ use crate::calendar::{
 use crate::create_management_dialog::{CreateManagementDialog, ManagementEntityDraft};
 use crate::create_task_dialog::{CreateTaskDialog, CreateTaskDraft};
 use crate::domain::{
-    AppEvent, AppState, DEFAULT_PROJECT_SETTING, Person, Project, Tag, Task, TaskPatch,
-    TaskPriority, TaskRank, TaskSize, TaskState, reduce_app_state, task_display_id,
-    task_identifier, task_number,
+    AppEvent, AppState, DEFAULT_WORKSPACE_SETTING, Person, Tag, Task, TaskPatch, TaskPriority,
+    TaskRank, TaskSize, TaskState, Workspace, reduce_app_state, task_display_id, task_identifier,
+    task_number,
 };
 use crate::persistence_coordinator::{AppStore, PersistenceCommand, PersistenceCoordinator};
 use crate::service::TuidoService;
@@ -27,7 +27,7 @@ use crate::snooze::{
 use crate::storage::Storage;
 use crate::task_quick_menu::TaskQuickMenu;
 use crate::task_title::format_title;
-use crate::ui::management::{ManagementDialogKind, people, projects, tags};
+use crate::ui::management::{ManagementDialogKind, people, tags, workspaces};
 use crate::ui::responsive_split::ResponsiveSplit;
 use crate::ui::save_status::SaveStatusLine;
 use crate::ui::task_detail::{PatchSink, TaskDetailCatalogs, TaskDetailForm};
@@ -66,7 +66,7 @@ use task_relations_input::TaskRelationsInput;
 use task_title_input::TaskTitleInput;
 
 const PEOPLE_MENU_ID: &str = "people";
-const PROJECTS_MENU_ID: &str = "projects";
+const WORKSPACES_MENU_ID: &str = "workspaces";
 const TAGS_MENU_ID: &str = "tags";
 const SETTINGS_MENU_ID: &str = "settings";
 const TASKS_TAB_INDEX: usize = 0;
@@ -82,8 +82,8 @@ const STATUS_BAR_MENU_ITEMS: [StatusBarMenuItem; 6] = [
         label: " People",
     },
     StatusBarMenuItem::Custom {
-        id: PROJECTS_MENU_ID,
-        label: "󰲋 Projects",
+        id: WORKSPACES_MENU_ID,
+        label: "󰲋 Workspaces",
     },
     StatusBarMenuItem::Custom {
         id: TAGS_MENU_ID,
@@ -117,7 +117,7 @@ pub(crate) enum AppMsg {
     OpenSettings,
     SetShowCalendarWeekends(bool),
     SetDefaultSnoozeTime(Time),
-    SetDefaultProject(Option<String>),
+    SetDefaultWorkspace(Option<String>),
     OpenManagementDialog(ManagementDialogKind),
     OpenCreateManagement(ManagementDialogKind),
     CreateManagementSubmitted(ManagementEntityDraft),
@@ -223,7 +223,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             .as_deref(),
     )
     .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?;
-    let default_project_id = runtime.block_on(service.default_project_id())?;
+    let default_workspace_id = runtime.block_on(service.default_workspace_id())?;
     let mut app_state = AppState::from_snapshot(workspace.snapshot);
     seed_app_setting(
         &mut app_state,
@@ -237,8 +237,8 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     );
     seed_app_setting(
         &mut app_state,
-        DEFAULT_PROJECT_SETTING,
-        default_project_id.unwrap_or_default(),
+        DEFAULT_WORKSPACE_SETTING,
+        default_workspace_id.unwrap_or_default(),
     );
     app_state.refresh_error = startup_expiry_error;
     app_state.workspace_revision = workspace.revision;
@@ -265,7 +265,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         AppMsg::OpenSettings => app.open_settings_dialog(ctx),
         AppMsg::SetShowCalendarWeekends(show) => app.set_show_calendar_weekends(show),
         AppMsg::SetDefaultSnoozeTime(time) => app.set_default_snooze_time(time),
-        AppMsg::SetDefaultProject(project_id) => app.set_default_project(project_id),
+        AppMsg::SetDefaultWorkspace(workspace_id) => app.set_default_workspace(workspace_id),
         AppMsg::OpenManagementDialog(kind) => app.open_management_dialog(kind, ctx),
         AppMsg::OpenCreateManagement(kind) => app.open_create_management_dialog(kind, ctx),
         AppMsg::CreateManagementSubmitted(draft) => app.submit_create_management(draft, ctx),
@@ -461,7 +461,7 @@ impl App {
         let context = AppContext { store, coordinator };
         let active_tab = Rc::new(Cell::new(0));
         let pending_task_navigation = Rc::new(RefCell::new(None));
-        let active_project_filter = Rc::new(RefCell::new(None));
+        let active_workspace_filter = Rc::new(RefCell::new(None));
         let active_label_filter = Rc::new(RefCell::new(Vec::new()));
         let calendar_create_context = CalendarCreateContext::new();
         let tabs = Tabs::new(vec![
@@ -469,7 +469,7 @@ impl App {
                 "Tasks",
                 TaskWorkspace::new_with_filters(
                     context.clone(),
-                    Rc::clone(&active_project_filter),
+                    Rc::clone(&active_workspace_filter),
                     Rc::clone(&active_label_filter),
                     Rc::clone(&pending_task_navigation),
                 ),
@@ -480,7 +480,7 @@ impl App {
                     context.clone(),
                     show_calendar_weekends,
                     calendar_create_context.clone(),
-                    Rc::clone(&active_project_filter),
+                    Rc::clone(&active_workspace_filter),
                     Rc::clone(&active_label_filter),
                 ),
             ),
@@ -490,7 +490,7 @@ impl App {
         .bordered(true);
         let task_filters = TaskFilterControls::new(
             context.clone(),
-            active_project_filter,
+            active_workspace_filter,
             active_label_filter,
             Rc::clone(&active_tab),
         );
@@ -542,8 +542,8 @@ impl App {
                         PEOPLE_MENU_ID => {
                             AppMsg::OpenManagementDialog(ManagementDialogKind::People)
                         }
-                        PROJECTS_MENU_ID => {
-                            AppMsg::OpenManagementDialog(ManagementDialogKind::Projects)
+                        WORKSPACES_MENU_ID => {
+                            AppMsg::OpenManagementDialog(ManagementDialogKind::Workspaces)
                         }
                         TAGS_MENU_ID => AppMsg::OpenManagementDialog(ManagementDialogKind::Tags),
                         _ => AppMsg::OpenManagementDialog(ManagementDialogKind::People),
@@ -630,19 +630,19 @@ impl App {
             .get(DEFAULT_SNOOZE_TIME_SETTING)
             .and_then(|value| parse_default_snooze_time(Some(value)).ok())
             .unwrap_or(default_snooze_time());
-        let projects = state.state().projects.clone();
-        let default_project_id = state
+        let workspaces = state.state().workspaces.clone();
+        let default_workspace_id = state
             .state()
             .app_setting_values
-            .get(DEFAULT_PROJECT_SETTING)
-            .filter(|value| projects.iter().any(|project| project.id == **value))
+            .get(DEFAULT_WORKSPACE_SETTING)
+            .filter(|value| workspaces.iter().any(|workspace| workspace.id == **value))
             .cloned();
         drop(state);
         let settings = SettingsDialog::new(
             show_weekends,
             default_time,
-            &projects,
-            default_project_id.as_deref(),
+            &workspaces,
+            default_workspace_id.as_deref(),
         );
         let dialog = Dialog::new()
             .top_left("Settings")
@@ -669,8 +669,8 @@ impl App {
         );
     }
 
-    fn set_default_project(&mut self, project_id: Option<String>) {
-        self.persist_app_setting(DEFAULT_PROJECT_SETTING, project_id.unwrap_or_default());
+    fn set_default_workspace(&mut self, workspace_id: Option<String>) {
+        self.persist_app_setting(DEFAULT_WORKSPACE_SETTING, workspace_id.unwrap_or_default());
     }
 
     fn persist_app_setting(&mut self, key: &str, value: String) {
@@ -738,15 +738,15 @@ impl App {
                     format!("“{person_name}” was created."),
                 ));
             }
-            ManagementEntityDraft::Project {
+            ManagementEntityDraft::Workspace {
                 key,
                 name,
                 description,
             } => {
-                if !Project::is_valid_key(&key) {
+                if !Workspace::is_valid_key(&key) {
                     notify_required(
                         ctx,
-                        "Invalid project key",
+                        "Invalid workspace key",
                         "Use 2-5 characters without spaces.",
                     );
                     return;
@@ -754,24 +754,24 @@ impl App {
                 if name.trim().is_empty() {
                     notify_required(
                         ctx,
-                        "Project key and name required",
-                        "Enter both a key and name before creating the project.",
+                        "Workspace key and name required",
+                        "Enter both a key and name before creating the workspace.",
                     );
                     return;
                 }
-                let project = Project::new(Uuid::new_v4().to_string(), key, name, description);
-                let project_name = project.name.clone();
+                let workspace = Workspace::new(Uuid::new_v4().to_string(), key, name, description);
+                let workspace_name = workspace.name.clone();
                 self.context
                     .store
                     .borrow_mut()
-                    .dispatch(AppEvent::ProjectCreated(project.clone()));
+                    .dispatch(AppEvent::WorkspaceCreated(workspace.clone()));
                 self.context
                     .coordinator
                     .borrow_mut()
-                    .submit(PersistenceCommand::CreateProject(project));
+                    .submit(PersistenceCommand::CreateWorkspace(workspace));
                 ctx.notify(tuicore::Notification::success(
-                    "Project created",
-                    format!("“{project_name}” was created."),
+                    "Workspace created",
+                    format!("“{workspace_name}” was created."),
                 ));
             }
             ManagementEntityDraft::Tag { label } => {
@@ -817,11 +817,11 @@ impl App {
                     .iter()
                     .find(|person| person.id == entity_id)
                     .map(|person| person.name.clone()),
-                ManagementDialogKind::Projects => state
-                    .projects
+                ManagementDialogKind::Workspaces => state
+                    .workspaces
                     .iter()
-                    .find(|project| project.id == entity_id)
-                    .map(|project| project.name.clone()),
+                    .find(|workspace| workspace.id == entity_id)
+                    .map(|workspace| workspace.name.clone()),
                 ManagementDialogKind::Tags => state
                     .tags
                     .iter()
@@ -869,26 +869,26 @@ impl App {
                     format!("“{person_name}” was deleted."),
                 ));
             }
-            ManagementDialogKind::Projects => {
+            ManagementDialogKind::Workspaces => {
                 let deletion = self
                     .context
                     .store
                     .borrow()
                     .state()
-                    .project_deletion(entity_id);
+                    .workspace_deletion(entity_id);
                 let Some(deletion) = deletion else { return };
-                let project_name = deletion.project.name.clone();
+                let workspace_name = deletion.workspace.name.clone();
                 self.context
                     .store
                     .borrow_mut()
-                    .dispatch(AppEvent::ProjectDeleted(deletion.project.id.clone()));
+                    .dispatch(AppEvent::WorkspaceDeleted(deletion.workspace.id.clone()));
                 self.context
                     .coordinator
                     .borrow_mut()
-                    .submit(PersistenceCommand::DeleteProject(deletion));
+                    .submit(PersistenceCommand::DeleteWorkspace(deletion));
                 ctx.notify(tuicore::Notification::success(
-                    "Project deleted",
-                    format!("“{project_name}” was deleted."),
+                    "Workspace deleted",
+                    format!("“{workspace_name}” was deleted."),
                 ));
             }
             ManagementDialogKind::Tags => {
@@ -1041,13 +1041,13 @@ impl App {
             String::new(),
             TaskSize::Small,
         );
-        task.project_id = self
+        task.workspace_id = self
             .context
             .store
             .borrow()
             .state()
             .app_setting_values
-            .get(DEFAULT_PROJECT_SETTING)
+            .get(DEFAULT_WORKSPACE_SETTING)
             .filter(|value| !value.is_empty())
             .cloned();
         if let Some(snoozed_until) = snoozed_until {
@@ -1633,7 +1633,7 @@ type TaskWorkspaceLayout = ResponsiveSplit<TaskMaster, TaskDetail>;
 type TaskViewChange = Rc<RefCell<Option<TaskView>>>;
 type ActiveTaskView = Rc<RefCell<TaskView>>;
 type PendingTaskNavigation = Rc<RefCell<Option<TaskNavigation>>>;
-pub(crate) type ActiveProjectFilter = Rc<RefCell<Option<String>>>;
+pub(crate) type ActiveWorkspaceFilter = Rc<RefCell<Option<String>>>;
 pub(crate) type ActiveLabelFilter = Rc<RefCell<Vec<String>>>;
 type VisibleTaskSelection = Rc<RefCell<Option<String>>>;
 
@@ -1950,30 +1950,30 @@ impl TuiNode<AppMsg> for TaskViewMenu {
 struct TaskFilterControls {
     context: AppContext,
     controls: Flex<AppMsg>,
-    active_project_filter: ActiveProjectFilter,
+    active_workspace_filter: ActiveWorkspaceFilter,
     active_label_filter: ActiveLabelFilter,
     active_tab: Rc<Cell<usize>>,
-    known_projects: Vec<(String, String)>,
+    known_workspaces: Vec<(String, String)>,
     known_tags: Vec<(String, String)>,
 }
 
 impl TaskFilterControls {
     fn new(
         context: AppContext,
-        active_project_filter: ActiveProjectFilter,
+        active_workspace_filter: ActiveWorkspaceFilter,
         active_label_filter: ActiveLabelFilter,
         active_tab: Rc<Cell<usize>>,
     ) -> Self {
         let state = context.store.borrow();
-        let projects = state.state().projects.clone();
+        let workspaces = state.state().workspaces.clone();
         let tags = state.state().tags.clone();
         drop(state);
         let controls = Flex::row()
             .align(CrossAlign::Center)
             .gap(1)
             .child(
-                "project",
-                project_filter_dropdown(&projects, Rc::clone(&active_project_filter)),
+                "workspace",
+                workspace_filter_dropdown(&workspaces, Rc::clone(&active_workspace_filter)),
                 FlexItem::content(),
             )
             .child(
@@ -1984,12 +1984,12 @@ impl TaskFilterControls {
         Self {
             context,
             controls,
-            active_project_filter,
+            active_workspace_filter,
             active_label_filter,
             active_tab,
-            known_projects: projects
+            known_workspaces: workspaces
                 .iter()
-                .map(|project| (project.id.clone(), project.name.clone()))
+                .map(|workspace| (workspace.id.clone(), workspace.name.clone()))
                 .collect(),
             known_tags: tags
                 .iter()
@@ -2000,12 +2000,12 @@ impl TaskFilterControls {
 
     fn sync_options(&mut self) {
         let state = self.context.store.borrow();
-        let projects = state.state().projects.clone();
+        let workspaces = state.state().workspaces.clone();
         let tags = state.state().tags.clone();
         drop(state);
-        let known_projects = projects
+        let known_workspaces = workspaces
             .iter()
-            .map(|project| (project.id.clone(), project.name.clone()))
+            .map(|workspace| (workspace.id.clone(), workspace.name.clone()))
             .collect::<Vec<_>>();
         let known_tags = tags
             .iter()
@@ -2013,28 +2013,31 @@ impl TaskFilterControls {
             .collect::<Vec<_>>();
         let mut ctx = EventCtx::default();
 
-        if known_projects != self.known_projects {
-            let project_ids = projects
+        if known_workspaces != self.known_workspaces {
+            let workspace_ids = workspaces
                 .iter()
-                .map(|project| project.id.as_str())
+                .map(|workspace| workspace.id.as_str())
                 .collect::<Vec<_>>();
             if self
-                .active_project_filter
+                .active_workspace_filter
                 .borrow()
                 .as_deref()
-                .is_some_and(|id| !project_ids.contains(&id))
+                .is_some_and(|id| !workspace_ids.contains(&id))
             {
-                *self.active_project_filter.borrow_mut() = None;
+                *self.active_workspace_filter.borrow_mut() = None;
             }
             self.controls
                 .replace(
-                    "project",
-                    project_filter_dropdown(&projects, Rc::clone(&self.active_project_filter)),
+                    "workspace",
+                    workspace_filter_dropdown(
+                        &workspaces,
+                        Rc::clone(&self.active_workspace_filter),
+                    ),
                     FlexItem::content(),
                     &mut ctx,
                 )
-                .expect("task filters should contain project filter");
-            self.known_projects = known_projects;
+                .expect("task filters should contain workspace filter");
+            self.known_workspaces = known_workspaces;
         }
         if known_tags != self.known_tags {
             let tag_ids = tags.iter().map(|tag| tag.id.as_str()).collect::<Vec<_>>();
@@ -2134,8 +2137,8 @@ struct TaskWorkspace {
     task_view: TaskView,
     pending_task_view: TaskViewChange,
     active_task_view: ActiveTaskView,
-    project_filter: Option<String>,
-    active_project_filter: ActiveProjectFilter,
+    workspace_filter: Option<String>,
+    active_workspace_filter: ActiveWorkspaceFilter,
     label_filter: Vec<String>,
     active_label_filter: ActiveLabelFilter,
     known_task_ids: Vec<String>,
@@ -2168,18 +2171,18 @@ impl TaskWorkspace {
 
     fn new_with_filters(
         context: AppContext,
-        active_project_filter: ActiveProjectFilter,
+        active_workspace_filter: ActiveWorkspaceFilter,
         active_label_filter: ActiveLabelFilter,
         pending_navigation: PendingTaskNavigation,
     ) -> Self {
         let task_view = TaskView::Active;
         let state = context.store.borrow().state().clone();
-        let project_filter = active_project_filter.borrow().clone();
+        let workspace_filter = active_workspace_filter.borrow().clone();
         let label_filter = active_label_filter.borrow().clone();
         let rows = task_rows_for_view(
             &state.tasks,
             task_view,
-            project_filter.as_deref(),
+            workspace_filter.as_deref(),
             &label_filter,
         );
         let selected_task_id = rows.first().map(|task| task.id.clone());
@@ -2201,7 +2204,7 @@ impl TaskWorkspace {
             toolbar,
             &context.store,
             task_view,
-            project_filter.as_deref(),
+            workspace_filter.as_deref(),
             &label_filter,
         );
         let observed_version = context.store.borrow().state().version;
@@ -2212,8 +2215,8 @@ impl TaskWorkspace {
             task_view,
             pending_task_view,
             active_task_view,
-            project_filter,
-            active_project_filter,
+            workspace_filter,
+            active_workspace_filter,
             label_filter,
             active_label_filter,
             known_task_ids: state.tasks.iter().map(|task| task.id.clone()).collect(),
@@ -2295,8 +2298,8 @@ impl TaskWorkspace {
         self.table_mut().clear_search();
         self.task_view = navigation.view;
         *self.active_task_view.borrow_mut() = navigation.view;
-        self.project_filter = None;
-        *self.active_project_filter.borrow_mut() = None;
+        self.workspace_filter = None;
+        *self.active_workspace_filter.borrow_mut() = None;
         self.label_filter.clear();
         self.active_label_filter.borrow_mut().clear();
         self.detail_mut()
@@ -2327,11 +2330,11 @@ impl TaskWorkspace {
                     .position(|visible_id| visible_id == id)
             })
         });
-        self.sync_filter_options(&state.projects, &state.tags);
+        self.sync_filter_options(&state.workspaces, &state.tags);
         let rows = task_rows_for_view(
             &state.tasks,
             self.task_view,
-            self.project_filter.as_deref(),
+            self.workspace_filter.as_deref(),
             &self.label_filter,
         );
         let empty_state = task_empty_state(&state.tasks, self.task_view);
@@ -2384,7 +2387,7 @@ impl TaskWorkspace {
             != selected_task_id.as_deref()
             || self.detail().task_state != selected_task.map(|task| task.state);
         let detail_options_changed = self.detail().people_snapshot != state.people
-            || self.detail().projects_snapshot != state.projects
+            || self.detail().workspaces_snapshot != state.workspaces
             || self.detail().tags_snapshot != state.tags
             || self.detail().tasks_snapshot != state.tasks;
         let detail_content_changed =
@@ -2395,7 +2398,7 @@ impl TaskWorkspace {
         {
             self.detail_mut().set_task(
                 selected_task,
-                (&state.tasks, &state.people, &state.projects, &state.tags),
+                (&state.tasks, &state.people, &state.workspaces, &state.tags),
                 save_error.as_deref(),
                 &mut EventCtx::default(),
             );
@@ -2406,7 +2409,7 @@ impl TaskWorkspace {
                 detail.task_snapshot = selected_task.cloned();
                 detail.tasks_snapshot = state.tasks.clone();
                 detail.people_snapshot = state.people.clone();
-                detail.projects_snapshot = state.projects.clone();
+                detail.workspaces_snapshot = state.workspaces.clone();
                 detail.tags_snapshot = state.tags.clone();
             }
         }
@@ -2445,26 +2448,26 @@ impl TaskWorkspace {
         true
     }
 
-    fn sync_project_filter_change(&mut self) -> bool {
-        let next_filter = self.active_project_filter.borrow().clone();
-        if next_filter == self.project_filter {
+    fn sync_workspace_filter_change(&mut self) -> bool {
+        let next_filter = self.active_workspace_filter.borrow().clone();
+        if next_filter == self.workspace_filter {
             return false;
         }
         self.table_mut().clear_search();
-        self.project_filter = next_filter;
+        self.workspace_filter = next_filter;
         let state = self.context.store.borrow().state().clone();
         self.refresh_from_state(&state, true, false, false);
         true
     }
 
-    fn sync_filter_options(&mut self, projects: &[Project], tags: &[Tag]) {
+    fn sync_filter_options(&mut self, workspaces: &[Workspace], tags: &[Tag]) {
         if self
-            .project_filter
+            .workspace_filter
             .as_ref()
-            .is_some_and(|id| !projects.iter().any(|project| project.id == *id))
+            .is_some_and(|id| !workspaces.iter().any(|workspace| workspace.id == *id))
         {
-            self.project_filter = None;
-            *self.active_project_filter.borrow_mut() = None;
+            self.workspace_filter = None;
+            *self.active_workspace_filter.borrow_mut() = None;
         }
         let known_tags = tags
             .iter()
@@ -2558,7 +2561,7 @@ impl TaskWorkspace {
         if self.detail().task_id.as_deref() != Some(id) {
             self.detail_mut().set_task(
                 selected_task,
-                (&state.tasks, &state.people, &state.projects, &state.tags),
+                (&state.tasks, &state.people, &state.workspaces, &state.tags),
                 save_error,
                 ctx,
             );
@@ -2572,7 +2575,7 @@ impl TaskWorkspace {
         let state = self.context.store.borrow().state().clone();
         self.detail_mut().set_task(
             None,
-            (&state.tasks, &state.people, &state.projects, &state.tags),
+            (&state.tasks, &state.people, &state.workspaces, &state.tags),
             None,
             ctx,
         );
@@ -2802,14 +2805,14 @@ impl TaskWorkspace {
                 let state = store.state();
                 let task = state.tasks.iter().find(|task| task.id == *task_id)?;
                 let number = task_number(&task.id)?;
-                let project_key = task.project_id.as_deref().and_then(|project_id| {
+                let workspace_key = task.workspace_id.as_deref().and_then(|workspace_id| {
                     state
-                        .projects
+                        .workspaces
                         .iter()
-                        .find(|project| project.id == project_id)
-                        .map(|project| project.key.as_str())
+                        .find(|workspace| workspace.id == workspace_id)
+                        .map(|workspace| workspace.key.as_str())
                 });
-                let identifier = task_identifier(number, project_key);
+                let identifier = task_identifier(number, workspace_key);
                 let title = task.title.replace('\\', "\\\\").replace('"', "\\\"");
                 Some(format!("Tuido execute {identifier} \"{title}\""))
             });
@@ -2825,7 +2828,7 @@ impl TuiNode<AppMsg> for TaskWorkspace {
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
         self.sync_navigation();
         self.sync_store_version();
-        self.sync_project_filter_change();
+        self.sync_workspace_filter_change();
         self.sync_label_filter_change();
         self.layout.layout(area, ctx)
     }
@@ -2841,15 +2844,15 @@ impl TuiNode<AppMsg> for TaskWorkspace {
         }
         let outcome = self.layout.event(event, ctx);
         let view_changed = self.sync_task_view_change();
-        let project_filter_changed = self.sync_project_filter_change();
+        let workspace_filter_changed = self.sync_workspace_filter_change();
         let label_filter_changed = self.sync_label_filter_change();
         let detail_sync = self.sync_detail_changes();
-        if view_changed || project_filter_changed || label_filter_changed || detail_sync.changed {
+        if view_changed || workspace_filter_changed || label_filter_changed || detail_sync.changed {
             ctx.request_layout();
             ctx.request_redraw();
         }
         if view_changed
-            || project_filter_changed
+            || workspace_filter_changed
             || label_filter_changed
             || detail_sync.selected_task_changed
         {
@@ -2876,15 +2879,15 @@ impl TuiNode<AppMsg> for TaskWorkspace {
         }
         let outcome = self.layout.dispatch_event(route, event, ctx);
         let view_changed = self.sync_task_view_change();
-        let project_filter_changed = self.sync_project_filter_change();
+        let workspace_filter_changed = self.sync_workspace_filter_change();
         let label_filter_changed = self.sync_label_filter_change();
         let detail_sync = self.sync_detail_changes();
-        if view_changed || project_filter_changed || label_filter_changed || detail_sync.changed {
+        if view_changed || workspace_filter_changed || label_filter_changed || detail_sync.changed {
             ctx.request_layout();
             ctx.request_redraw();
         }
         if view_changed
-            || project_filter_changed
+            || workspace_filter_changed
             || label_filter_changed
             || detail_sync.selected_task_changed
         {

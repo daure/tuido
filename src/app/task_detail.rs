@@ -18,21 +18,21 @@ pub(super) fn task_toolbar(
         .child("space", Paragraph::new(""), FlexItem::fill(1))
 }
 
-pub(super) fn project_filter_dropdown(
-    projects: &[Project],
-    active_filter: ActiveProjectFilter,
-) -> Dropdown<Project, String> {
+pub(super) fn workspace_filter_dropdown(
+    workspaces: &[Workspace],
+    active_filter: ActiveWorkspaceFilter,
+) -> Dropdown<Workspace, String> {
     let selected = active_filter.borrow().iter().cloned().collect::<Vec<_>>();
     Dropdown::single(
-        projects.to_vec(),
-        |project| project.id.clone(),
-        |project| project.name.clone(),
+        workspaces.to_vec(),
+        |workspace| workspace.id.clone(),
+        |workspace| workspace.name.clone(),
     )
-    .placeholder("󰲋 Project")
+    .placeholder("󰲋 Workspace")
     .no_selection_text("None")
-    .hotkey(keys::TASK_PROJECT_FILTER.hotkey())
+    .hotkey(keys::TASK_WORKSPACE_FILTER.hotkey())
     .selected(selected)
-    .search_mode(DropdownSearchMode::Contains)
+    .search_mode(DropdownSearchMode::Fuzzy)
     .commit_mode(DropdownCommitMode::Explicit)
     .variant(DropdownVariant::Filled)
     .max_popup_height(12)
@@ -48,7 +48,7 @@ pub(super) fn label_filter_dropdown(
         .placeholder(" Labels")
         .hotkey(keys::TASK_LABEL_FILTER.hotkey())
         .selected(selected)
-        .search_mode(DropdownSearchMode::Contains)
+        .search_mode(DropdownSearchMode::Fuzzy)
         .commit_mode(DropdownCommitMode::Explicit)
         .variant(DropdownVariant::Filled)
         .max_popup_height(12)
@@ -59,17 +59,17 @@ pub(super) fn task_workspace_layout(
     toolbar: Flex<AppMsg>,
     store: &AppStore,
     task_view: TaskView,
-    project_filter: Option<&str>,
+    workspace_filter: Option<&str>,
     label_filter: &[String],
 ) -> TaskWorkspaceLayout {
     let store_ref = store.borrow();
     let state = store_ref.state();
-    let rows = task_rows_for_view(&state.tasks, task_view, project_filter, label_filter);
+    let rows = task_rows_for_view(&state.tasks, task_view, workspace_filter, label_filter);
     let selected = state
         .selected_task_id
         .as_deref()
         .filter(|id| rows.iter().any(|task| task.id == **id));
-    let copy_context = TaskCopyContext::new(&state.people, &state.projects, &state.tags);
+    let copy_context = TaskCopyContext::new(&state.people, &state.workspaces, &state.tags);
     let table = task_table_with_copy_context(rows, selected, copy_context)
         .empty_state(task_empty_state(&state.tasks, task_view));
     let selected_task = selected.and_then(|id| state.tasks.iter().find(|task| task.id == id));
@@ -78,7 +78,7 @@ pub(super) fn task_workspace_layout(
         selected_task,
         &state.tasks,
         &state.people,
-        &state.projects,
+        &state.workspaces,
         &state.tags,
         save_error,
     );
@@ -90,15 +90,15 @@ pub(super) fn task_workspace_layout(
 pub(super) fn task_rows_for_view(
     tasks: &[Task],
     task_view: TaskView,
-    project_filter: Option<&str>,
+    workspace_filter: Option<&str>,
     label_filter: &[String],
 ) -> Vec<TaskRow> {
     let mut rows = tasks
         .iter()
         .filter(|task| {
             task_view.contains(task)
-                && project_filter
-                    .is_none_or(|project_id| task.project_id.as_deref() == Some(project_id))
+                && workspace_filter
+                    .is_none_or(|workspace_id| task.workspace_id.as_deref() == Some(workspace_id))
                 && label_filter
                     .iter()
                     .all(|tag_id| task.tag_ids.contains(tag_id))
@@ -381,15 +381,16 @@ pub(crate) fn detail_form(
     highlighted_issue_link_task_id: Option<&str>,
     save_status: SaveStatusLine,
 ) -> Flex<AppMsg> {
-    let (tasks, people, projects, tags) = catalogs;
+    let (tasks, people, workspaces, tags) = catalogs;
     let Some(task) = task else {
         return Flex::<AppMsg>::column();
     };
-    let project = task
-        .project_id
-        .as_deref()
-        .and_then(|project_id| projects.iter().find(|project| project.id == project_id));
-    let display_id = Rc::new(RefCell::new(task_display_id(task, project)));
+    let workspace = task.workspace_id.as_deref().and_then(|workspace_id| {
+        workspaces
+            .iter()
+            .find(|workspace| workspace.id == workspace_id)
+    });
+    let display_id = Rc::new(RefCell::new(task_display_id(task, workspace)));
 
     let status_fields = Flex::<AppMsg>::row()
         .gap(1)
@@ -491,22 +492,22 @@ pub(crate) fn detail_form(
         .child("status-fields", status_fields, FlexItem::fixed(3))
         .child("date-fields", date_fields, FlexItem::content())
         .child(
-            "people-projects",
+            "people-workspaces",
             Flex::<AppMsg>::row()
                 .gap(1)
                 .child(
-                    "people",
-                    task_people_dropdown(task, people, Rc::clone(&patch_sink)),
-                    FlexItem::fill(1),
-                )
-                .child(
-                    "projects",
-                    task_projects_dropdown(
+                    "workspaces",
+                    task_workspaces_dropdown(
                         task,
-                        projects,
+                        workspaces,
                         Rc::clone(&display_id),
                         Rc::clone(&patch_sink),
                     ),
+                    FlexItem::fill(1),
+                )
+                .child(
+                    "people",
+                    task_people_dropdown(task, people, Rc::clone(&patch_sink)),
                     FlexItem::fill(1),
                 ),
             FlexItem::fixed(3),
@@ -531,7 +532,7 @@ pub(crate) fn detail_form(
             TaskRelationsInput::new(
                 task,
                 tasks,
-                projects,
+                workspaces,
                 Rc::clone(&patch_sink),
                 highlighted_issue_link_task_id,
             ),
@@ -648,34 +649,38 @@ pub(super) fn task_people_dropdown(
     .hotkey(keys::TASK_PEOPLE_FIELD.hotkey())
 }
 
-pub(super) fn task_projects_dropdown(
+pub(super) fn task_workspaces_dropdown(
     task: &TaskRow,
-    projects: &[Project],
+    workspaces: &[Workspace],
     display_id: Rc<RefCell<String>>,
     patch_sink: PatchSink,
 ) -> Dropdown<Choice, String> {
     let task = task.clone();
-    let projects = projects.to_vec();
+    let workspaces = workspaces.to_vec();
     Dropdown::single(
-        project_choices(&projects),
+        workspace_choices(&workspaces),
         |row| row.id.clone(),
         |row| row.label.clone(),
     )
-    .label("Project")
-    .placeholder("Select project")
+    .label("Workspace")
+    .placeholder("Select workspace")
     .no_selection_text("None")
-    .selected(task.project_id.iter().cloned())
+    .selected(task.workspace_id.iter().cloned())
     .search_mode(DropdownSearchMode::Contains)
     .commit_mode(DropdownCommitMode::Explicit)
     .on_select(move |ids| {
-        let project_id = ids.into_iter().next();
-        let project = project_id
-            .as_deref()
-            .and_then(|project_id| projects.iter().find(|project| project.id == project_id));
-        *display_id.borrow_mut() = task_display_id(&task, project);
-        patch_sink.borrow_mut().push(TaskPatch::Project(project_id));
+        let workspace_id = ids.into_iter().next();
+        let workspace = workspace_id.as_deref().and_then(|workspace_id| {
+            workspaces
+                .iter()
+                .find(|workspace| workspace.id == workspace_id)
+        });
+        *display_id.borrow_mut() = task_display_id(&task, workspace);
+        patch_sink
+            .borrow_mut()
+            .push(TaskPatch::Workspace(workspace_id));
     })
-    .hotkey(keys::TASK_PROJECTS_FIELD.hotkey())
+    .hotkey(keys::TASK_WORKSPACES_FIELD.hotkey())
 }
 
 #[derive(Debug, Clone)]
@@ -746,12 +751,12 @@ pub(super) fn person_choices(people: &[Person]) -> Vec<Choice> {
         .collect()
 }
 
-pub(super) fn project_choices(projects: &[Project]) -> Vec<Choice> {
-    projects
+pub(super) fn workspace_choices(workspaces: &[Workspace]) -> Vec<Choice> {
+    workspaces
         .iter()
-        .map(|project| Choice {
-            id: project.id.clone(),
-            label: project.name.clone(),
+        .map(|workspace| Choice {
+            id: workspace.id.clone(),
+            label: workspace.name.clone(),
         })
         .collect()
 }

@@ -349,11 +349,12 @@ pub mod keys {
 
     pub const APP_TASKS_TAB: AppBinding = AppBinding::new("APP_TASKS_TAB", "t");
     pub const APP_CALENDAR_TAB: AppBinding = AppBinding::new("APP_CALENDAR_TAB", "c");
-    pub const APP_PROJECTS_TAB: AppBinding = AppBinding::new_sequence("APP_PROJECTS_TAB", "pr");
+    pub const APP_WORKSPACES_TAB: AppBinding = AppBinding::new_sequence("APP_WORKSPACES_TAB", "wo");
     pub const APP_PEOPLE_TAB: AppBinding = AppBinding::new_sequence("APP_PEOPLE_TAB", "pe");
     pub const TASK_QUICK_CREATE: AppBinding = AppBinding::new("TASK_QUICK_CREATE", "shift+n");
     pub const TASK_VIEW_MENU: AppBinding = AppBinding::new("TASK_VIEW_MENU", "f");
-    pub const TASK_PROJECT_FILTER: AppBinding = AppBinding::new("TASK_PROJECT_FILTER", "shift+p");
+    pub const TASK_WORKSPACE_FILTER: AppBinding =
+        AppBinding::new("TASK_WORKSPACE_FILTER", "shift+w");
     pub const TASK_LABEL_FILTER: AppBinding = AppBinding::new("TASK_LABEL_FILTER", "shift+l");
     pub const TASK_DELETE: AppBinding = AppBinding::new("TASK_DELETE", "delete");
     pub const TASK_DELETE_BACKSPACE: AppBinding = AppBinding::new("TASK_DELETE_X", "backspace");
@@ -376,13 +377,16 @@ pub mod keys {
         AppBinding::new_sequence("PERSON_ABOUT_EDITOR", "ao");
     pub const PERSON_ACTIVE_FIELD: AppBinding =
         AppBinding::new_sequence("PERSON_ACTIVE_FIELD", "ac");
-    pub const PROJECT_KEY_FIELD: AppBinding = AppBinding::new_sequence("PROJECT_KEY_FIELD", "ke");
-    pub const PROJECT_NAME_FIELD: AppBinding = AppBinding::new_sequence("PROJECT_NAME_FIELD", "am");
-    pub const PROJECT_DESCRIPTION_FIELD: AppBinding =
-        AppBinding::new_sequence("PROJECT_DESCRIPTION_FIELD", "dd");
-    pub const PROJECT_DESCRIPTION_EDITOR: AppBinding =
-        AppBinding::new_sequence("PROJECT_DESCRIPTION_EDITOR", "do");
-    pub const PROJECT_LEAD_FIELD: AppBinding = AppBinding::new_sequence("PROJECT_LEAD_FIELD", "ea");
+    pub const WORKSPACE_KEY_FIELD: AppBinding =
+        AppBinding::new_sequence("WORKSPACE_KEY_FIELD", "ke");
+    pub const WORKSPACE_NAME_FIELD: AppBinding =
+        AppBinding::new_sequence("WORKSPACE_NAME_FIELD", "am");
+    pub const WORKSPACE_DESCRIPTION_FIELD: AppBinding =
+        AppBinding::new_sequence("WORKSPACE_DESCRIPTION_FIELD", "dd");
+    pub const WORKSPACE_DESCRIPTION_EDITOR: AppBinding =
+        AppBinding::new_sequence("WORKSPACE_DESCRIPTION_EDITOR", "do");
+    pub const WORKSPACE_LEAD_FIELD: AppBinding =
+        AppBinding::new_sequence("WORKSPACE_LEAD_FIELD", "ea");
     pub const TAG_LABEL_FIELD: AppBinding = AppBinding::new_sequence("TAG_LABEL_FIELD", "ab");
     pub const TASK_TITLE_FIELD: AppBinding = AppBinding::new_sequence("TASK_TITLE_FIELD", "ti");
     pub const TASK_DESCRIPTION_FIELD: AppBinding =
@@ -394,8 +398,8 @@ pub mod keys {
     pub const TASK_PRIORITY_FIELD: AppBinding =
         AppBinding::new_sequence("TASK_PRIORITY_FIELD", "pr");
     pub const TASK_PEOPLE_FIELD: AppBinding = AppBinding::new_sequence("TASK_PEOPLE_FIELD", "pe");
-    pub const TASK_PROJECTS_FIELD: AppBinding =
-        AppBinding::new_sequence("TASK_PROJECTS_FIELD", "po");
+    pub const TASK_WORKSPACES_FIELD: AppBinding =
+        AppBinding::new_sequence("TASK_WORKSPACES_FIELD", "wo");
     pub const TASK_TAGS_FIELD: AppBinding = AppBinding::new_sequence("TASK_TAGS_FIELD", "ut");
     pub const TASK_CHECKLIST_FIELD: AppBinding =
         AppBinding::new_sequence("TASK_CHECKLIST_FIELD", "uc");
@@ -488,11 +492,11 @@ pub mod keys {
     pub const ALL: &[AppBinding] = &[
         APP_TASKS_TAB,
         APP_CALENDAR_TAB,
-        APP_PROJECTS_TAB,
+        APP_WORKSPACES_TAB,
         APP_PEOPLE_TAB,
         TASK_QUICK_CREATE,
         TASK_VIEW_MENU,
-        TASK_PROJECT_FILTER,
+        TASK_WORKSPACE_FILTER,
         TASK_LABEL_FILTER,
         TASK_DELETE,
         TASK_DELETE_BACKSPACE,
@@ -512,11 +516,11 @@ pub mod keys {
         PERSON_ABOUT_FIELD,
         PERSON_ABOUT_EDITOR,
         PERSON_ACTIVE_FIELD,
-        PROJECT_KEY_FIELD,
-        PROJECT_NAME_FIELD,
-        PROJECT_DESCRIPTION_FIELD,
-        PROJECT_DESCRIPTION_EDITOR,
-        PROJECT_LEAD_FIELD,
+        WORKSPACE_KEY_FIELD,
+        WORKSPACE_NAME_FIELD,
+        WORKSPACE_DESCRIPTION_FIELD,
+        WORKSPACE_DESCRIPTION_EDITOR,
+        WORKSPACE_LEAD_FIELD,
         TAG_LABEL_FIELD,
         TASK_TITLE_FIELD,
         TASK_DESCRIPTION_FIELD,
@@ -525,7 +529,7 @@ pub mod keys {
         TASK_SIZE_FIELD,
         TASK_PRIORITY_FIELD,
         TASK_PEOPLE_FIELD,
-        TASK_PROJECTS_FIELD,
+        TASK_WORKSPACES_FIELD,
         TASK_TAGS_FIELD,
         TASK_CHECKLIST_FIELD,
         TASK_URL_LINKS_FIELD,
@@ -618,7 +622,7 @@ pub mod keys {
             bindings: &[
                 TASK_QUICK_CREATE,
                 TASK_VIEW_MENU,
-                TASK_PROJECT_FILTER,
+                TASK_WORKSPACE_FILTER,
                 TASK_LABEL_FILTER,
                 TASK_DELETE,
                 TASK_DELETE_BACKSPACE,
@@ -635,7 +639,7 @@ pub mod keys {
             name: "task detail",
             bindings: &[
                 TASK_COMPLETE,
-                TASK_PROJECT_FILTER,
+                TASK_WORKSPACE_FILTER,
                 TASK_LABEL_FILTER,
                 TASK_TITLE_FIELD,
                 TASK_DESCRIPTION_FIELD,
@@ -644,7 +648,7 @@ pub mod keys {
                 TASK_SIZE_FIELD,
                 TASK_PRIORITY_FIELD,
                 TASK_PEOPLE_FIELD,
-                TASK_PROJECTS_FIELD,
+                TASK_WORKSPACES_FIELD,
                 TASK_TAGS_FIELD,
                 TASK_CHECKLIST_FIELD,
                 TASK_URL_LINKS_FIELD,
@@ -672,17 +676,17 @@ pub mod keys {
             ],
         },
         BindingContext {
-            name: "project management",
+            name: "workspace management",
             bindings: &[
                 MANAGEMENT_CREATE,
                 MANAGEMENT_DELETE,
                 MANAGEMENT_DELETE_BACKSPACE,
                 MANAGEMENT_DELETE_X,
-                PROJECT_KEY_FIELD,
-                PROJECT_NAME_FIELD,
-                PROJECT_DESCRIPTION_FIELD,
-                PROJECT_DESCRIPTION_EDITOR,
-                PROJECT_LEAD_FIELD,
+                WORKSPACE_KEY_FIELD,
+                WORKSPACE_NAME_FIELD,
+                WORKSPACE_DESCRIPTION_FIELD,
+                WORKSPACE_DESCRIPTION_EDITOR,
+                WORKSPACE_LEAD_FIELD,
                 DETAIL_CLOSE,
                 DETAIL_CLOSE_ALT,
             ],
@@ -774,7 +778,7 @@ mod tests {
             ("TASK_SIZE_FIELD", "si"),
             ("TASK_PRIORITY_FIELD", "pr"),
             ("TASK_PEOPLE_FIELD", "pe"),
-            ("TASK_PROJECTS_FIELD", "po"),
+            ("TASK_WORKSPACES_FIELD", "wo"),
             ("TASK_TAGS_FIELD", "ut"),
             ("TASK_CHECKLIST_FIELD", "uc"),
             ("TASK_URL_LINKS_FIELD", "uu"),
@@ -801,11 +805,11 @@ mod tests {
             ("PERSON_ABOUT_FIELD", "ab"),
             ("PERSON_ABOUT_EDITOR", "ao"),
             ("PERSON_ACTIVE_FIELD", "ac"),
-            ("PROJECT_KEY_FIELD", "ke"),
-            ("PROJECT_NAME_FIELD", "am"),
-            ("PROJECT_DESCRIPTION_FIELD", "dd"),
-            ("PROJECT_DESCRIPTION_EDITOR", "do"),
-            ("PROJECT_LEAD_FIELD", "ea"),
+            ("WORKSPACE_KEY_FIELD", "ke"),
+            ("WORKSPACE_NAME_FIELD", "am"),
+            ("WORKSPACE_DESCRIPTION_FIELD", "dd"),
+            ("WORKSPACE_DESCRIPTION_EDITOR", "do"),
+            ("WORKSPACE_LEAD_FIELD", "ea"),
             ("TAG_LABEL_FIELD", "ab"),
         ];
 
@@ -839,7 +843,7 @@ mod tests {
     fn task_and_management_shortcuts_use_requested_defaults() {
         let keymap = AppKeymap::from_overrides(std::iter::empty::<(String, String)>()).unwrap();
         for (name, expected) in [
-            ("TASK_PROJECT_FILTER", "shift+p"),
+            ("TASK_WORKSPACE_FILTER", "shift+w"),
             ("TASK_LABEL_FILTER", "shift+l"),
             ("TASK_QUICK_CREATE", "shift+n"),
             ("TASK_SNOOZE", "ctrl+z"),

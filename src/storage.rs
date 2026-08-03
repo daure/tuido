@@ -8,8 +8,8 @@ use sqlx::{
 };
 
 use crate::domain::{
-    ChecklistItem, Person, Project, Tag, Task, TaskPriority, TaskRelation, TaskRelationKind,
-    TaskSize, TaskState, WorkspaceSnapshot, task_identifier,
+    ChecklistItem, Person, Tag, Task, TaskPriority, TaskRelation, TaskRelationKind, TaskSize,
+    TaskState, Workspace, WorkspaceSnapshot, task_identifier,
 };
 use crate::snooze::parse_datetime;
 
@@ -170,7 +170,7 @@ async fn load_workspace(
     dialect: SqlDialect,
 ) -> Result<WorkspaceSnapshot, Box<dyn std::error::Error>> {
     let people = load_people(pool).await?;
-    let projects = load_projects(pool).await?;
+    let workspaces = load_workspaces(pool).await?;
     let tags = load_tags(pool).await?;
     let mut tasks = Vec::new();
     let rows = sqlx::query(
@@ -182,7 +182,7 @@ async fn load_workspace(
     for row in rows {
         let number: i64 = row.try_get("id")?;
         let people_ids = load_task_people(pool, dialect, number).await?;
-        let project_id = load_task_projects(pool, dialect, number)
+        let workspace_id = load_task_workspaces(pool, dialect, number)
             .await?
             .into_iter()
             .next();
@@ -213,7 +213,7 @@ async fn load_workspace(
                 .map(|value| parse_datetime(&value))
                 .transpose()?,
             people_ids,
-            project_id,
+            workspace_id,
             tag_ids,
             checklist,
             links,
@@ -226,7 +226,7 @@ async fn load_workspace(
     Ok(WorkspaceSnapshot {
         tasks,
         people,
-        projects,
+        workspaces,
         tags,
     })
 }
@@ -329,15 +329,15 @@ async fn load_people(pool: &AnyPool) -> Result<Vec<Person>, Box<dyn std::error::
         .collect()
 }
 
-async fn load_projects(pool: &AnyPool) -> Result<Vec<Project>, Box<dyn std::error::Error>> {
+async fn load_workspaces(pool: &AnyPool) -> Result<Vec<Workspace>, Box<dyn std::error::Error>> {
     let rows = sqlx::query(
-        "SELECT id, key, name, description, lead_person_id FROM projects ORDER BY sort_order, name",
+        "SELECT id, key, name, description, lead_person_id FROM workspaces ORDER BY sort_order, name",
     )
     .fetch_all(pool)
     .await?;
     rows.into_iter()
         .map(|row| {
-            Ok(Project {
+            Ok(Workspace {
                 id: row.try_get("id")?,
                 key: row.try_get("key")?,
                 name: row.try_get("name")?,
@@ -366,13 +366,13 @@ async fn load_task_people(
         .collect()
 }
 
-async fn load_task_projects(
+async fn load_task_workspaces(
     pool: &AnyPool,
     dialect: SqlDialect,
     task_id: i64,
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let query = format!(
-        "SELECT project_id FROM task_projects WHERE task_id = {} ORDER BY sort_order, project_id",
+        "SELECT workspace_id FROM task_workspaces WHERE task_id = {} ORDER BY sort_order, workspace_id",
         dialect.placeholder(1)
     );
     let rows = sqlx::query(AssertSqlSafe(query.as_str()))
@@ -380,7 +380,7 @@ async fn load_task_projects(
         .fetch_all(pool)
         .await?;
     rows.into_iter()
-        .map(|row| Ok(row.try_get("project_id")?))
+        .map(|row| Ok(row.try_get("workspace_id")?))
         .collect()
 }
 
@@ -542,7 +542,7 @@ mod tests {
                     (
                         snapshot.tasks.len(),
                         snapshot.people.len(),
-                        snapshot.projects.len(),
+                        snapshot.workspaces.len(),
                         snapshot.tags.len(),
                     ),
                     (0, 0, 0, 0)

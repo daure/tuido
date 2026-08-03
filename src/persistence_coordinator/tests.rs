@@ -1,6 +1,6 @@
 use super::*;
 use crate::domain::{
-    Person, Project, Tag, TaskSize, TaskState, WorkspaceSnapshot, reduce_app_state,
+    Person, Tag, TaskSize, TaskState, Workspace, WorkspaceSnapshot, reduce_app_state,
 };
 use sqlx::{Row, any::AnyPoolOptions};
 
@@ -21,7 +21,7 @@ fn test_store(tasks: Vec<Task>) -> AppStore {
     let mut state = AppState::from_snapshot(WorkspaceSnapshot {
         tasks,
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     state.entity_revisions = revisions;
@@ -127,7 +127,7 @@ fn stale_refresh_cannot_replace_newer_local_workspace() {
             snapshot: Some(WorkspaceSnapshot {
                 tasks: vec![test_task("stale")],
                 people: Vec::new(),
-                projects: Vec::new(),
+                workspaces: Vec::new(),
                 tags: Vec::new(),
             }),
             revision: 1,
@@ -182,7 +182,7 @@ fn unchanged_revision_poll_reloads_when_a_local_snooze_expires() {
         snapshot: WorkspaceSnapshot {
             tasks: vec![task],
             people: Vec::new(),
-            projects: Vec::new(),
+            workspaces: Vec::new(),
             tags: Vec::new(),
         },
         revision: 2,
@@ -328,7 +328,7 @@ fn refresh_failure_is_visible_and_success_clears_it() {
             snapshot: Some(WorkspaceSnapshot {
                 tasks: Vec::new(),
                 people: Vec::new(),
-                projects: Vec::new(),
+                workspaces: Vec::new(),
                 tags: Vec::new(),
             }),
             revision: 1,
@@ -403,7 +403,7 @@ fn duplicate_tag_patch_reloads_authoritative_label() {
     let mut state = AppState::from_snapshot(WorkspaceSnapshot {
         tasks: Vec::new(),
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: vec![first, second],
     });
     state.entity_revisions = HashMap::from([("tag:tag-1".into(), 1), ("tag:tag-2".into(), 1)]);
@@ -995,8 +995,8 @@ fn failed_delete_restores_task_once() {
 fn management_entity_creates_and_queued_deletes_drain_to_absent() {
     let (runtime, pool) = test_database();
     let person = Person::new("person-1".into(), "Ada".into(), String::new());
-    let project = Project::new(
-        "project-1".into(),
+    let workspace = Workspace::new(
+        "workspace-1".into(),
         "CORE".into(),
         "Core".into(),
         String::new(),
@@ -1008,11 +1008,11 @@ fn management_entity_creates_and_queued_deletes_drain_to_absent() {
     coordinator.submit(PersistenceCommand::DeletePerson(PersonDeletion {
         person,
         task_ids: Vec::new(),
-        lead_project_ids: Vec::new(),
+        lead_workspace_ids: Vec::new(),
     }));
-    coordinator.submit(PersistenceCommand::CreateProject(project.clone()));
-    coordinator.submit(PersistenceCommand::DeleteProject(ProjectDeletion {
-        project,
+    coordinator.submit(PersistenceCommand::CreateWorkspace(workspace.clone()));
+    coordinator.submit(PersistenceCommand::DeleteWorkspace(WorkspaceDeletion {
+        workspace,
         task_ids: Vec::new(),
         was_default: false,
     }));
@@ -1028,8 +1028,8 @@ fn management_entity_creates_and_queued_deletes_drain_to_absent() {
         .unwrap()
         .try_get("count")
         .unwrap();
-    let projects: i64 = runtime
-        .block_on(sqlx::query("SELECT COUNT(*) AS count FROM projects").fetch_one(&pool))
+    let workspaces: i64 = runtime
+        .block_on(sqlx::query("SELECT COUNT(*) AS count FROM workspaces").fetch_one(&pool))
         .unwrap()
         .try_get("count")
         .unwrap();
@@ -1038,7 +1038,7 @@ fn management_entity_creates_and_queued_deletes_drain_to_absent() {
         .unwrap()
         .try_get("count")
         .unwrap();
-    assert_eq!((people, projects, tags), (0, 0, 0));
+    assert_eq!((people, workspaces, tags), (0, 0, 0));
 }
 
 #[test]
@@ -1050,11 +1050,11 @@ fn failed_management_entity_deletes_restore_optimistic_state() {
     coordinator.submit(PersistenceCommand::DeletePerson(PersonDeletion {
         person: Person::new("person-1".into(), "Ada".into(), String::new()),
         task_ids: Vec::new(),
-        lead_project_ids: Vec::new(),
+        lead_workspace_ids: Vec::new(),
     }));
-    coordinator.submit(PersistenceCommand::DeleteProject(ProjectDeletion {
-        project: Project::new(
-            "project-1".into(),
+    coordinator.submit(PersistenceCommand::DeleteWorkspace(WorkspaceDeletion {
+        workspace: Workspace::new(
+            "workspace-1".into(),
             "CORE".into(),
             "Core".into(),
             String::new(),
@@ -1070,7 +1070,7 @@ fn failed_management_entity_deletes_restore_optimistic_state() {
     assert!(coordinator.drain(Duration::from_secs(2)));
     let state = store.borrow();
     assert_eq!(state.state().people[0].id, "person-1");
-    assert_eq!(state.state().projects[0].id, "project-1");
+    assert_eq!(state.state().workspaces[0].id, "workspace-1");
     assert_eq!(state.state().tags[0].id, "tag-1");
 }
 

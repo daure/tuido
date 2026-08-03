@@ -467,7 +467,7 @@ mod tests {
         let (_runtime, context, store) = test_context(WorkspaceSnapshot {
             tasks: vec![],
             people: vec![],
-            projects: vec![],
+            workspaces: vec![],
             tags,
         });
         let mut workspace = TagsWorkspace::new(context);
@@ -494,7 +494,7 @@ mod tests {
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
             tasks: vec![],
             people: vec![],
-            projects: vec![],
+            workspaces: vec![],
             tags: vec![tag],
         });
         let mut workspace = TagsWorkspace::new(context);
@@ -525,7 +525,7 @@ mod tests {
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
             tasks: vec![],
             people: vec![],
-            projects: vec![],
+            workspaces: vec![],
             tags: vec![Tag::new("tag-1".into(), "api".into())],
         });
         let mut workspace = TagsWorkspace::new(context);
@@ -555,7 +555,7 @@ mod tests {
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
             tasks: vec![],
             people: vec![],
-            projects: vec![],
+            workspaces: vec![],
             tags: vec![
                 Tag::new("tag-1".into(), "api".into()),
                 Tag::new("tag-2".into(), "frontend".into()),
@@ -593,7 +593,7 @@ mod tests {
         let (_runtime, context, store) = test_context(WorkspaceSnapshot {
             tasks: vec![],
             people: vec![],
-            projects: vec![],
+            workspaces: vec![],
             tags: vec![Tag::new("tag-1".into(), "api".into())],
         });
         let mut workspace = TagsWorkspace::new(context);
@@ -621,7 +621,7 @@ mod tests {
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
             tasks: vec![],
             people: vec![],
-            projects: vec![],
+            workspaces: vec![],
             tags: vec![tag],
         });
         let mut dialog = dialog(context);

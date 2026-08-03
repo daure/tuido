@@ -8,25 +8,25 @@ use tuicore::{
     LayoutSizeHint, LifecycleCtx, RenderCtx, TickResult, TimePicker, Toggle, TuiEvent, TuiNode,
 };
 
-use crate::{app::AppMsg, domain::Project};
+use crate::{app::AppMsg, domain::Workspace};
 
 #[derive(Clone)]
-struct ProjectChoice {
+struct WorkspaceChoice {
     id: String,
     label: String,
 }
 
 pub(crate) struct SettingsDialog {
     root: Flex<AppMsg>,
-    default_project_changes: Rc<RefCell<Vec<Option<String>>>>,
+    default_workspace_changes: Rc<RefCell<Vec<Option<String>>>>,
 }
 
 impl SettingsDialog {
     pub(crate) fn new(
         show_calendar_weekends: bool,
         default_snooze_time: Time,
-        projects: &[Project],
-        default_project_id: Option<&str>,
+        workspaces: &[Workspace],
+        default_workspace_id: Option<&str>,
     ) -> Self {
         let calendar_view = Toggle::new("Show weekends in calendar")
             .checked(show_calendar_weekends)
@@ -36,24 +36,24 @@ impl SettingsDialog {
             .panel("Default snooze time")
             .value(default_snooze_time)
             .on_select(AppMsg::SetDefaultSnoozeTime);
-        let project_choices = projects
+        let workspace_choices = workspaces
             .iter()
-            .map(|project| ProjectChoice {
-                id: project.id.clone(),
-                label: project.name.clone(),
+            .map(|workspace| WorkspaceChoice {
+                id: workspace.id.clone(),
+                label: workspace.name.clone(),
             })
             .collect::<Vec<_>>();
-        let default_project_changes = Rc::new(RefCell::new(Vec::new()));
-        let change_sink = Rc::clone(&default_project_changes);
-        let default_project = Dropdown::single(
-            project_choices,
+        let default_workspace_changes = Rc::new(RefCell::new(Vec::new()));
+        let change_sink = Rc::clone(&default_workspace_changes);
+        let default_workspace = Dropdown::single(
+            workspace_choices,
             |choice| choice.id.clone(),
             |choice| choice.label.clone(),
         )
-        .label("Default project")
+        .label("Default workspace")
         .placeholder("Unset")
         .no_selection_text("Unset")
-        .selected(default_project_id.into_iter().map(str::to_string))
+        .selected(default_workspace_id.into_iter().map(str::to_string))
         .search_mode(DropdownSearchMode::Contains)
         .commit_mode(DropdownCommitMode::Explicit)
         .on_select(move |ids| {
@@ -63,16 +63,16 @@ impl SettingsDialog {
             .gap(0)
             .child("calendar-view", calendar_view, FlexItem::content())
             .child("snooze-time", snooze_time, FlexItem::fixed(3))
-            .child("default-project", default_project, FlexItem::content());
+            .child("default-workspace", default_workspace, FlexItem::content());
         Self {
             root,
-            default_project_changes,
+            default_workspace_changes,
         }
     }
 
-    fn emit_default_project_changes(&self, ctx: &mut EventCtx<AppMsg>) {
-        for project_id in self.default_project_changes.borrow_mut().drain(..) {
-            ctx.emit(AppMsg::SetDefaultProject(project_id));
+    fn emit_default_workspace_changes(&self, ctx: &mut EventCtx<AppMsg>) {
+        for workspace_id in self.default_workspace_changes.borrow_mut().drain(..) {
+            ctx.emit(AppMsg::SetDefaultWorkspace(workspace_id));
         }
     }
 }
@@ -92,7 +92,7 @@ impl TuiNode<AppMsg> for SettingsDialog {
 
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<AppMsg>) -> EventOutcome {
         let outcome = self.root.event(event, ctx);
-        self.emit_default_project_changes(ctx);
+        self.emit_default_workspace_changes(ctx);
         outcome
     }
 
@@ -103,7 +103,7 @@ impl TuiNode<AppMsg> for SettingsDialog {
         ctx: &mut EventCtx<AppMsg>,
     ) -> EventOutcome {
         let outcome = self.root.dispatch_event(route, event, ctx);
-        self.emit_default_project_changes(ctx);
+        self.emit_default_workspace_changes(ctx);
         outcome
     }
 
@@ -138,11 +138,11 @@ mod tests {
     use time::macros::time;
     use tuicore::{Key, KeyEvent};
 
-    fn project() -> Project {
-        Project::new(
-            "project-1".into(),
+    fn workspace() -> Workspace {
+        Workspace::new(
+            "workspace-1".into(),
             "ONE".into(),
-            "Project one".into(),
+            "Workspace one".into(),
             String::new(),
         )
     }
@@ -194,13 +194,13 @@ mod tests {
     }
 
     #[test]
-    fn settings_include_default_project_dropdown() {
-        let project = project();
+    fn settings_include_default_workspace_dropdown() {
+        let workspace = workspace();
         let mut dialog = SettingsDialog::new(
             true,
             time!(8:15),
-            std::slice::from_ref(&project),
-            Some(&project.id),
+            std::slice::from_ref(&workspace),
+            Some(&workspace.id),
         );
         let mut layout = LayoutCtx::new();
         dialog.layout(Rect::new(0, 0, 40, 8), &mut layout);
@@ -212,9 +212,9 @@ mod tests {
                     .path
                     .keys()
                     .iter()
-                    .any(|key| key.as_str() == "default-project")
+                    .any(|key| key.as_str() == "default-workspace")
             })
-            .expect("default project dropdown should be focusable");
+            .expect("default workspace dropdown should be focusable");
 
         assert!(dropdown.area.width > 0);
     }

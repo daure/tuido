@@ -10,7 +10,7 @@ use tuicore::{
 use crate::{
     app::AppMsg,
     app_keymap::keys,
-    ui::management::{ManagementDialogKind, projects::ProjectKeyInput},
+    ui::management::{ManagementDialogKind, workspaces::WorkspaceKeyInput},
 };
 
 #[derive(Debug, Clone)]
@@ -20,7 +20,7 @@ pub(crate) enum ManagementEntityDraft {
         email: String,
         about: String,
     },
-    Project {
+    Workspace {
         key: String,
         name: String,
         description: String,
@@ -58,10 +58,10 @@ impl CreateManagementDialog {
             &TuiEvent::Key(KeyEvent::from(Key::Enter)),
             &mut EventCtx::default(),
         );
-        let mut root = if kind == ManagementDialogKind::Projects {
+        let mut root = if kind == ManagementDialogKind::Workspaces {
             Flex::column().child(
                 "primary",
-                ProjectKeyInput::new(first.max_len(5))
+                WorkspaceKeyInput::new(first.max_len(5))
                     .on_commit({
                         let primary = Rc::clone(&primary);
                         move |value| *primary.borrow_mut() = value.to_string()
@@ -93,7 +93,7 @@ impl CreateManagementDialog {
         }
         if matches!(
             kind,
-            ManagementDialogKind::People | ManagementDialogKind::Projects
+            ManagementDialogKind::People | ManagementDialogKind::Workspaces
         ) {
             root = root.child(
                 "description",
@@ -174,7 +174,7 @@ fn submitted_message(
             email: secondary,
             about: description.borrow().clone(),
         },
-        ManagementDialogKind::Projects => ManagementEntityDraft::Project {
+        ManagementDialogKind::Workspaces => ManagementEntityDraft::Workspace {
             key: primary.to_uppercase(),
             name: secondary,
             description: description.borrow().clone(),
@@ -187,7 +187,7 @@ fn submitted_message(
 fn primary_label(kind: ManagementDialogKind) -> &'static str {
     match kind {
         ManagementDialogKind::People => "Name",
-        ManagementDialogKind::Projects => "Key",
+        ManagementDialogKind::Workspaces => "Key",
         ManagementDialogKind::Tags => "Label",
     }
 }
@@ -195,7 +195,7 @@ fn primary_label(kind: ManagementDialogKind) -> &'static str {
 fn secondary_label(kind: ManagementDialogKind) -> &'static str {
     match kind {
         ManagementDialogKind::People => "Email",
-        ManagementDialogKind::Projects => "Name",
+        ManagementDialogKind::Workspaces => "Name",
         ManagementDialogKind::Tags => "",
     }
 }
@@ -203,7 +203,7 @@ fn secondary_label(kind: ManagementDialogKind) -> &'static str {
 fn primary_placeholder(kind: ManagementDialogKind) -> &'static str {
     match kind {
         ManagementDialogKind::People => "Person name",
-        ManagementDialogKind::Projects => "Project key",
+        ManagementDialogKind::Workspaces => "Workspace key",
         ManagementDialogKind::Tags => "Tag label",
     }
 }
@@ -211,7 +211,7 @@ fn primary_placeholder(kind: ManagementDialogKind) -> &'static str {
 fn secondary_placeholder(kind: ManagementDialogKind) -> &'static str {
     match kind {
         ManagementDialogKind::People => "Email address",
-        ManagementDialogKind::Projects => "Project name",
+        ManagementDialogKind::Workspaces => "Workspace name",
         ManagementDialogKind::Tags => "",
     }
 }
@@ -219,7 +219,7 @@ fn secondary_placeholder(kind: ManagementDialogKind) -> &'static str {
 fn description_placeholder(kind: ManagementDialogKind) -> &'static str {
     match kind {
         ManagementDialogKind::People => "About this person",
-        ManagementDialogKind::Projects => "Project description",
+        ManagementDialogKind::Workspaces => "Workspace description",
         ManagementDialogKind::Tags => "",
     }
 }
@@ -295,7 +295,7 @@ mod tests {
                 "ada@example.com",
                 "Compiler expert",
             ),
-            (ManagementDialogKind::Projects, "core", "Core", "Platform"),
+            (ManagementDialogKind::Workspaces, "core", "Core", "Platform"),
             (ManagementDialogKind::Tags, "backend", "", ""),
         ];
 
@@ -331,9 +331,9 @@ mod tests {
                         about,
                     })] if name == "Ada" && email == "ada@example.com" && about == "Compiler expert"
                 )),
-                ManagementDialogKind::Projects => assert!(matches!(
+                ManagementDialogKind::Workspaces => assert!(matches!(
                     ctx.messages(),
-                    [AppMsg::CreateManagementSubmitted(ManagementEntityDraft::Project {
+                    [AppMsg::CreateManagementSubmitted(ManagementEntityDraft::Workspace {
                         key,
                         name,
                         description,

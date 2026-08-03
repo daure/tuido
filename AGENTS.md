@@ -6,7 +6,7 @@ Persistence: tasks are stored in SQL through SQLx. Default DB is SQLite unless T
 
 Service boundary: `TuidoService` is public application API and database authority. TUI, MCP, and future adapters call it for every persistence mutation. Adapters must not issue SQL or reproduce domain mutation rules.
 
-Concurrency: persisted tasks, people, projects, and tags carry revisions. Updates/deletes require expected revision and return typed conflicts. Relation replacement and entity/workspace revision increments belong to one transaction. Never bypass conditional writes.
+Concurrency: persisted tasks, people, workspaces, and tags carry revisions. Updates/deletes require expected revision and return typed conflicts. Relation replacement and entity/workspace revision increments belong to one transaction. Never bypass conditional writes.
 
 Refresh: TUI polls workspace revision, reloads external changes, and preserves selected IDs/focus where still valid. Never replace view selection by row index during refresh. Do not refresh over pending optimistic writes.
 

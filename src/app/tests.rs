@@ -18,7 +18,7 @@ fn test_task() -> Task {
         priority: TaskPriority::Medium,
         snoozed_until: None,
         people_ids: Vec::new(),
-        project_id: None,
+        workspace_id: None,
         tag_ids: Vec::new(),
         checklist: Vec::new(),
         links: Vec::new(),
@@ -85,7 +85,7 @@ fn settings_changes_update_app_state_before_persistence_completes() {
     let (_runtime, context, store) = test_context(WorkspaceSnapshot {
         tasks: Vec::new(),
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut app = App::new(context.store, context.coordinator);
@@ -281,7 +281,7 @@ fn task_navigation_uses_the_most_specific_view_for_each_state() {
         let (_runtime, context, store) = test_context(WorkspaceSnapshot {
             tasks: vec![target.clone()],
             people: vec![],
-            projects: vec![],
+            workspaces: vec![],
             tags: vec![],
         });
         let mut workspace = TaskWorkspace::new(context);
@@ -319,7 +319,7 @@ fn app_task_navigation_chooses_the_view_for_each_task_state() {
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
             tasks: vec![target.clone()],
             people: vec![],
-            projects: vec![],
+            workspaces: vec![],
             tags: vec![],
         });
         let mut app = App::new(context.store, context.coordinator);
@@ -356,7 +356,7 @@ fn task_navigation_focuses_reverse_issue_link_on_destination_task() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![source, target],
         people: vec![],
-        projects: vec![],
+        workspaces: vec![],
         tags: vec![],
     });
     let mut app = App::new(context.store, context.coordinator);
@@ -408,7 +408,7 @@ fn external_refresh_repopulates_selected_task_detail_once_draft_is_safe() {
     let (_runtime, context, store) = test_context(WorkspaceSnapshot {
         tasks: vec![task.clone()],
         people: vec![],
-        projects: vec![],
+        workspaces: vec![],
         tags: vec![],
     });
     let mut workspace = TaskWorkspace::new(context);
@@ -419,7 +419,7 @@ fn external_refresh_repopulates_selected_task_detail_once_draft_is_safe() {
         snapshot: WorkspaceSnapshot {
             tasks: vec![refreshed],
             people: vec![],
-            projects: vec![],
+            workspaces: vec![],
             tags: vec![],
         },
         revision: 1,
@@ -446,40 +446,43 @@ fn identical_workspace_refresh_does_not_rebuild_selected_task_detail() {
     let (_runtime, context, store) = test_context(WorkspaceSnapshot {
         tasks: vec![task.clone()],
         people: vec![],
-        projects: vec![],
+        workspaces: vec![],
         tags: vec![],
     });
-    let mut workspace = TaskWorkspace::new(context);
-    let original_patches = Rc::clone(&workspace.detail().patches);
+    let mut task_workspace = TaskWorkspace::new(context);
+    let original_patches = Rc::clone(&task_workspace.detail().patches);
     store.borrow_mut().dispatch(AppEvent::WorkspaceRefreshed {
         snapshot: WorkspaceSnapshot {
             tasks: vec![task],
             people: vec![],
-            projects: vec![],
+            workspaces: vec![],
             tags: vec![],
         },
         revision: 1,
         entity_revisions: std::collections::HashMap::new(),
     });
 
-    workspace.layout(Rect::new(0, 0, 100, 30), &mut LayoutCtx::new());
+    task_workspace.layout(Rect::new(0, 0, 100, 30), &mut LayoutCtx::new());
 
-    assert!(Rc::ptr_eq(&original_patches, &workspace.detail().patches));
+    assert!(Rc::ptr_eq(
+        &original_patches,
+        &task_workspace.detail().patches
+    ));
 }
 
 #[test]
-fn new_people_and_projects_refresh_focused_task_detail_options() {
+fn new_people_and_workspaces_refresh_focused_task_detail_options() {
     let (_runtime, context, store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: vec![],
-        projects: vec![],
+        workspaces: vec![],
         tags: vec![],
     });
-    let mut workspace = TaskWorkspace::new(context);
-    let original_patches = Rc::clone(&workspace.detail().patches);
+    let mut task_workspace = TaskWorkspace::new(context);
+    let original_patches = Rc::clone(&task_workspace.detail().patches);
     let person = Person::new("person-1".into(), "Ada".into(), String::new());
-    let project = Project::new(
-        "project-1".into(),
+    let workspace = Workspace::new(
+        "workspace-1".into(),
         "CORE".into(),
         "Core".into(),
         String::new(),
@@ -489,13 +492,16 @@ fn new_people_and_projects_refresh_focused_task_detail_options() {
         .dispatch(AppEvent::PersonCreated(person.clone()));
     store
         .borrow_mut()
-        .dispatch(AppEvent::ProjectCreated(project.clone()));
+        .dispatch(AppEvent::WorkspaceCreated(workspace.clone()));
 
-    workspace.layout(Rect::new(0, 0, 100, 30), &mut LayoutCtx::new());
+    task_workspace.layout(Rect::new(0, 0, 100, 30), &mut LayoutCtx::new());
 
-    assert!(!Rc::ptr_eq(&original_patches, &workspace.detail().patches));
-    assert_eq!(workspace.detail().people_snapshot, vec![person]);
-    assert_eq!(workspace.detail().projects_snapshot, vec![project]);
+    assert!(!Rc::ptr_eq(
+        &original_patches,
+        &task_workspace.detail().patches
+    ));
+    assert_eq!(task_workspace.detail().people_snapshot, vec![person]);
+    assert_eq!(task_workspace.detail().workspaces_snapshot, vec![workspace]);
 }
 
 fn rendered_area_has_focus_style(node: &impl TuiNode<AppMsg>, canvas: Rect, area: Rect) -> bool {
@@ -537,8 +543,8 @@ fn task_header_shows_filters_to_the_left_of_new() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
-        projects: vec![Project::new(
-            "project-1".into(),
+        workspaces: vec![Workspace::new(
+            "workspace-1".into(),
             "APP".into(),
             "Application".into(),
             String::new(),
@@ -555,7 +561,7 @@ fn task_header_shows_filters_to_the_left_of_new() {
         " Active",
         &keys::TASK_VIEW_MENU.label(),
         &keys::TASK_LABEL_FILTER.label(),
-        "󰲋 Project",
+        "󰲋 Workspace",
         " Labels",
         "New",
     ] {
@@ -564,12 +570,12 @@ fn task_header_shows_filters_to_the_left_of_new() {
             "missing header text: {expected}; rendered: {text:?}"
         );
     }
-    let project = text
-        .find("󰲋 Project")
-        .expect("project filter should render");
+    let workspace = text
+        .find("󰲋 Workspace")
+        .expect("workspace filter should render");
     let labels = text.find(" Labels").expect("label filter should render");
     let new = text.find("New").expect("new button should render");
-    assert!(project < labels && labels < new);
+    assert!(workspace < labels && labels < new);
     assert!(!text.contains("View:"));
     assert!(!text.contains("Resolve"));
     assert!(!text.contains("Permanently"));
@@ -614,7 +620,7 @@ fn committed_label_filter_refreshes_workspace_rows() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![both, one],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: vec![
             Tag::new("api".into(), "API".into()),
             Tag::new("urgent".into(), "Urgent".into()),
@@ -638,23 +644,23 @@ fn committed_label_filter_refreshes_workspace_rows() {
 }
 
 #[test]
-fn committed_project_filter_selects_one_project_or_none() {
-    let mut first = task_with("first", "First project", TaskState::Todo);
-    first.project_id = Some("project-1".into());
-    let mut second = task_with("second", "Second project", TaskState::Todo);
-    second.project_id = Some("project-2".into());
+fn committed_workspace_filter_selects_one_workspace_or_none() {
+    let mut first = task_with("first", "First workspace", TaskState::Todo);
+    first.workspace_id = Some("workspace-1".into());
+    let mut second = task_with("second", "Second workspace", TaskState::Todo);
+    second.workspace_id = Some("workspace-2".into());
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![first, second],
         people: Vec::new(),
-        projects: vec![
-            Project::new(
-                "project-1".into(),
+        workspaces: vec![
+            Workspace::new(
+                "workspace-1".into(),
                 "ONE".into(),
                 "One".into(),
                 String::new(),
             ),
-            Project::new(
-                "project-2".into(),
+            Workspace::new(
+                "workspace-2".into(),
                 "TWO".into(),
                 "Two".into(),
                 String::new(),
@@ -663,9 +669,9 @@ fn committed_project_filter_selects_one_project_or_none() {
         tags: Vec::new(),
     });
     let mut workspace = TaskWorkspace::new(context);
-    *workspace.active_project_filter.borrow_mut() = Some("project-2".into());
+    *workspace.active_workspace_filter.borrow_mut() = Some("workspace-2".into());
 
-    assert!(workspace.sync_project_filter_change());
+    assert!(workspace.sync_workspace_filter_change());
     assert_eq!(
         workspace
             .table()
@@ -676,8 +682,8 @@ fn committed_project_filter_selects_one_project_or_none() {
         ["second"]
     );
 
-    *workspace.active_project_filter.borrow_mut() = None;
-    assert!(workspace.sync_project_filter_change());
+    *workspace.active_workspace_filter.borrow_mut() = None;
+    assert!(workspace.sync_workspace_filter_change());
     assert_eq!(workspace.table().rows().len(), 2);
 }
 
@@ -719,17 +725,20 @@ fn task_table_state_column_is_icon_only() {
 }
 
 #[test]
-fn task_table_shows_current_project_key_task_number_and_title() {
-    let project = Project::new(
-        "project".into(),
+fn task_table_shows_current_workspace_key_task_number_and_title() {
+    let workspace = Workspace::new(
+        "workspace".into(),
         "core".into(),
         "Core".into(),
         String::new(),
     );
     let mut task = task_with("OLD-42", "Ship it", TaskState::Todo);
-    task.project_id = Some(project.id.clone());
-    let mut table =
-        task_table_with_copy_context(vec![task], None, TaskCopyContext::new(&[], &[project], &[]));
+    task.workspace_id = Some(workspace.id.clone());
+    let mut table = task_table_with_copy_context(
+        vec![task],
+        None,
+        TaskCopyContext::new(&[], &[workspace], &[]),
+    );
     let area = Rect::new(0, 0, 80, 5);
     <TaskTable as TuiNode<AppMsg>>::layout(&mut table, area, &mut LayoutCtx::new());
 
@@ -771,7 +780,7 @@ fn narrow_task_workspace_renders_task_and_detail() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut workspace = TaskWorkspace::new(context);
@@ -789,7 +798,7 @@ fn wide_task_workspace_aligns_detail_with_toolbar_top() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut workspace = TaskWorkspace::new(context);
@@ -881,15 +890,15 @@ fn yanking_highlighted_task_copies_pretty_resolved_agent_json() {
         about: "Compiler expert".into(),
         active: false,
     };
-    let project_alpha = Project {
-        id: "project-alpha".into(),
+    let workspace_alpha = Workspace {
+        id: "workspace-alpha".into(),
         key: "ALPHA".into(),
         name: "Alpha".into(),
-        description: "First project".into(),
+        description: "First workspace".into(),
         lead_person_id: Some(grace.id.clone()),
     };
-    let project_beta = Project {
-        id: "project-beta".into(),
+    let workspace_beta = Workspace {
+        id: "workspace-beta".into(),
         key: "BETA".into(),
         name: "Beta".into(),
         description: String::new(),
@@ -913,7 +922,7 @@ fn yanking_highlighted_task_copies_pretty_resolved_agent_json() {
         time::Time::from_hms(9, 8, 7).unwrap(),
     ));
     highlighted.people_ids = vec![grace.id.clone(), ada.id.clone()];
-    highlighted.project_id = Some(project_alpha.id.clone());
+    highlighted.workspace_id = Some(workspace_alpha.id.clone());
     highlighted.tag_ids = vec![backend.id.clone(), urgent.id.clone()];
     highlighted.links = vec![
         "www.example.com/work".into(),
@@ -921,7 +930,7 @@ fn yanking_highlighted_task_copies_pretty_resolved_agent_json() {
     ];
     let copy_context = TaskCopyContext::new(
         &[ada.clone(), grace.clone()],
-        &[project_alpha.clone(), project_beta.clone()],
+        &[workspace_alpha.clone(), workspace_beta.clone()],
         &[urgent.clone(), backend.clone()],
     );
     let mut table = task_table_with_copy_context(vec![first, highlighted], None, copy_context);
@@ -955,8 +964,8 @@ fn yanking_highlighted_task_copies_pretty_resolved_agent_json() {
         ])
     );
     assert_eq!(
-        json["project"],
-        serde_json::json!({"id": "project-alpha", "key": "ALPHA", "name": "Alpha", "description": "First project", "lead": {"id": "person-grace", "name": "Grace Hopper", "email": "grace@example.com", "active": false}})
+        json["workspace"],
+        serde_json::json!({"id": "workspace-alpha", "key": "ALPHA", "name": "Alpha", "description": "First workspace", "lead": {"id": "person-grace", "name": "Grace Hopper", "email": "grace@example.com", "active": false}})
     );
     assert_eq!(
         json["tags"],
@@ -975,7 +984,7 @@ fn yanking_highlighted_task_copies_pretty_resolved_agent_json() {
     for excluded in [
         "revision",
         "people_ids",
-        "project_id",
+        "workspace_id",
         "tag_ids",
         "workspace_revision",
         "selected_task_id",
@@ -1019,14 +1028,14 @@ fn yanking_task_with_missing_relation_copies_descriptive_json_error() {
 }
 
 #[test]
-fn agent_yank_copies_unprojected_numeric_task_command() {
+fn agent_yank_copies_unworkspaceed_numeric_task_command() {
     let task_id = "1234";
     let task_title = "Add yank agent hotkey";
     let task = task_with(task_id, task_title, TaskState::Todo);
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![task],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut workspace = TaskWorkspace::new(context);
@@ -1050,19 +1059,19 @@ fn agent_yank_copies_unprojected_numeric_task_command() {
 }
 
 #[test]
-fn agent_yank_copies_project_key_task_command() {
-    let project = Project::new(
-        "project-1".into(),
+fn agent_yank_copies_workspace_key_task_command() {
+    let workspace = Workspace::new(
+        "workspace-1".into(),
         "proj".into(),
-        "Project".into(),
+        "Workspace".into(),
         String::new(),
     );
-    let mut task = task_with("OLD-1234", "Project task", TaskState::Todo);
-    task.project_id = Some(project.id.clone());
+    let mut task = task_with("OLD-1234", "Workspace task", TaskState::Todo);
+    task.workspace_id = Some(workspace.id.clone());
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![task],
         people: Vec::new(),
-        projects: vec![project],
+        workspaces: vec![workspace],
         tags: Vec::new(),
     });
     let mut workspace = TaskWorkspace::new(context);
@@ -1076,7 +1085,7 @@ fn agent_yank_copies_project_key_task_command() {
 
     assert_eq!(
         effects.clipboard.as_deref(),
-        Some("Tuido execute PROJ-1234 \"Project task\"")
+        Some("Tuido execute PROJ-1234 \"Workspace task\"")
     );
 }
 
@@ -1091,7 +1100,7 @@ fn app_startup_selects_and_focuses_first_ranked_task() {
     let (_runtime, context, store) = test_context(WorkspaceSnapshot {
         tasks: vec![older_low, newer_high],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let workspace = TaskWorkspace::new(context.clone());
@@ -1135,7 +1144,7 @@ fn task_detail_hotkeys_are_registered_while_task_table_is_focused() {
     let (_runtime, context, store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut app = App::new(store, Rc::clone(&context.coordinator));
@@ -1186,7 +1195,7 @@ fn reselecting_current_task_does_not_rebuild_detail_controls() {
     let (_runtime, context, store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut workspace = TaskWorkspace::new(context);
@@ -1292,7 +1301,7 @@ fn app_header_new_button_emits_create_action() {
     let (_runtime, context, store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut app = App::new(store, Rc::clone(&context.coordinator));
@@ -1341,7 +1350,7 @@ fn escape_from_app_header_new_button_focuses_tabs() {
     let (_runtime, context, store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut app = App::new(store, Rc::clone(&context.coordinator));
@@ -1379,7 +1388,7 @@ fn escape_from_task_toolbar_filters_focuses_data_view() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut workspace = TaskWorkspace::new(context);
@@ -1434,13 +1443,13 @@ fn escape_from_global_filters_focuses_active_tab_content() {
         (0, initial_task_table_focus_request()),
         (CALENDAR_TAB_INDEX, initial_calendar_focus_request()),
     ] {
-        for component in ["project", "labels"] {
+        for component in ["workspace", "labels"] {
             for key in close_keys {
                 let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
                     tasks: vec![test_task()],
                     people: Vec::new(),
-                    projects: vec![Project::new(
-                        "project-1".into(),
+                    workspaces: vec![Workspace::new(
+                        "workspace-1".into(),
                         "APP".into(),
                         "Application".into(),
                         String::new(),
@@ -1464,8 +1473,8 @@ fn escape_from_global_filters_focuses_active_tab_content() {
                             && target.id.as_str() == "field"
                     })
                     .expect("global filter should be focusable");
-                let expected_hotkey = if component == "project" {
-                    "shift+p"
+                let expected_hotkey = if component == "workspace" {
+                    "shift+w"
                 } else {
                     "shift+l"
                 };
@@ -1491,8 +1500,8 @@ fn escape_from_global_filter_focuses_real_calendar_target() {
     let (_runtime, context, store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
-        projects: vec![Project::new(
-            "project-1".into(),
+        workspaces: vec![Workspace::new(
+            "workspace-1".into(),
             "APP".into(),
             "Application".into(),
             String::new(),
@@ -1522,7 +1531,7 @@ fn escape_from_global_filter_focuses_real_calendar_target() {
         .iter()
         .find(|target| target.id.as_str() == "calendar")
         .expect("calendar should be focusable");
-    let project = calendar_layout
+    let workspace = calendar_layout
         .focus_targets()
         .iter()
         .find(|target| {
@@ -1531,13 +1540,13 @@ fn escape_from_global_filter_focuses_real_calendar_target() {
                     .path
                     .keys()
                     .iter()
-                    .any(|part| part.as_str() == "project")
+                    .any(|part| part.as_str() == "workspace")
         })
-        .expect("project filter should be focusable");
+        .expect("workspace filter should be focusable");
     let mut ctx = EventCtx::default();
 
     let outcome = app.dispatch_event(
-        &EventRoute::new(project.path.clone()),
+        &EventRoute::new(workspace.path.clone()),
         &TuiEvent::Key(Key::Esc.into()),
         &mut ctx,
     );
@@ -1566,7 +1575,7 @@ fn escape_from_task_detail_controls_focuses_data_view() {
         let (_runtime, context, store) = test_context(WorkspaceSnapshot {
             tasks: vec![test_task()],
             people: Vec::new(),
-            projects: Vec::new(),
+            workspaces: Vec::new(),
             tags: Vec::new(),
         });
         let mut app = App::new(store, Rc::clone(&context.coordinator));
@@ -1628,7 +1637,7 @@ fn task_view_menu_shortcut_opens_and_switches_to_snoozed() {
             task_with("snoozed", "Snoozed work", TaskState::Snoozed),
         ],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut workspace = TaskWorkspace::new(context);
@@ -1701,7 +1710,7 @@ fn task_views_group_tasks_by_workflow_state() {
             task_with("snoozed", "Snoozed work", TaskState::Snoozed),
         ],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut workspace = TaskWorkspace::new(context);
@@ -1756,7 +1765,7 @@ fn switching_views_selects_first_visible_task() {
             task_with_rank("backlog-2", "Backlog two", TaskState::Backlog, 1),
         ],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut workspace = TaskWorkspace::new(context);
@@ -1784,7 +1793,7 @@ fn switching_task_view_clears_table_search() {
             task_with("todo-1", "Todo one", TaskState::Todo),
         ],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut workspace = TaskWorkspace::new(context);
@@ -1805,7 +1814,7 @@ fn switching_views_focuses_first_visible_table_row() {
             task_with_rank("backlog-2", "Backlog two", TaskState::Backlog, 1),
         ],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut workspace = TaskWorkspace::new(context);
@@ -1833,7 +1842,7 @@ fn state_change_selects_next_visible_task() {
             task_with_rank("active-3", "Active three", TaskState::InProgress, 1),
         ],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut workspace = TaskWorkspace::new(context);
@@ -1861,7 +1870,7 @@ fn detail_state_change_focuses_newly_selected_table_row() {
             task_with_rank("active-3", "Active three", TaskState::InProgress, 1),
         ],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut workspace = TaskWorkspace::new(context);
@@ -1894,7 +1903,7 @@ fn state_change_for_last_task_selects_previous_visible_task() {
             task_with("active-3", "Active three", TaskState::InProgress),
         ],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut workspace = TaskWorkspace::new(context);
@@ -1931,7 +1940,7 @@ fn deleting_task_selects_next_visible_row_or_previous_at_end() {
     let (_runtime, context, store) = test_context(WorkspaceSnapshot {
         tasks: tasks(),
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut workspace = TaskWorkspace::new(context);
@@ -1947,7 +1956,7 @@ fn deleting_task_selects_next_visible_row_or_previous_at_end() {
     let (_runtime, context, store) = test_context(WorkspaceSnapshot {
         tasks: tasks(),
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut workspace = TaskWorkspace::new(context);
@@ -1969,7 +1978,7 @@ fn detail_state_change_with_no_remaining_tasks_clears_detail() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![task_with("active-1", "Active one", TaskState::InProgress)],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut workspace = TaskWorkspace::new(context);

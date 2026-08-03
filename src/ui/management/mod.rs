@@ -1,12 +1,12 @@
 mod common;
 pub(crate) mod people;
-pub(crate) mod projects;
 pub(crate) mod tags;
+pub(crate) mod workspaces;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ManagementDialogKind {
     People,
-    Projects,
+    Workspaces,
     Tags,
 }
 
@@ -14,7 +14,7 @@ impl ManagementDialogKind {
     pub(crate) fn singular(self) -> &'static str {
         match self {
             Self::People => "person",
-            Self::Projects => "project",
+            Self::Workspaces => "workspace",
             Self::Tags => "tag",
         }
     }
@@ -25,7 +25,7 @@ mod tests {
     use super::*;
     use crate::{
         app::{AppMsg, tests::test_context},
-        domain::{Person, Project, Tag, WorkspaceSnapshot},
+        domain::{Person, Tag, Workspace, WorkspaceSnapshot},
     };
     use ratatui::{Terminal, backend::TestBackend, layout::Rect};
     use tuicore::{LayoutCtx, RenderCtx, TuiNode};
@@ -38,17 +38,17 @@ mod tests {
     #[test]
     fn narrow_management_workspaces_render_table_detail_and_controls() {
         let person = Person::new("person-1".into(), "Ada".into(), "ada@example.com".into());
-        let mut project = Project::new(
-            "project-1".into(),
+        let mut workspace = Workspace::new(
+            "workspace-1".into(),
             "CORE".into(),
             "Core".into(),
             "Platform".into(),
         );
-        project.lead_person_id = Some(person.id.clone());
+        workspace.lead_person_id = Some(person.id.clone());
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
             tasks: vec![],
             people: vec![person],
-            projects: vec![project],
+            workspaces: vec![workspace],
             tags: vec![Tag::new("tag-1".into(), "api".into())],
         });
         let cases: Vec<ManagementCase> = vec![
@@ -57,7 +57,7 @@ mod tests {
                 &["Ada", "Email", "Active", "New"],
             ),
             (
-                Box::new(projects::dialog(context.clone())),
+                Box::new(workspaces::dialog(context.clone())),
                 &["CORE", "Description", "Lead", "New"],
             ),
             (Box::new(tags::dialog(context)), &["api", "Label", "New"]),
@@ -89,7 +89,7 @@ mod tests {
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
             tasks: vec![],
             people: vec![],
-            projects: vec![],
+            workspaces: vec![],
             tags: vec![],
         });
         let cases: Vec<EmptyManagementCase> = vec![
@@ -99,9 +99,9 @@ mod tests {
                 &["No person selected.", "About"],
             ),
             (
-                Box::new(projects::dialog(context.clone())),
-                "No projects yet",
-                &["No project selected.", "Description"],
+                Box::new(workspaces::dialog(context.clone())),
+                "No workspaces yet",
+                &["No workspace selected.", "Description"],
             ),
             (
                 Box::new(tags::dialog(context)),

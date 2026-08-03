@@ -17,7 +17,7 @@ async fn external_client_can_use_public_service_dtos() {
             priority: "medium".into(),
             snoozed_until: None,
             people_ids: Vec::new(),
-            project_id: None,
+            workspace_id: None,
             tag_ids: Vec::new(),
             links: vec!["https://example.com/task".into()],
         })
@@ -33,7 +33,7 @@ async fn external_client_can_use_public_service_dtos() {
             priority: "high".into(),
             snoozed_until: None,
             people_ids: Vec::new(),
-            project_id: None,
+            workspace_id: None,
             tag_ids: Vec::new(),
             links: vec!["file:///tmp/task.txt".into()],
             relations: Vec::new(),
@@ -101,7 +101,7 @@ async fn public_service_accepts_www_links_and_rejects_other_protocol_free_links(
             priority: "medium".into(),
             snoozed_until: None,
             people_ids: Vec::new(),
-            project_id: None,
+            workspace_id: None,
             tag_ids: Vec::new(),
             links: vec!["example.com/task".into()],
         })
@@ -119,7 +119,7 @@ async fn public_service_accepts_www_links_and_rejects_other_protocol_free_links(
             priority: "medium".into(),
             snoozed_until: None,
             people_ids: Vec::new(),
-            project_id: None,
+            workspace_id: None,
             tag_ids: Vec::new(),
             links: vec!["www.google.com/search?q=tuido".into()],
         })

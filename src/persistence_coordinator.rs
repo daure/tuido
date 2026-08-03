@@ -12,8 +12,9 @@ use tuicore::Store;
 
 use crate::{
     domain::{
-        AppEvent, AppState, Person, PersonDeletion, PersonPatch, Project, ProjectDeletion,
-        ProjectPatch, SaveTarget, Tag, TagDeletion, TagPatch, Task, TaskField, TaskPatch, TaskRank,
+        AppEvent, AppState, Person, PersonDeletion, PersonPatch, SaveTarget, Tag, TagDeletion,
+        TagPatch, Task, TaskField, TaskPatch, TaskRank, Workspace, WorkspaceDeletion,
+        WorkspacePatch,
     },
     service::{TaskRankUpdate, TuidoService},
     storage::SqlDialect,
@@ -26,7 +27,7 @@ pub(crate) type AppStore =
 enum CommandKey {
     Task,
     Person(String),
-    Project(String),
+    Workspace(String),
     Tag(String),
     AppSetting(String),
 }
@@ -44,9 +45,9 @@ pub(crate) enum PersistenceCommand {
     CreatePerson(Person),
     DeletePerson(PersonDeletion),
     PatchPerson(String, PersonPatch),
-    CreateProject(Project),
-    DeleteProject(ProjectDeletion),
-    PatchProject(String, ProjectPatch),
+    CreateWorkspace(Workspace),
+    DeleteWorkspace(WorkspaceDeletion),
+    PatchWorkspace(String, WorkspacePatch),
     CreateTag(Tag),
     DeleteTag(TagDeletion),
     PatchTag(String, TagPatch),
@@ -67,9 +68,9 @@ impl PersistenceCommand {
             Self::CreatePerson(person) => CommandKey::Person(person.id.clone()),
             Self::DeletePerson(deletion) => CommandKey::Person(deletion.person.id.clone()),
             Self::PatchPerson(id, _) => CommandKey::Person(id.clone()),
-            Self::CreateProject(project) => CommandKey::Project(project.id.clone()),
-            Self::DeleteProject(deletion) => CommandKey::Project(deletion.project.id.clone()),
-            Self::PatchProject(id, _) => CommandKey::Project(id.clone()),
+            Self::CreateWorkspace(workspace) => CommandKey::Workspace(workspace.id.clone()),
+            Self::DeleteWorkspace(deletion) => CommandKey::Workspace(deletion.workspace.id.clone()),
+            Self::PatchWorkspace(id, _) => CommandKey::Workspace(id.clone()),
             Self::CreateTag(tag) => CommandKey::Tag(tag.id.clone()),
             Self::DeleteTag(deletion) => CommandKey::Tag(deletion.tag.id.clone()),
             Self::PatchTag(id, _) => CommandKey::Tag(id.clone()),
@@ -524,22 +525,22 @@ impl PersistenceCoordinator {
                     self.queued.remove(&completion.key);
                 }
             },
-            PersistenceCommand::CreateProject(project) => {
+            PersistenceCommand::CreateWorkspace(workspace) => {
                 if completion.error.is_some() {
                     changed |= self
                         .store
                         .borrow_mut()
-                        .dispatch(AppEvent::ProjectDeleted(project.id))
+                        .dispatch(AppEvent::WorkspaceDeleted(workspace.id))
                         .changed;
                     self.queued.remove(&completion.key);
                 }
             }
-            PersistenceCommand::DeleteProject(deletion) => match completion.error {
+            PersistenceCommand::DeleteWorkspace(deletion) => match completion.error {
                 Some(_) => {
                     changed |= self
                         .store
                         .borrow_mut()
-                        .dispatch(AppEvent::ProjectRestored(deletion))
+                        .dispatch(AppEvent::WorkspaceRestored(deletion))
                         .changed;
                 }
                 None => {
@@ -610,12 +611,12 @@ impl PersistenceCoordinator {
                     })
                     .changed;
             }
-            PersistenceCommand::PatchProject(id, patch) => {
+            PersistenceCommand::PatchWorkspace(id, patch) => {
                 changed |= self
                     .store
                     .borrow_mut()
                     .dispatch(AppEvent::SaveCompleted {
-                        target: SaveTarget::project(id, patch.field()),
+                        target: SaveTarget::workspace(id, patch.field()),
                         error: completion.error,
                     })
                     .changed;
@@ -730,13 +731,13 @@ async fn execute(
             .await
             .map(|_| HashMap::new())
             .map_err(boxed_service_error),
-        PersistenceCommand::CreateProject(project) => service
-            .create_project_entity(project)
+        PersistenceCommand::CreateWorkspace(workspace) => service
+            .create_workspace_entity(workspace)
             .await
             .map(|_| HashMap::new())
             .map_err(boxed_service_error),
-        PersistenceCommand::DeleteProject(deletion) => service
-            .delete_project(&deletion.project.id, expected()?)
+        PersistenceCommand::DeleteWorkspace(deletion) => service
+            .delete_workspace(&deletion.workspace.id, expected()?)
             .await
             .map(|_| HashMap::new())
             .map_err(boxed_service_error),
@@ -783,8 +784,8 @@ async fn execute(
             .await
             .map(|_| HashMap::new())
             .map_err(boxed_service_error),
-        PersistenceCommand::PatchProject(id, patch) => service
-            .patch_project(id, expected()?, patch)
+        PersistenceCommand::PatchWorkspace(id, patch) => service
+            .patch_workspace(id, expected()?, patch)
             .await
             .map(|_| HashMap::new())
             .map_err(boxed_service_error),
@@ -815,15 +816,15 @@ fn command_entity(command: &PersistenceCommand) -> Option<(&'static str, &str)> 
     match command {
         PersistenceCommand::CreateTask(_)
         | PersistenceCommand::CreatePerson(_)
-        | PersistenceCommand::CreateProject(_)
+        | PersistenceCommand::CreateWorkspace(_)
         | PersistenceCommand::CreateTag(_) => None,
         PersistenceCommand::DeleteTask(v) => Some(("task", &v.id)),
         PersistenceCommand::PatchTask(id, _) => Some(("task", id)),
         PersistenceCommand::ReorderTasks { .. } => None,
         PersistenceCommand::DeletePerson(v) => Some(("person", &v.person.id)),
         PersistenceCommand::PatchPerson(id, _) => Some(("person", id)),
-        PersistenceCommand::DeleteProject(v) => Some(("project", &v.project.id)),
-        PersistenceCommand::PatchProject(id, _) => Some(("project", id)),
+        PersistenceCommand::DeleteWorkspace(v) => Some(("workspace", &v.workspace.id)),
+        PersistenceCommand::PatchWorkspace(id, _) => Some(("workspace", id)),
         PersistenceCommand::DeleteTag(v) => Some(("tag", &v.tag.id)),
         PersistenceCommand::PatchTag(id, _) => Some(("tag", id)),
         PersistenceCommand::SetAppSetting { .. } => None,
@@ -840,7 +841,7 @@ fn revision_update(
             command,
             PersistenceCommand::DeleteTask(_)
                 | PersistenceCommand::DeletePerson(_)
-                | PersistenceCommand::DeleteProject(_)
+                | PersistenceCommand::DeleteWorkspace(_)
                 | PersistenceCommand::DeleteTag(_)
         ) {
             Some((key, None))
@@ -851,7 +852,7 @@ fn revision_update(
         let (kind, id) = match command {
             PersistenceCommand::CreateTask(v) => ("task", v.id.as_str()),
             PersistenceCommand::CreatePerson(v) => ("person", v.id.as_str()),
-            PersistenceCommand::CreateProject(v) => ("project", v.id.as_str()),
+            PersistenceCommand::CreateWorkspace(v) => ("workspace", v.id.as_str()),
             PersistenceCommand::CreateTag(v) => ("tag", v.id.as_str()),
             _ => return None,
         };
@@ -869,12 +870,12 @@ fn cascade_revision_updates(
             keys.extend(deletion.task_ids.iter().map(|id| format!("task:{id}")));
             keys.extend(
                 deletion
-                    .lead_project_ids
+                    .lead_workspace_ids
                     .iter()
-                    .map(|id| format!("project:{id}")),
+                    .map(|id| format!("workspace:{id}")),
             );
         }
-        PersistenceCommand::DeleteProject(deletion) => {
+        PersistenceCommand::DeleteWorkspace(deletion) => {
             keys.extend(deletion.task_ids.iter().map(|id| format!("task:{id}")));
         }
         PersistenceCommand::DeleteTag(deletion) => {

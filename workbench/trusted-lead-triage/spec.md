@@ -1,7 +1,7 @@
 # Spec: Trusted Lead Triage
 
 > **Purpose:** Help a technical lead capture messy daily work, clarify it into trusted structured items, hide deferred work safely, pull only active action items onto a clean board, and choose a simple time-aware daily focus.
-> **In scope:** Inbox capture, AI-assisted/manual clarification, item typing, action subtypes, item sizing, start/due dates for action items, people/team/system/project fields, snooze return behavior, board pull flow, daily 1-3-5 focus, mid-day focus swaps, frog task selection, lightweight focus history, immediate archive on done.
+> **In scope:** Inbox capture, AI-assisted/manual clarification, item typing, action subtypes, item sizing, start/due dates for action items, people/team/system/workspace fields, snooze return behavior, board pull flow, daily 1-3-5 focus, mid-day focus swaps, frog task selection, lightweight focus history, immediate archive on done.
 > **Out of scope:** Full GTD clone, autonomous AI organization, calendar view, recurrence, ticket/doc ingestion, provider-specific AI implementation, team collaboration, priority labels, hard capacity enforcement.
 
 ## Domain Model
@@ -15,7 +15,7 @@
 - Start dates make action items eligible for Daily Focus suggestions; they do not hide items from normal lists or search.
 - Due dates represent commitment signals, not priority labels.
 - Priority labels are not part of the model; time relevance comes from start dates, due dates, snooze returns, size, and explicit user selection.
-- Clarified items may reference people, teams, systems, and project labels.
+- Clarified items may reference people, teams, systems, and workspace labels.
 - Only `action` items can be pulled onto the board.
 - The board has three columns: `To Do`, `In Progress`, and `Done`.
 - Daily focus follows a 1-3-5 structure: one big action, up to three medium actions, and up to five small actions.
@@ -41,7 +41,7 @@
 **Given** a raw inbox item contains messy text with one or more possible work items
 **When** the user starts clarification with AI available
 **Then** the system suggests one or more clarified items
-**And** each suggestion includes type, optional action subtype, suggested size for actions, optional date hints, and likely people, teams, systems, and project labels
+**And** each suggestion includes type, optional action subtype, suggested size for actions, optional date hints, and likely people, teams, systems, and workspace labels
 **And** the suggestions remain uncommitted until the user accepts or edits them
 
 ### AI splits a large raw note
@@ -63,7 +63,7 @@
 **Given** a raw inbox item represents work the user may perform
 **When** the user accepts or creates a clarified `action` item
 **Then** the item becomes eligible to be pulled onto the board
-**And** it may reference people, teams, systems, and project labels
+**And** it may reference people, teams, systems, and workspace labels
 **And** it has a size of `small`, `medium`, or `big`
 
 ### Clarifying action timing
@@ -96,7 +96,7 @@
 **Given** a raw inbox item represents something the user is waiting on from someone else
 **When** the user clarifies it as an action with subtype or state `waiting`
 **Then** it is tracked as actionable work that depends on someone else
-**And** it can reference the relevant person, team, system, or project label
+**And** it can reference the relevant person, team, system, or workspace label
 **And** it can use snooze/return behavior when the user wants it hidden until follow-up time
 
 ### Clarifying a note
@@ -104,7 +104,7 @@
 **Given** a raw inbox item contains useful context without a concrete action
 **When** the user clarifies it as `note`
 **Then** it is stored as clarified reference context outside the board
-**And** it can reference people, teams, systems, and project labels
+**And** it can reference people, teams, systems, and workspace labels
 
 ### Only clarified items can be snoozed
 

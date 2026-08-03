@@ -1,9 +1,9 @@
 use super::*;
 
 #[test]
-fn selecting_project_from_detail_dropdown_refreshes_title_panel_identifier() {
-    let project = Project::new(
-        "project-1".into(),
+fn selecting_workspace_from_detail_dropdown_refreshes_title_panel_identifier() {
+    let workspace = Workspace::new(
+        "workspace-1".into(),
         "APP".into(),
         "Application".into(),
         String::new(),
@@ -12,14 +12,14 @@ fn selecting_project_from_detail_dropdown_refreshes_title_panel_identifier() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![task],
         people: Vec::new(),
-        projects: vec![project],
+        workspaces: vec![workspace],
         tags: Vec::new(),
     });
     let mut workspace = TaskWorkspace::new(context);
     let area = Rect::new(0, 0, 120, 40);
     let mut layout = LayoutCtx::new();
     workspace.layout(area, &mut layout);
-    let project_field = layout
+    let workspace_field = layout
         .focus_targets()
         .iter()
         .find(|target| {
@@ -28,27 +28,27 @@ fn selecting_project_from_detail_dropdown_refreshes_title_panel_identifier() {
                     .path
                     .keys()
                     .iter()
-                    .any(|key| key.as_str() == "projects")
+                    .any(|key| key.as_str() == "workspaces")
         })
-        .expect("task project should be focusable")
+        .expect("task workspace should be focusable")
         .clone();
     let mut dispatcher = TreeDispatcher::new();
     let open = dispatcher.dispatch_event(
         &mut workspace,
-        &EventRoute::new(project_field.path),
-        &TuiEvent::Hotkey(HotkeyEvent::Commit(keys::TASK_PROJECTS_FIELD.hotkey())),
+        &EventRoute::new(workspace_field.path),
+        &TuiEvent::Hotkey(HotkeyEvent::Commit(keys::TASK_WORKSPACES_FIELD.hotkey())),
         AnimationSettings::default(),
     );
     let focus_request = open
         .focus_request
         .as_ref()
-        .expect("project hotkey should request dropdown search focus");
+        .expect("workspace hotkey should request dropdown search focus");
     let mut open_layout = LayoutCtx::new();
     workspace.layout(area, &mut open_layout);
     let mut focus = FocusManager::new();
     let transition = focus
         .apply_request(focus_request, open_layout.focus_targets())
-        .expect("project dropdown search should accept focus");
+        .expect("workspace dropdown search should accept focus");
     let focused = transition.current.clone().unwrap();
     dispatcher.dispatch_focus(&mut workspace, transition, AnimationSettings::default());
 
@@ -74,7 +74,7 @@ fn selecting_project_from_detail_dropdown_refreshes_title_panel_identifier() {
 
     let mut selected_layout = LayoutCtx::new();
     workspace.layout(area, &mut selected_layout);
-    let project_field = selected_layout
+    let workspace_field = selected_layout
         .focus_targets()
         .iter()
         .find(|target| {
@@ -83,14 +83,14 @@ fn selecting_project_from_detail_dropdown_refreshes_title_panel_identifier() {
                     .path
                     .keys()
                     .iter()
-                    .any(|key| key.as_str() == "projects")
+                    .any(|key| key.as_str() == "workspaces")
         })
         .unwrap()
         .clone();
     let open = dispatcher.dispatch_event(
         &mut workspace,
-        &EventRoute::new(project_field.path),
-        &TuiEvent::Hotkey(HotkeyEvent::Commit(keys::TASK_PROJECTS_FIELD.hotkey())),
+        &EventRoute::new(workspace_field.path),
+        &TuiEvent::Hotkey(HotkeyEvent::Commit(keys::TASK_WORKSPACES_FIELD.hotkey())),
         AnimationSettings::default(),
     );
     let mut open_layout = LayoutCtx::new();
@@ -130,7 +130,7 @@ fn task_table_ignores_data_view_filter_mode_hotkey() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut workspace = TaskWorkspace::new(context);
@@ -189,7 +189,7 @@ fn empty_task_workspace_collapses_detail_and_gives_table_full_pane() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: Vec::new(),
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut workspace = TaskWorkspace::new(context);
@@ -217,7 +217,7 @@ fn task_views_explain_when_their_state_bucket_is_empty() {
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
             tasks: vec![task_with("other", "Other task", other_state)],
             people: Vec::new(),
-            projects: Vec::new(),
+            workspaces: Vec::new(),
             tags: Vec::new(),
         });
         let mut workspace = TaskWorkspace::new(context);
@@ -240,7 +240,7 @@ fn task_search_hides_detail_and_clearing_search_restores_it() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut workspace = TaskWorkspace::new(context);
@@ -274,7 +274,7 @@ fn task_labels_with_no_matches_use_filtered_empty_message() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![task],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: vec![
             Tag::new("api".into(), "API".into()),
             Tag::new("urgent".into(), "Urgent".into()),
@@ -295,7 +295,7 @@ fn hidden_task_cannot_be_deleted_from_empty_active_view() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![task_with("backlog", "Backlog work", TaskState::Backlog)],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut workspace = TaskWorkspace::new(context);
@@ -314,7 +314,7 @@ fn created_backlog_task_becomes_visible_and_selected_from_any_task_view() {
         let (_runtime, context, store) = test_context(WorkspaceSnapshot {
             tasks: vec![test_task()],
             people: Vec::new(),
-            projects: Vec::new(),
+            workspaces: Vec::new(),
             tags: Vec::new(),
         });
         let mut workspace = TaskWorkspace::new(context);
@@ -352,7 +352,7 @@ fn escape_keeps_task_table_focused_as_tab_root() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut workspace = TaskWorkspace::new(context);
@@ -370,7 +370,7 @@ fn focus_tracking_matches_master_detail_layout_paths() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut workspace = TaskWorkspace::new(context);
@@ -409,7 +409,7 @@ fn delete_shortcuts_open_confirmation_from_focused_task_table() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut workspace = TaskWorkspace::new(context);
@@ -438,7 +438,7 @@ fn ctrl_c_opens_complete_dialog_from_focused_task_table() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut workspace = TaskWorkspace::new(context);
@@ -473,7 +473,7 @@ fn ctrl_t_requests_direct_progress_transition_for_every_task_state() {
         let (_runtime, context, store) = test_context(WorkspaceSnapshot {
             tasks: vec![task_with("task-1", "Shortcut task", state)],
             people: Vec::new(),
-            projects: Vec::new(),
+            workspaces: Vec::new(),
             tags: Vec::new(),
         });
         let mut workspace = TaskWorkspace::new(context);
@@ -515,7 +515,7 @@ fn direct_progress_transition_updates_state_persists_and_notifies() {
         let (_runtime, context, store) = test_context(WorkspaceSnapshot {
             tasks: vec![task_with("task-1", "Shortcut task", from)],
             people: Vec::new(),
-            projects: Vec::new(),
+            workspaces: Vec::new(),
             tags: Vec::new(),
         });
         let coordinator = Rc::clone(&context.coordinator);
@@ -542,7 +542,7 @@ fn ctrl_t_is_inert_without_a_highlighted_task() {
     let (_runtime, context, store) = test_context(WorkspaceSnapshot {
         tasks: Vec::new(),
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut workspace = TaskWorkspace::new(context);
@@ -572,7 +572,7 @@ fn ctrl_c_from_task_detail_preserves_full_path_and_child_ownership() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut workspace = TaskWorkspace::new(context);
@@ -623,7 +623,7 @@ fn ctrl_x_from_task_detail_opens_delete_except_under_links() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut workspace = TaskWorkspace::new(context);
@@ -684,7 +684,7 @@ fn ctrl_x_from_task_detail_opens_delete_except_under_links() {
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
             tasks: vec![task],
             people: Vec::new(),
-            projects: Vec::new(),
+            workspaces: Vec::new(),
             tags: Vec::new(),
         });
         let mut workspace = TaskWorkspace::new(context);
@@ -723,7 +723,7 @@ fn ctrl_x_from_task_detail_opens_delete_except_under_links() {
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
             tasks: vec![task],
             people: Vec::new(),
-            projects: Vec::new(),
+            workspaces: Vec::new(),
             tags: Vec::new(),
         });
         let mut workspace = TaskWorkspace::new(context);
@@ -792,7 +792,7 @@ fn first_escape_cancels_checklist_and_link_insert_before_leaving_detail() {
             let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
                 tasks: vec![test_task()],
                 people: Vec::new(),
-                projects: Vec::new(),
+                workspaces: Vec::new(),
                 tags: Vec::new(),
             });
             let mut workspace = TaskWorkspace::new(context);
@@ -871,7 +871,7 @@ fn detail_dialog_cancel_restores_resolvable_full_app_focus_path() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut app = App::new(context.store, context.coordinator);
@@ -1002,7 +1002,7 @@ fn table_origin_dialog_cancel_focuses_task_table() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut app = App::new(context.store, context.coordinator);
@@ -1046,7 +1046,7 @@ fn calendar_origin_dialog_cancel_restores_calendar_focus() {
             task_with("task-2", "Calendar task", TaskState::Snoozed),
         ],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut app = App::new(context.store, context.coordinator);
@@ -1098,7 +1098,7 @@ fn missing_task_dialog_targets_clear_origin_and_focus_task_table() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut app = App::new(context.store, context.coordinator);
@@ -1150,7 +1150,7 @@ fn quick_menu_opens_with_visible_task_and_ctrl_z_snoozes_from_table() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut workspace = TaskWorkspace::new(context);
@@ -1203,7 +1203,7 @@ fn control_m_from_task_detail_focuses_table_and_enters_move_mode() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut workspace = TaskWorkspace::new(context);
@@ -1235,7 +1235,7 @@ fn task_reordering_and_move_to_edge_actions_notify() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: tasks.clone(),
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut workspace = TaskWorkspace::new(context);
@@ -1268,7 +1268,7 @@ fn task_reordering_and_move_to_edge_actions_notify() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks,
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut app = App::new(context.store, context.coordinator);
@@ -1302,7 +1302,7 @@ fn calendar_move_to_edge_only_reorders_tasks_at_the_same_time() {
     let (_runtime, context, store) = test_context(WorkspaceSnapshot {
         tasks,
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut app = App::new(context.store, context.coordinator);
@@ -1330,7 +1330,7 @@ fn successful_snooze_and_unsnooze_clear_return_focus_and_focus_task_table() {
     let (_runtime, context, store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut app = App::new(context.store, context.coordinator);
@@ -1382,7 +1382,7 @@ fn snooze_dialog_renders_search_and_options_through_modal_portals() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut app = App::new(context.store, context.coordinator);
@@ -1593,7 +1593,7 @@ fn active_snooze_modal_receives_routed_navigation_and_selection() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut app = App::new(context.store, context.coordinator);
@@ -1667,7 +1667,7 @@ fn backspace_targets_visible_task_even_when_store_selection_is_stale() {
             task_with("task-2", "Second", TaskState::InProgress),
         ],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut workspace = TaskWorkspace::new(context);
@@ -1692,7 +1692,7 @@ fn completed_task_moves_from_in_progress_to_archived_view() {
     let (_runtime, context, store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut workspace = TaskWorkspace::new(context);
@@ -1723,7 +1723,7 @@ fn confirmed_delete_removes_task_from_state_immediately() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut app = App::new(context.store, context.coordinator);
@@ -1748,7 +1748,7 @@ fn management_create_dialog_layers_over_management_workspace() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: Vec::new(),
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut app = App::new(context.store, context.coordinator);
@@ -1770,7 +1770,7 @@ fn management_create_dialog_layers_over_management_workspace() {
 }
 
 #[test]
-fn creating_management_entities_notifies_for_people_projects_and_tags() {
+fn creating_management_entities_notifies_for_people_workspaces_and_tags() {
     let cases = [
         (
             ManagementEntityDraft::Person {
@@ -1781,12 +1781,12 @@ fn creating_management_entities_notifies_for_people_projects_and_tags() {
             tuicore::Notification::success("Person created", "“Ada” was created."),
         ),
         (
-            ManagementEntityDraft::Project {
+            ManagementEntityDraft::Workspace {
                 key: "CORE".into(),
                 name: "Core".into(),
                 description: "Platform".into(),
             },
-            tuicore::Notification::success("Project created", "“Core” was created."),
+            tuicore::Notification::success("Workspace created", "“Core” was created."),
         ),
         (
             ManagementEntityDraft::Tag {
@@ -1800,7 +1800,7 @@ fn creating_management_entities_notifies_for_people_projects_and_tags() {
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
             tasks: Vec::new(),
             people: Vec::new(),
-            projects: Vec::new(),
+            workspaces: Vec::new(),
             tags: Vec::new(),
         });
         let mut app = App::new(context.store, context.coordinator);
@@ -1813,7 +1813,7 @@ fn creating_management_entities_notifies_for_people_projects_and_tags() {
 }
 
 #[test]
-fn deleting_management_entities_notifies_for_people_projects_and_tags() {
+fn deleting_management_entities_notifies_for_people_workspaces_and_tags() {
     let cases = [
         (
             ManagementDialogKind::People,
@@ -1821,26 +1821,26 @@ fn deleting_management_entities_notifies_for_people_projects_and_tags() {
             WorkspaceSnapshot {
                 tasks: Vec::new(),
                 people: vec![Person::new("person-1".into(), "Ada".into(), String::new())],
-                projects: Vec::new(),
+                workspaces: Vec::new(),
                 tags: Vec::new(),
             },
             tuicore::Notification::success("Person deleted", "“Ada” was deleted."),
         ),
         (
-            ManagementDialogKind::Projects,
-            "project-1",
+            ManagementDialogKind::Workspaces,
+            "workspace-1",
             WorkspaceSnapshot {
                 tasks: Vec::new(),
                 people: Vec::new(),
-                projects: vec![Project::new(
-                    "project-1".into(),
+                workspaces: vec![Workspace::new(
+                    "workspace-1".into(),
                     "CORE".into(),
                     "Core".into(),
                     String::new(),
                 )],
                 tags: Vec::new(),
             },
-            tuicore::Notification::success("Project deleted", "“Core” was deleted."),
+            tuicore::Notification::success("Workspace deleted", "“Core” was deleted."),
         ),
         (
             ManagementDialogKind::Tags,
@@ -1848,7 +1848,7 @@ fn deleting_management_entities_notifies_for_people_projects_and_tags() {
             WorkspaceSnapshot {
                 tasks: Vec::new(),
                 people: Vec::new(),
-                projects: Vec::new(),
+                workspaces: Vec::new(),
                 tags: vec![Tag::new("tag-1".into(), "backend".into())],
             },
             tuicore::Notification::success("Tag deleted", "“backend” was deleted."),
@@ -1926,7 +1926,7 @@ fn complete_outcomes_patch_optimistically_persist_and_focus_task_table() {
         let (_runtime, context, store) = test_context(WorkspaceSnapshot {
             tasks: vec![task],
             people: Vec::new(),
-            projects: Vec::new(),
+            workspaces: Vec::new(),
             tags: Vec::new(),
         });
         let coordinator = Rc::clone(&context.coordinator);
@@ -1982,7 +1982,7 @@ fn complete_cancel_falls_back_to_task_table_when_origin_task_disappears() {
     let (_runtime, context, store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut app = App::new(context.store, context.coordinator);
@@ -2007,7 +2007,7 @@ fn delete_task_dialog_fits_its_content() {
     let snapshot = WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     };
     let (_runtime, context, _store) = test_context(snapshot);
@@ -2034,7 +2034,7 @@ fn create_task_dialog_fits_its_content_height() {
     let snapshot = WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     };
     let (_runtime, context, _store) = test_context(snapshot);
@@ -2063,7 +2063,7 @@ fn create_task_submission_formats_title_and_uses_quick_capture_defaults() {
     let (_runtime, context, store) = test_context(WorkspaceSnapshot {
         tasks: Vec::new(),
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut app = App::new(context.store, context.coordinator);
@@ -2096,24 +2096,24 @@ fn create_task_submission_formats_title_and_uses_quick_capture_defaults() {
 }
 
 #[test]
-fn create_task_submission_uses_default_project() {
-    let project = Project::new(
-        "project-1".into(),
+fn create_task_submission_uses_default_workspace() {
+    let workspace = Workspace::new(
+        "workspace-1".into(),
         "ONE".into(),
-        "Project one".into(),
+        "Workspace one".into(),
         String::new(),
     );
     let (_runtime, context, store) = test_context(WorkspaceSnapshot {
         tasks: Vec::new(),
         people: Vec::new(),
-        projects: vec![project.clone()],
+        workspaces: vec![workspace.clone()],
         tags: Vec::new(),
     });
     store
         .borrow_mut()
         .dispatch(AppEvent::AppSettingChangeRequested {
-            key: DEFAULT_PROJECT_SETTING.into(),
-            value: project.id.clone(),
+            key: DEFAULT_WORKSPACE_SETTING.into(),
+            value: workspace.id.clone(),
             generation: 1,
         });
     let mut app = App::new(context.store, context.coordinator);
@@ -2126,8 +2126,8 @@ fn create_task_submission_uses_default_project() {
     );
 
     assert_eq!(
-        store.borrow().state().tasks[0].project_id.as_deref(),
-        Some("project-1")
+        store.borrow().state().tasks[0].workspace_id.as_deref(),
+        Some("workspace-1")
     );
 }
 
@@ -2136,7 +2136,7 @@ fn calendar_title_submission_opens_scheduler_without_creating_task() {
     let (_runtime, context, store) = test_context(WorkspaceSnapshot {
         tasks: Vec::new(),
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     store
@@ -2216,23 +2216,23 @@ fn calendar_title_submission_opens_scheduler_without_creating_task() {
 fn calendar_schedule_rejects_non_future_times_then_creates_exact_task_once() {
     let mut existing = test_task();
     existing.rank = 7;
-    let project = Project::new(
-        "project-1".into(),
+    let workspace = Workspace::new(
+        "workspace-1".into(),
         "ONE".into(),
-        "Project one".into(),
+        "Workspace one".into(),
         String::new(),
     );
     let (_runtime, context, store) = test_context(WorkspaceSnapshot {
         tasks: vec![existing],
         people: Vec::new(),
-        projects: vec![project.clone()],
+        workspaces: vec![workspace.clone()],
         tags: Vec::new(),
     });
     store
         .borrow_mut()
         .dispatch(AppEvent::AppSettingChangeRequested {
-            key: DEFAULT_PROJECT_SETTING.into(),
-            value: project.id.clone(),
+            key: DEFAULT_WORKSPACE_SETTING.into(),
+            value: workspace.id.clone(),
             generation: 1,
         });
     let coordinator = Rc::clone(&context.coordinator);
@@ -2305,7 +2305,7 @@ fn calendar_schedule_rejects_non_future_times_then_creates_exact_task_once() {
     assert_eq!(task.title, "Schedule follow up");
     assert_eq!(task.state, TaskState::Snoozed);
     assert_eq!(task.snoozed_until, Some(future));
-    assert_eq!(task.project_id.as_deref(), Some("project-1"));
+    assert_eq!(task.workspace_id.as_deref(), Some("workspace-1"));
     assert_eq!(task.rank, 8);
     assert_eq!(state.state().last_custom_snooze, Some(future));
     drop(state);
@@ -2341,7 +2341,7 @@ fn canceling_calendar_scheduler_discards_pending_draft_without_creating_task() {
     let (_runtime, context, store) = test_context(WorkspaceSnapshot {
         tasks: Vec::new(),
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let coordinator = Rc::clone(&context.coordinator);
@@ -2370,7 +2370,7 @@ fn creation_dialogs_close_from_nested_control_focus_mode() {
     let area = Rect::new(0, 0, 80, 24);
     let cases = [
         (
-            create_management_dialog_host(ManagementDialogKind::Projects),
+            create_management_dialog_host(ManagementDialogKind::Workspaces),
             KeyEvent::from(Key::Esc),
             true,
             "textarea",
@@ -2420,7 +2420,7 @@ fn created_task_state_hotkey_focuses_open_dropdown() {
     let (_runtime, context, store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut workspace = TaskWorkspace::new(context);
@@ -2483,7 +2483,7 @@ fn focused_dropdown_search_allows_ctrl_z_to_snooze_task() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut workspace = TaskWorkspace::new(context);
@@ -2564,7 +2564,7 @@ fn task_description_registers_edit_and_editor_hotkeys_and_requests_existing_valu
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut workspace = TaskWorkspace::new(context);
@@ -2626,7 +2626,7 @@ fn title_blur_during_description_hotkey_preserves_description_focus() {
                 priority: TaskPriority::Medium,
                 snoozed_until: None,
                 people_ids: Vec::new(),
-                project_id: None,
+                workspace_id: None,
                 tag_ids: Vec::new(),
                 checklist: Vec::new(),
                 links: Vec::new(),
@@ -2634,7 +2634,7 @@ fn title_blur_during_description_hotkey_preserves_description_focus() {
                 description: "Existing detail".to_string(),
             }],
             people: Vec::new(),
-            projects: Vec::new(),
+            workspaces: Vec::new(),
             tags: Vec::new(),
         }),
         reduce_app_state as fn(&mut AppState, AppEvent) -> tuicore::DispatchOutcome,
@@ -2768,7 +2768,7 @@ fn save_failure_and_recovery_preserve_focused_task_description_state() {
     let (_runtime, context, store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut workspace = TaskWorkspace::new(context);
@@ -2911,7 +2911,7 @@ fn task_dropdown_save_completion_tabs_to_next_control_without_reset() {
     let (_runtime, context, store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
     let mut workspace = TaskWorkspace::new(context);
@@ -2966,7 +2966,7 @@ fn task_dropdown_save_completion_tabs_to_next_control_without_reset() {
             tab.focus_request.as_ref().unwrap_or(&FocusRequest::Next),
             post_save_layout.focus_targets(),
         )
-        .expect("tab should move to people");
+        .expect("tab should move to workspace");
     dispatcher.dispatch_focus(&mut workspace, transition, AnimationSettings::default());
     assert!(
         focus
@@ -2975,7 +2975,7 @@ fn task_dropdown_save_completion_tabs_to_next_control_without_reset() {
             .path
             .keys()
             .iter()
-            .any(|key| key.as_str() == "people")
+            .any(|key| key.as_str() == "workspaces")
     );
     assert_eq!(store.borrow().state().tasks[0].size, TaskSize::Big);
 }
@@ -2985,12 +2985,12 @@ fn management_routing_builds_concrete_dialog_variant() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: Vec::new(),
         people: Vec::new(),
-        projects: Vec::new(),
+        workspaces: Vec::new(),
         tags: Vec::new(),
     });
 
     assert!(matches!(
-        management_dialog(context, ManagementDialogKind::Projects),
-        AppDialog::Projects(_)
+        management_dialog(context, ManagementDialogKind::Workspaces),
+        AppDialog::Workspaces(_)
     ));
 }
