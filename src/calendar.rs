@@ -11,7 +11,8 @@ use tuicore::{
 
 use crate::app::{
     ActiveLabelFilter, ActiveWorkspaceFilter, AppContext, AppMsg, persist_task_order,
-    task_detail::detail_escape, task_ids_at_snooze_time,
+    task_detail::{detail_escape, task_title_line},
+    task_ids_at_snooze_time,
 };
 use crate::app_keymap::keys;
 use crate::domain::{Task, TaskState, Workspace};
@@ -58,7 +59,7 @@ impl CalendarCreateContext {
 struct SnoozedTaskEntry {
     id: String,
     title: String,
-    display_title: String,
+    display_id: String,
     until: PrimitiveDateTime,
     rank: i64,
 }
@@ -643,11 +644,7 @@ fn snoozed_task_entry(task: &Task, workspaces: &[Workspace]) -> Option<SnoozedTa
     (task.state == TaskState::Snoozed).then_some(SnoozedTaskEntry {
         id: task.id.clone(),
         title: task.title.clone(),
-        display_title: format!(
-            "{} - {}",
-            crate::domain::task_display_id(task, workspace),
-            task.title
-        ),
+        display_id: crate::domain::task_display_id(task, workspace),
         until: task.snoozed_until?,
         rank: task.rank,
     })
@@ -669,8 +666,9 @@ fn task_calendar(entries: Vec<SnoozedTaskEntry>) -> TaskCalendar {
         entries,
         |entry| entry.id.clone(),
         |entry| CalendarSpan::timed(entry.until, entry.until + Duration::minutes(1)),
-        |entry| entry.display_title.clone(),
+        |entry| format!("{} {}", entry.display_id, entry.title),
     )
+    .render_entry(|entry| task_title_line(&entry.display_id, &entry.title))
     .compact_summary_title(100, |entry| entry.title.clone())
     .bordered(false)
     .entry_order(compare_snoozed_task_entries)
@@ -967,9 +965,28 @@ mod tests {
         let text = rendered_text(&calendar, area);
 
         assert!(text.contains(SNOOZE_ICON));
-        assert!(text.contains("IF-30 - Follow up"));
+        assert!(text.contains("IF-30 Follow up"));
         assert!(!text.contains("Still active"));
         assert!(!text.contains("Missing return date"));
+
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal.draw(|frame| calendar.render(frame, area)).unwrap();
+        let cells = terminal.backend().buffer().content();
+        let id_start = cells
+            .windows(5)
+            .position(|cells| cells.iter().map(|cell| cell.symbol()).collect::<String>() == "IF-30")
+            .expect("calendar task display ID should render");
+        assert_eq!(cells[id_start].fg, tuicore::theme().subtle_fg());
+        assert!(
+            cells[id_start]
+                .modifier
+                .contains(ratatui::style::Modifier::BOLD)
+        );
+        assert!(
+            !cells[id_start + 8]
+                .modifier
+                .contains(ratatui::style::Modifier::BOLD)
+        );
 
         for view in [CalendarView::Month, CalendarView::Week] {
             let normal = Rect::new(0, 0, 120, 28);

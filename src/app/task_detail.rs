@@ -78,8 +78,13 @@ pub(super) fn task_workspace_layout(
         .as_deref()
         .filter(|id| rows.iter().any(|task| task.id == **id));
     let copy_context = TaskCopyContext::new(&state.people, &state.workspaces, &state.tags);
-    let table = task_table_with_copy_context(rows, selected, copy_context)
-        .empty_state(task_empty_state(&state.tasks, task_view));
+    let table = task_table_with_copy_context_for_view(
+        rows,
+        selected,
+        copy_context,
+        task_view != TaskView::Archived,
+    )
+    .empty_state(task_empty_state(&state.tasks, task_view));
     let selected_task = selected.and_then(|id| state.tasks.iter().find(|task| task.id == id));
     let save_error = selected_task.and_then(|task| state.task_status_error(&task.id));
     let detail = TaskDetailForm::new(
@@ -113,7 +118,18 @@ pub(super) fn task_rows_for_view(
         })
         .cloned()
         .collect::<Vec<_>>();
-    rows.sort_by_key(|task| task.rank);
+    if task_view == TaskView::Archived {
+        rows.sort_by(|left, right| {
+            right
+                .updated_at
+                .parse::<u128>()
+                .ok()
+                .cmp(&left.updated_at.parse::<u128>().ok())
+                .then_with(|| left.rank.cmp(&right.rank))
+        });
+    } else {
+        rows.sort_by_key(|task| task.rank);
+    }
     rows
 }
 
@@ -122,16 +138,27 @@ pub(super) fn task_table(rows: Vec<TaskRow>, selected_id: Option<&str>) -> TaskT
     task_table_with_copy_context(rows, selected_id, TaskCopyContext::default())
 }
 
+#[cfg(test)]
 pub(super) fn task_table_with_copy_context(
     rows: Vec<TaskRow>,
     selected_id: Option<&str>,
     copy_context: TaskCopyContext,
+) -> TaskTable {
+    task_table_with_copy_context_for_view(rows, selected_id, copy_context, true)
+}
+
+fn task_table_with_copy_context_for_view(
+    rows: Vec<TaskRow>,
+    selected_id: Option<&str>,
+    copy_context: TaskCopyContext,
+    allow_reordering: bool,
 ) -> TaskTable {
     task_table_with_copy_context_and_empty(
         rows,
         selected_id,
         copy_context,
         SeasonalEmptyState::new("No tasks match your filters"),
+        allow_reordering,
     )
 }
 
@@ -149,6 +176,7 @@ pub(super) fn task_table_with_copy_context_on(
         SeasonalEmptyState::new("No tasks match your filters")
             .date(date)
             .glyphs(SeasonalGlyphs::NerdFont),
+        true,
     )
 }
 
@@ -157,8 +185,22 @@ fn task_table_with_copy_context_and_empty(
     selected_id: Option<&str>,
     copy_context: TaskCopyContext,
     empty_state: SeasonalEmptyState,
+    allow_reordering: bool,
 ) -> TaskTable {
     let display_context = copy_context.clone();
+    let keybindings = if allow_reordering {
+        ListControlKeyBindings::default()
+            .add([])
+            .remove([])
+            .edit([])
+            .reorder([keys::TASK_MOVE_MODE.key_spec()])
+    } else {
+        ListControlKeyBindings::default()
+            .add([])
+            .remove([])
+            .edit([])
+            .reorder([])
+    };
     let mut table = ListControl::new_fields(
         rows,
         |row: &TaskRow| row.id.clone(),
@@ -175,13 +217,7 @@ fn task_table_with_copy_context_and_empty(
     .activation_mode(ActivationMode::OnActivateKey)
     .selection_mode(SelectionMode::Single)
     .selection_trigger(SelectionTrigger::OnNavigate)
-    .keybindings(
-        ListControlKeyBindings::default()
-            .add([])
-            .remove([])
-            .edit([])
-            .reorder([keys::TASK_MOVE_MODE.key_spec()]),
-    )
+    .keybindings(keybindings)
     .max_rows(usize::MAX)
     .columns(vec![
         Column::text("rank", "", Constraint::Length(0), |row: &TaskRow| {
@@ -218,16 +254,20 @@ fn task_table_with_copy_context_and_empty(
         )
         .constrained()
         .filter_key(|row| row.size.label().to_string()),
-        Column::text(
+        Column::rich(
             "title",
             "Task",
             Constraint::Fill(1),
-            move |row: &TaskRow| format!("{} - {}", display_context.display_id(row), row.title),
+            move |row: &TaskRow, _: &CellContext<String>| {
+                task_title_line(&display_context.display_id(row), &row.title)
+            },
         )
         .sortable(|row| row.title.clone())
         .filter_key(|row| row.title.clone()),
-    ])
-    .reorderable_by("rank");
+    ]);
+    if allow_reordering {
+        table = table.reorderable_by("rank");
+    }
     if let Some(id) = selected_id {
         table.data_view_mut().select_id(id.to_string());
     }
@@ -563,6 +603,18 @@ pub(super) fn chip_line(label: &'static str, role: ChipColorRole) -> Line<'stati
         label,
         Style::default().fg(color).add_modifier(Modifier::BOLD),
     ))
+}
+
+pub(crate) fn task_title_line(display_id: &str, title: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            display_id.to_string(),
+            Style::default()
+                .fg(tuicore::theme().subtle_fg())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(format!(" {title}")),
+    ])
 }
 
 pub(super) fn task_state_icon(state: TaskState) -> &'static str {

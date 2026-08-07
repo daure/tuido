@@ -744,7 +744,23 @@ fn task_table_shows_current_workspace_key_task_number_and_title() {
     let area = Rect::new(0, 0, 80, 5);
     <TaskTable as TuiNode<AppMsg>>::layout(&mut table, area, &mut LayoutCtx::new());
 
-    assert!(rendered_text(&table, area).contains("CORE-42 - Ship it"));
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            <TaskTable as TuiNode<AppMsg>>::render(&table, frame, area, &mut RenderCtx::new())
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let cells = buffer.content();
+    let id_start = cells
+        .windows(7)
+        .position(|cells| cells.iter().map(|cell| cell.symbol()).collect::<String>() == "CORE-42")
+        .expect("task display ID should render");
+
+    assert_eq!(cells[id_start].fg, tuicore::theme().subtle_fg());
+    assert!(cells[id_start].modifier.contains(Modifier::BOLD));
+    assert!(!cells[id_start + 10].modifier.contains(Modifier::BOLD));
+    assert!(rendered_text(&table, area).contains("CORE-42 Ship it"));
 }
 
 #[test]

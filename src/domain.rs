@@ -347,6 +347,7 @@ pub fn reduce_app_state(state: &mut AppState, event: AppEvent) -> DispatchOutcom
             if !task_changed && !custom_changed {
                 return DispatchOutcome::unchanged();
             }
+            state.tasks[index].updated_at = current_timestamp();
             state.version += 1;
             DispatchOutcome::layout()
         }
@@ -1238,6 +1239,14 @@ impl TaskPriority {
             _ => None,
         }
     }
+}
+
+fn current_timestamp() -> String {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .to_string()
 }
 
 fn apply_task_patch(task: &mut Task, available_tags: &mut Vec<Tag>, patch: &TaskPatch) -> bool {

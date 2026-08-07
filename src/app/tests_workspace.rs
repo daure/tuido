@@ -1719,6 +1719,31 @@ fn completed_task_moves_from_in_progress_to_archived_view() {
 }
 
 #[test]
+fn archived_view_moves_an_edited_task_to_the_top() {
+    let mut older = task_with("older", "Older", TaskState::Done);
+    older.rank = 1;
+    older.updated_at = "1".into();
+    let mut edited = task_with("edited", "Edited", TaskState::Done);
+    edited.rank = 2;
+    edited.updated_at = "0".into();
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![older, edited],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut workspace = TaskWorkspace::new(context);
+    let area = Rect::new(0, 0, 120, 40);
+
+    *workspace.pending_task_view.borrow_mut() = Some(TaskView::Archived);
+    assert!(workspace.sync_task_view_change());
+    assert!(workspace.apply_patch("edited".into(), TaskPatch::Title("Edited now".into())));
+    workspace.layout(area, &mut LayoutCtx::new());
+
+    assert_eq!(workspace.table().rows()[0].id, "edited");
+}
+
+#[test]
 fn confirmed_delete_removes_task_from_state_immediately() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],

@@ -2470,10 +2470,25 @@ impl TaskWorkspace {
         if next_view == self.task_view {
             return false;
         }
+        let reorderability_changed =
+            (next_view == TaskView::Archived) != (self.task_view == TaskView::Archived);
         self.table_mut().clear_search();
         self.task_view = next_view;
         *self.active_task_view.borrow_mut() = next_view;
         let state = self.context.store.borrow().state().clone();
+        if reorderability_changed {
+            let toolbar = task_toolbar(
+                Rc::clone(&self.pending_task_view),
+                Rc::clone(&self.active_task_view),
+            );
+            self.layout = task_workspace_layout(
+                toolbar,
+                &self.context.store,
+                self.task_view,
+                self.workspace_filter.as_deref(),
+                &self.label_filter,
+            );
+        }
         self.refresh_from_state(&state, true, false, false);
         true
     }
