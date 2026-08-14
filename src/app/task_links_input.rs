@@ -12,7 +12,13 @@ use uuid::Uuid;
 use super::{AppMsg, PatchSink};
 use crate::{app_keymap::keys, domain::Task, domain::TaskPatch, task_link};
 
-type OpenLink = Rc<dyn Fn(&str) -> Result<(), String>>;
+type OpenLink = Rc<dyn Fn(&str, LinkOpenMode) -> Result<(), String>>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LinkOpenMode {
+    Foreground,
+    Background,
+}
 
 #[derive(Clone)]
 struct TaskLinkRow {
@@ -29,15 +35,13 @@ pub(super) struct TaskLinksInput {
 
 impl TaskLinksInput {
     pub(super) fn new(task: &Task, patch_sink: PatchSink) -> Self {
-        Self::with_opener(task, patch_sink, |url| {
-            webbrowser::open(url).map_err(|error| error.to_string())
-        })
+        Self::with_opener(task, patch_sink, open_browser_link)
     }
 
     pub(super) fn with_opener(
         task: &Task,
         patch_sink: PatchSink,
-        open_link: impl Fn(&str) -> Result<(), String> + 'static,
+        open_link: impl Fn(&str, LinkOpenMode) -> Result<(), String> + 'static,
     ) -> Self {
         let mut rows = task
             .links
@@ -96,16 +100,7 @@ impl TaskLinksInput {
             })
             .collect::<Vec<_>>();
         for row_id in activated {
-            let Some(row) = self.input.items().iter().find(|row| row.id == row_id) else {
-                continue;
-            };
-            let target = task_link::browser_target(&row.url);
-            if let Err(error) = (self.open_link)(&target) {
-                ctx.notify(Notification::error(
-                    "Could not open link",
-                    format!("{}: {error}", row.url),
-                ));
-            }
+            self.open_row(&row_id, LinkOpenMode::Foreground, ctx);
         }
 
         let events = self.input.take_events();
@@ -143,6 +138,45 @@ impl TaskLinksInput {
         ctx.request_layout();
         ctx.request_redraw();
     }
+
+    fn open_highlighted(&self, mode: LinkOpenMode, ctx: &mut EventCtx<AppMsg>) -> bool {
+        if self.input.is_editing() || self.input.is_adding() {
+            return false;
+        }
+        let Some(row_id) = self.input.data_view().highlighted_id() else {
+            return false;
+        };
+        self.open_row(&row_id, mode, ctx);
+        true
+    }
+
+    fn open_row(&self, row_id: &str, mode: LinkOpenMode, ctx: &mut EventCtx<AppMsg>) {
+        let Some(row) = self.input.items().iter().find(|row| row.id == row_id) else {
+            return;
+        };
+        let target = task_link::browser_target(&row.url);
+        if let Err(error) = (self.open_link)(&target, mode) {
+            ctx.notify(Notification::error(
+                "Could not open link",
+                format!("{}: {error}", row.url),
+            ));
+        }
+    }
+}
+
+fn open_browser_link(url: &str, mode: LinkOpenMode) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    if mode == LinkOpenMode::Background {
+        let mut options = webbrowser::BrowserOptions::new();
+        options.with_dont_switch(true);
+        return webbrowser::open_browser_with_options(webbrowser::Browser::Default, url, &options)
+            .map_err(|error| error.to_string());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    let _ = mode;
+
+    webbrowser::open(url).map_err(|error| error.to_string())
 }
 
 impl TuiNode<AppMsg> for TaskLinksInput {
@@ -159,6 +193,12 @@ impl TuiNode<AppMsg> for TaskLinksInput {
     }
 
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<AppMsg>) -> EventOutcome {
+        if keys::TASK_LINK_OPEN_BACKGROUND.matches(event)
+            && self.open_highlighted(LinkOpenMode::Background, ctx)
+        {
+            ctx.stop_propagation();
+            return EventOutcome::Handled;
+        }
         let outcome = self.input.event(event, ctx);
         self.sync_events(ctx);
         outcome
@@ -170,6 +210,12 @@ impl TuiNode<AppMsg> for TaskLinksInput {
         event: &TuiEvent,
         ctx: &mut EventCtx<AppMsg>,
     ) -> EventOutcome {
+        if keys::TASK_LINK_OPEN_BACKGROUND.matches(event)
+            && self.open_highlighted(LinkOpenMode::Background, ctx)
+        {
+            ctx.stop_propagation();
+            return EventOutcome::Handled;
+        }
         let outcome = self.input.dispatch_event(route, event, ctx);
         self.sync_events(ctx);
         outcome

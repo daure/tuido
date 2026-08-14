@@ -1234,11 +1234,14 @@ fn enter_on_task_link_opens_it_in_the_browser() {
     task.links = vec!["www.example.com/item".to_string()];
     let opened = Rc::new(RefCell::new(Vec::new()));
     let opened_by_handler = Rc::clone(&opened);
-    let mut input =
-        TaskLinksInput::with_opener(&task, Rc::new(RefCell::new(Vec::new())), move |url| {
-            opened_by_handler.borrow_mut().push(url.to_string());
+    let mut input = TaskLinksInput::with_opener(
+        &task,
+        Rc::new(RefCell::new(Vec::new())),
+        move |url, mode| {
+            opened_by_handler.borrow_mut().push((url.to_string(), mode));
             Ok(())
-        });
+        },
+    );
     let area = Rect::new(0, 0, 40, 5);
     let mut layout = LayoutCtx::new();
     input.layout(area, &mut layout);
@@ -1263,13 +1266,93 @@ fn enter_on_task_link_opens_it_in_the_browser() {
 
     let effects = dispatcher.dispatch_event(
         &mut input,
-        &EventRoute::new(target.path),
+        &EventRoute::new(target.path.clone()),
         &TuiEvent::Key(Key::Enter.into()),
         AnimationSettings::default(),
     );
 
     assert!(effects.outcome.handled());
-    assert_eq!(opened.borrow().as_slice(), ["https://www.example.com/item"]);
+    assert_eq!(
+        opened.borrow().as_slice(),
+        [(
+            "https://www.example.com/item".to_string(),
+            LinkOpenMode::Foreground
+        )]
+    );
+}
+
+#[test]
+fn ctrl_enter_on_task_link_opens_it_without_requesting_focus() {
+    let mut task = test_task();
+    task.links = vec!["www.example.com/item".to_string()];
+    let opened = Rc::new(RefCell::new(Vec::new()));
+    let opened_by_handler = Rc::clone(&opened);
+    let mut input = TaskLinksInput::with_opener(
+        &task,
+        Rc::new(RefCell::new(Vec::new())),
+        move |url, mode| {
+            opened_by_handler.borrow_mut().push((url.to_string(), mode));
+            Ok(())
+        },
+    );
+    let area = Rect::new(0, 0, 40, 5);
+    let mut layout = LayoutCtx::new();
+    input.layout(area, &mut layout);
+    let target = layout
+        .focus_targets()
+        .iter()
+        .find(|target| target.id.as_str() == "data-view")
+        .expect("links list should be focusable")
+        .clone();
+    let mut focus = FocusManager::new();
+    let transition = focus
+        .apply_request(
+            &FocusRequest::TargetAt {
+                path: target.path.clone(),
+                id: target.id.clone(),
+            },
+            layout.focus_targets(),
+        )
+        .expect("links list focus should apply");
+    let mut dispatcher = TreeDispatcher::new();
+    dispatcher.dispatch_focus(&mut input, transition, AnimationSettings::default());
+
+    let effects = dispatcher.dispatch_event(
+        &mut input,
+        &EventRoute::new(target.path.clone()),
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Enter,
+            modifiers: KeyModifiers::CONTROL,
+        }),
+        AnimationSettings::default(),
+    );
+
+    assert!(effects.outcome.handled());
+    assert_eq!(
+        opened.borrow().as_slice(),
+        [(
+            "https://www.example.com/item".to_string(),
+            LinkOpenMode::Background
+        )]
+    );
+
+    dispatcher.dispatch_event(
+        &mut input,
+        &EventRoute::new(target.path.clone()),
+        &TuiEvent::Key(Key::Char('e').into()),
+        AnimationSettings::default(),
+    );
+    opened.borrow_mut().clear();
+    dispatcher.dispatch_event(
+        &mut input,
+        &EventRoute::new(target.path),
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Enter,
+            modifiers: KeyModifiers::CONTROL,
+        }),
+        AnimationSettings::default(),
+    );
+    assert!(opened.borrow().is_empty());
 }
 
 #[test]
@@ -1277,7 +1360,7 @@ fn ctrl_x_removes_highlighted_task_link() {
     let mut task = test_task();
     task.links = vec!["https://example.com/item".to_string()];
     let patches = Rc::new(RefCell::new(Vec::new()));
-    let mut input = TaskLinksInput::with_opener(&task, Rc::clone(&patches), |_| Ok(()));
+    let mut input = TaskLinksInput::with_opener(&task, Rc::clone(&patches), |_, _| Ok(()));
     let area = Rect::new(0, 0, 40, 5);
     let mut layout = LayoutCtx::new();
     input.layout(area, &mut layout);

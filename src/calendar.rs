@@ -1,6 +1,12 @@
 use std::{cell::RefCell, rc::Rc, time::Duration as StdDuration};
 
-use ratatui::{Frame, layout::Rect, widgets::Clear};
+use ratatui::{
+    Frame,
+    layout::Rect,
+    style::{Modifier, Style},
+    text::{Line, Span},
+    widgets::Clear,
+};
 use time::{Date, Duration, OffsetDateTime, PrimitiveDateTime};
 use tuicore::{
     AnimationSettings, Calendar, CalendarEntryRole, CalendarKeyBindings, CalendarSpan,
@@ -11,8 +17,7 @@ use tuicore::{
 
 use crate::app::{
     ActiveLabelFilter, ActiveWorkspaceFilter, AppContext, AppMsg, persist_task_order,
-    task_detail::{detail_escape, task_title_line},
-    task_ids_at_snooze_time,
+    task_agent_command, task_detail::detail_escape, task_ids_at_snooze_time,
 };
 use crate::app_keymap::keys;
 use crate::domain::{Task, TaskState, Workspace};
@@ -503,6 +508,25 @@ impl CalendarWorkspace {
         outcome
     }
 
+    fn handle_task_agent_yank(
+        &self,
+        event: &TuiEvent,
+        ctx: &mut EventCtx<AppMsg>,
+    ) -> Option<EventOutcome> {
+        let TuiEvent::Hotkey(tuicore::HotkeyEvent::Commit(sequence)) = event else {
+            return None;
+        };
+        if sequence != &keys::TASK_AGENT_YANK.hotkey() {
+            return None;
+        }
+        let task_id = self.highlighted_task_id()?;
+        if let Some(command) = task_agent_command(self.context.store.borrow().state(), &task_id) {
+            ctx.copy_to_clipboard(command);
+        }
+        ctx.stop_propagation();
+        Some(EventOutcome::Handled)
+    }
+
     fn handle_move_mode(
         &mut self,
         event: &TuiEvent,
@@ -668,12 +692,23 @@ fn task_calendar(entries: Vec<SnoozedTaskEntry>) -> TaskCalendar {
         |entry| CalendarSpan::timed(entry.until, entry.until + Duration::minutes(1)),
         |entry| format!("{} {}", entry.display_id, entry.title),
     )
-    .render_entry(|entry| task_title_line(&entry.display_id, &entry.title))
+    .render_entry(|entry| calendar_task_title_line(&entry.display_id, &entry.title))
     .compact_summary_title(100, |entry| entry.title.clone())
+    .hotkey(keys::TASK_AGENT_YANK.hotkey())
     .bordered(false)
     .entry_order(compare_snoozed_task_entries)
     .role(|_| Some(CalendarEntryRole::Muted))
     .event_marker(|_| SNOOZE_ICON)
+}
+
+fn calendar_task_title_line(display_id: &str, title: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            display_id.to_string(),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(format!(" {title}")),
+    ])
 }
 
 fn compare_snoozed_task_entries(
@@ -810,6 +845,9 @@ impl TuiNode<AppMsg> for CalendarWorkspace {
         if let Some(outcome) = self.handle_move_mode(event, ctx) {
             return outcome;
         }
+        if let Some(outcome) = self.handle_task_agent_yank(event, ctx) {
+            return outcome;
+        }
         let previous = self.calendar().is_showing_weekends();
         let outcome = self.calendar_mut().event(event, ctx);
         self.sync_selected_date();
@@ -829,6 +867,9 @@ impl TuiNode<AppMsg> for CalendarWorkspace {
             return outcome;
         }
         if let Some(outcome) = self.handle_move_mode(event, ctx) {
+            return outcome;
+        }
+        if let Some(outcome) = self.handle_task_agent_yank(event, ctx) {
             return outcome;
         }
         let previous = self.calendar().is_showing_weekends();
@@ -909,8 +950,8 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend};
     use time::{Date, Month, Time};
     use tuicore::{
-        AnimationSettings, FocusManager, FocusRequest, Key, KeyEvent, KeyModifiers, Propagation,
-        TreeDispatcher,
+        AnimationSettings, FocusManager, FocusRequest, HotkeyEvent, Key, KeyEvent, KeyModifiers,
+        Propagation, TreeDispatcher,
     };
 
     fn task(id: &str, title: &str, state: TaskState, until: Option<PrimitiveDateTime>) -> Task {
@@ -976,7 +1017,11 @@ mod tests {
             .windows(5)
             .position(|cells| cells.iter().map(|cell| cell.symbol()).collect::<String>() == "IF-30")
             .expect("calendar task display ID should render");
-        assert_eq!(cells[id_start].fg, tuicore::theme().subtle_fg());
+        assert_eq!(
+            cells[id_start].fg,
+            cells[id_start + 6].fg,
+            "highlighted task ID should use the same readable foreground as its title"
+        );
         assert!(
             cells[id_start]
                 .modifier
@@ -1005,6 +1050,37 @@ mod tests {
                 "task reference leaked into compact {view:?}"
             );
         }
+    }
+
+    #[test]
+    fn highlighted_calendar_task_id_uses_title_foreground() {
+        let date = Date::from_calendar_date(2026, Month::July, 24).unwrap();
+        let until = date.with_time(Time::from_hms(8, 0, 0).unwrap());
+        let entries = filtered_snoozed_task_entries(
+            &[task(
+                "1234",
+                "Readable title",
+                TaskState::Snoozed,
+                Some(until),
+            )],
+            &[],
+            None,
+            &[],
+        );
+        let mut calendar = task_calendar(entries).cursor(date).view(CalendarView::Day);
+        let area = Rect::new(0, 0, 100, 28);
+        calendar.layout(area, &mut LayoutCtx::new());
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+
+        terminal.draw(|frame| calendar.render(frame, area)).unwrap();
+
+        let cells = terminal.backend().buffer().content();
+        let id_start = cells
+            .windows(4)
+            .position(|cells| cells.iter().map(|cell| cell.symbol()).collect::<String>() == "1234")
+            .expect("calendar task display ID should render");
+        assert_eq!(cells[id_start].fg, cells[id_start + 5].fg);
+        assert!(cells[id_start].modifier.contains(Modifier::BOLD));
     }
 
     #[test]
@@ -1377,6 +1453,13 @@ mod tests {
         workspace.sync_store_version();
         workspace.calendar_mut().on_key(Key::Char('D'));
         workspace.sync_calendar_detail(&mut EventCtx::default());
+        let mut layout = LayoutCtx::new();
+        workspace.layout(Rect::new(0, 0, 120, 30), &mut layout);
+        assert!(layout.focus_targets().iter().any(|target| {
+            target
+                .hotkey_sequences
+                .contains(&keys::TASK_AGENT_YANK.hotkey())
+        }));
         let mut ctx = EventCtx::default();
 
         let outcome = workspace.event(&TuiEvent::Key(Key::Char('.').into()), &mut ctx);
@@ -1386,6 +1469,42 @@ mod tests {
             ctx.messages(),
             [AppMsg::OpenCalendarTaskQuickMenu { task_id, time }] if task_id == "highlighted" && *time == until
         ));
+    }
+
+    #[test]
+    fn day_view_agent_yank_copies_highlighted_task_command() {
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks: Vec::new(),
+            people: Vec::new(),
+            workspaces: Vec::new(),
+            tags: Vec::new(),
+        });
+        let mut workspace = CalendarWorkspace::new(context.clone(), true);
+        let until = workspace.today.with_time(Time::from_hms(8, 0, 0).unwrap());
+        context
+            .store
+            .borrow_mut()
+            .dispatch(AppEvent::TaskCreated(task(
+                "1234",
+                "Calendar task",
+                TaskState::Snoozed,
+                Some(until),
+            )));
+        workspace.sync_store_version();
+        workspace.calendar_mut().on_key(Key::Char('D'));
+        workspace.sync_calendar_detail(&mut EventCtx::default());
+        let mut ctx = EventCtx::default();
+
+        let outcome = workspace.event(
+            &TuiEvent::Hotkey(HotkeyEvent::Commit(keys::TASK_AGENT_YANK.hotkey())),
+            &mut ctx,
+        );
+
+        let effects = tuicore::DispatchEffects::from_event_ctx(outcome, ctx);
+        assert_eq!(
+            effects.clipboard.as_deref(),
+            Some("Tuido execute 1234 \"Calendar task\"")
+        );
     }
 
     #[test]

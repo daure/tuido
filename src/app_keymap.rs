@@ -365,6 +365,8 @@ pub mod keys {
     pub const TASK_COMPLETE: AppBinding = AppBinding::new("TASK_COMPLETE", "ctrl+c");
     pub const TASK_TOGGLE_PROGRESS: AppBinding = AppBinding::new("TASK_TOGGLE_PROGRESS", "ctrl+t");
     pub const TASK_AGENT_YANK: AppBinding = AppBinding::new_sequence("TASK_AGENT_YANK", "ya");
+    pub const TASK_LINK_OPEN_BACKGROUND: AppBinding =
+        AppBinding::new("TASK_LINK_OPEN_BACKGROUND", "ctrl+enter");
     pub const MANAGEMENT_CREATE: AppBinding = AppBinding::new("MANAGEMENT_CREATE", "n");
     pub const MANAGEMENT_DELETE: AppBinding = AppBinding::new("MANAGEMENT_DELETE", "delete");
     pub const MANAGEMENT_DELETE_BACKSPACE: AppBinding =
@@ -507,6 +509,7 @@ pub mod keys {
         TASK_COMPLETE,
         TASK_TOGGLE_PROGRESS,
         TASK_AGENT_YANK,
+        TASK_LINK_OPEN_BACKGROUND,
         MANAGEMENT_CREATE,
         MANAGEMENT_DELETE,
         MANAGEMENT_DELETE_BACKSPACE,
@@ -652,6 +655,7 @@ pub mod keys {
                 TASK_TAGS_FIELD,
                 TASK_CHECKLIST_FIELD,
                 TASK_URL_LINKS_FIELD,
+                TASK_LINK_OPEN_BACKGROUND,
                 TASK_ISSUE_LINKS_FIELD,
                 TASK_LINK_DELETE,
                 TASK_SNOOZED_UNTIL_FIELD,
@@ -850,6 +854,7 @@ mod tests {
             ("TASK_SNOOZE", "ctrl+z"),
             ("TASK_COMPLETE", "ctrl+c"),
             ("TASK_TOGGLE_PROGRESS", "ctrl+t"),
+            ("TASK_LINK_OPEN_BACKGROUND", "ctrl+enter"),
             ("TASK_DELETE_CTRL_X", "ctrl+x"),
             ("TASK_DELETE", "delete"),
             ("TASK_DELETE_X", "backspace"),

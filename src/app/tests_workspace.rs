@@ -538,6 +538,94 @@ fn direct_progress_transition_updates_state_persists_and_notifies() {
 }
 
 #[test]
+fn promoting_backlog_task_changes_task_filter_to_active() {
+    let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+        tasks: vec![task_with("task-1", "Shortcut task", TaskState::Backlog)],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(context.store, context.coordinator);
+    let mut ctx = EventCtx::default();
+
+    app.toggle_task_progress("task-1".into(), &mut ctx);
+
+    assert_eq!(store.borrow().state().tasks[0].state, TaskState::Todo);
+    assert_eq!(*app.pending_task_view.borrow(), Some(TaskView::Active));
+    let area = Rect::new(0, 0, 120, 40);
+    app.layout(area, &mut LayoutCtx::new());
+    let text = rendered_text(&app, area);
+    assert!(text.contains(" Active"));
+    assert!(text.contains("Shortcut task"));
+}
+
+#[test]
+fn promoting_backlog_task_keeps_it_selected_in_active_view() {
+    let mut active = task_with("active", "Existing active task", TaskState::Todo);
+    active.rank = 1;
+    let mut promoted = task_with("promoted", "Promoted task", TaskState::Backlog);
+    promoted.rank = 2;
+    let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+        tasks: vec![active, promoted],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut workspace = TaskWorkspace::new(context);
+    *workspace.pending_task_view.borrow_mut() = Some(TaskView::Backlog);
+    assert!(workspace.sync_task_view_change());
+    select_workspace_task(&mut workspace, "promoted");
+    store.borrow_mut().dispatch(AppEvent::PatchTask {
+        task_id: "promoted".into(),
+        patch: TaskPatch::State(TaskState::Todo),
+    });
+    *workspace.pending_task_view.borrow_mut() = Some(TaskView::Active);
+
+    workspace.layout(Rect::new(0, 0, 120, 40), &mut LayoutCtx::new());
+
+    assert_eq!(
+        workspace.table().highlighted_id().as_deref(),
+        Some("promoted")
+    );
+    assert_eq!(workspace.detail().task_id.as_deref(), Some("promoted"));
+}
+
+#[test]
+fn promoting_snoozed_task_opens_tasks_active_view_and_selects_it() {
+    let mut active = task_with("active", "Existing active task", TaskState::Todo);
+    active.rank = 1;
+    let mut promoted = task_with("promoted", "Promoted task", TaskState::Snoozed);
+    promoted.rank = 2;
+    let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+        tasks: vec![active, promoted],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(context.store, context.coordinator);
+    app.active_tab.set(CALENDAR_TAB_INDEX);
+    let mut ctx = EventCtx::default();
+
+    app.toggle_task_progress("promoted".into(), &mut ctx);
+
+    assert_eq!(app.active_tab.get(), TASKS_TAB_INDEX);
+    assert_eq!(*app.pending_task_view.borrow(), Some(TaskView::Active));
+    assert_eq!(
+        store.borrow().state().selected_task_id.as_deref(),
+        Some("promoted")
+    );
+    let area = Rect::new(0, 0, 120, 40);
+    app.layout(area, &mut LayoutCtx::new());
+    let text = rendered_text(&app, area);
+    assert!(text.contains(" Active"));
+    assert!(text.contains("Promoted task"));
+    assert_eq!(
+        ctx.focus_request(),
+        Some(&initial_task_table_focus_request())
+    );
+}
+
+#[test]
 fn ctrl_t_is_inert_without_a_highlighted_task() {
     let (_runtime, context, store) = test_context(WorkspaceSnapshot {
         tasks: Vec::new(),

@@ -61,6 +61,8 @@ mod task_title_input;
 
 use task_checklist_input::TaskChecklistInput;
 use task_copy::TaskCopyContext;
+#[cfg(test)]
+use task_links_input::LinkOpenMode;
 use task_links_input::TaskLinksInput;
 use task_relations_input::TaskRelationsInput;
 use task_title_input::TaskTitleInput;
@@ -425,6 +427,7 @@ struct App {
     delete_return_focus: Option<TreePath>,
     complete_return_focus: Option<CompleteReturnFocus>,
     active_tab: Rc<Cell<usize>>,
+    pending_task_view: TaskViewChange,
     pending_task_navigation: PendingTaskNavigation,
 }
 
@@ -447,6 +450,21 @@ fn toggled_task_progress_state(state: TaskState) -> TaskState {
     }
 }
 
+pub(crate) fn task_agent_command(state: &AppState, task_id: &str) -> Option<String> {
+    let task = state.tasks.iter().find(|task| task.id == task_id)?;
+    let number = task_number(&task.id)?;
+    let workspace_key = task.workspace_id.as_deref().and_then(|workspace_id| {
+        state
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == workspace_id)
+            .map(|workspace| workspace.key.as_str())
+    });
+    let identifier = task_identifier(number, workspace_key);
+    let title = task.title.replace('\\', "\\\\").replace('"', "\\\"");
+    Some(format!("Tuido execute {identifier} \"{title}\""))
+}
+
 impl App {
     #[cfg(test)]
     fn new(store: AppStore, coordinator: Rc<RefCell<PersistenceCoordinator>>) -> Self {
@@ -460,6 +478,7 @@ impl App {
     ) -> Self {
         let context = AppContext { store, coordinator };
         let active_tab = Rc::new(Cell::new(0));
+        let pending_task_view = Rc::new(RefCell::new(None));
         let pending_task_navigation = Rc::new(RefCell::new(None));
         let active_workspace_filter = Rc::new(RefCell::new(None));
         let active_label_filter = Rc::new(RefCell::new(Vec::new()));
@@ -471,6 +490,7 @@ impl App {
                     context.clone(),
                     Rc::clone(&active_workspace_filter),
                     Rc::clone(&active_label_filter),
+                    Rc::clone(&pending_task_view),
                     Rc::clone(&pending_task_navigation),
                 ),
             ),
@@ -571,6 +591,7 @@ impl App {
             delete_return_focus: None,
             complete_return_focus: None,
             active_tab,
+            pending_task_view,
             pending_task_navigation,
         }
     }
@@ -1381,6 +1402,8 @@ impl App {
         let Some(task) = self.task(&task_id) else {
             return;
         };
+        let was_backlog = task.state == TaskState::Backlog;
+        let was_snoozed = task.state == TaskState::Snoozed;
         let state = toggled_task_progress_state(task.state);
         let patch = TaskPatch::State(state);
         let outcome = self
@@ -1397,7 +1420,18 @@ impl App {
         self.context
             .coordinator
             .borrow_mut()
-            .submit(PersistenceCommand::PatchTask(task_id, patch));
+            .submit(PersistenceCommand::PatchTask(task_id.clone(), patch));
+        if was_backlog || was_snoozed {
+            *self.pending_task_view.borrow_mut() = Some(TaskView::Active);
+        }
+        if was_snoozed {
+            self.context
+                .store
+                .borrow_mut()
+                .dispatch(AppEvent::SelectTask(task_id));
+            self.active_tab.set(TASKS_TAB_INDEX);
+            focus_task_table(ctx);
+        }
         let state_label = match state {
             TaskState::Todo => "todo",
             TaskState::InProgress => "in-progress",
@@ -2208,6 +2242,7 @@ impl TaskWorkspace {
             Rc::new(RefCell::new(None)),
             Rc::new(RefCell::new(Vec::new())),
             Rc::new(RefCell::new(None)),
+            Rc::new(RefCell::new(None)),
         )
     }
 
@@ -2215,6 +2250,7 @@ impl TaskWorkspace {
         context: AppContext,
         active_workspace_filter: ActiveWorkspaceFilter,
         active_label_filter: ActiveLabelFilter,
+        pending_task_view: TaskViewChange,
         pending_navigation: PendingTaskNavigation,
     ) -> Self {
         let task_view = TaskView::Active;
@@ -2238,7 +2274,6 @@ impl TaskWorkspace {
                 .dispatch(AppEvent::SelectTask(task_id.clone()));
         }
 
-        let pending_task_view = Rc::new(RefCell::new(None));
         let active_task_view = Rc::new(RefCell::new(task_view));
         let visible_selection = Rc::new(RefCell::new(selected_task_id.clone()));
         let toolbar = task_toolbar(Rc::clone(&pending_task_view), Rc::clone(&active_task_view));
@@ -2476,6 +2511,11 @@ impl TaskWorkspace {
         self.task_view = next_view;
         *self.active_task_view.borrow_mut() = next_view;
         let state = self.context.store.borrow().state().clone();
+        let preserve_selected = state
+            .selected_task_id
+            .as_deref()
+            .and_then(|id| state.tasks.iter().find(|task| task.id == id))
+            .is_some_and(|task| next_view.contains(task));
         if reorderability_changed {
             let toolbar = task_toolbar(
                 Rc::clone(&self.pending_task_view),
@@ -2489,7 +2529,7 @@ impl TaskWorkspace {
                 &self.label_filter,
             );
         }
-        self.refresh_from_state(&state, true, false, false);
+        self.refresh_from_state(&state, !preserve_selected, false, false);
         true
     }
 
@@ -2869,22 +2909,7 @@ impl TaskWorkspace {
             .visible_selection
             .borrow()
             .as_ref()
-            .and_then(|task_id| {
-                let store = self.context.store.borrow();
-                let state = store.state();
-                let task = state.tasks.iter().find(|task| task.id == *task_id)?;
-                let number = task_number(&task.id)?;
-                let workspace_key = task.workspace_id.as_deref().and_then(|workspace_id| {
-                    state
-                        .workspaces
-                        .iter()
-                        .find(|workspace| workspace.id == workspace_id)
-                        .map(|workspace| workspace.key.as_str())
-                });
-                let identifier = task_identifier(number, workspace_key);
-                let title = task.title.replace('\\', "\\\\").replace('"', "\\\"");
-                Some(format!("Tuido execute {identifier} \"{title}\""))
-            });
+            .and_then(|task_id| task_agent_command(self.context.store.borrow().state(), task_id));
         if let Some(command) = command {
             ctx.copy_to_clipboard(command);
         }
@@ -2896,6 +2921,7 @@ impl TaskWorkspace {
 impl TuiNode<AppMsg> for TaskWorkspace {
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
         self.sync_navigation();
+        self.sync_task_view_change();
         self.sync_store_version();
         self.sync_workspace_filter_change();
         self.sync_label_filter_change();
