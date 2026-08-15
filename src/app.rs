@@ -603,6 +603,7 @@ impl App {
             .child(
                 "footer",
                 StatusBar::new()
+                    .ai_enabled(false)
                     .menu_items(STATUS_BAR_MENU_ITEMS)
                     .weather_provider(weather_provider_config())
                     .on_custom_menu_item(|id| match id {
