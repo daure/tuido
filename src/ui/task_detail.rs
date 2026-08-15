@@ -2,9 +2,9 @@ use std::{cell::RefCell, rc::Rc, time::Duration};
 
 use ratatui::{Frame, layout::Rect};
 use tuicore::{
-    AnimationSettings, EventCtx, EventOutcome, EventRoute, Flex, FlexItem, FocusCtx, FocusTarget,
-    LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, RenderCtx, TickResult,
-    TuiEvent, TuiNode,
+    AnimationSettings, EventCtx, EventOutcome, EventRoute, Flex, FlexItem, FocusCtx, FocusId,
+    FocusTarget, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, RenderCtx,
+    TickResult, TuiEvent, TuiNode,
 };
 
 use crate::{
@@ -153,6 +153,10 @@ impl TuiNode<AppMsg> for TaskDetailForm {
         ctx: &mut EventCtx<AppMsg>,
     ) -> EventOutcome {
         self.root.dispatch_event(route, event, ctx)
+    }
+
+    fn focus(&mut self, target: Option<&FocusId>, focused: bool, ctx: &mut FocusCtx<AppMsg>) {
+        self.root.focus(target, focused, ctx);
     }
 
     fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<AppMsg>) {

@@ -91,9 +91,12 @@ fn settings_changes_update_app_state_before_persistence_completes() {
         tags: Vec::new(),
     });
     let mut app = App::new(context.store, context.coordinator);
+    let mut ctx = EventCtx::default();
 
     app.set_show_calendar_weekends(false);
     app.set_default_snooze_time(time::macros::time!(8:15));
+    app.set_speed_reader_wpm("425".into(), &mut ctx);
+    app.set_markdown_block_pause("1250".into(), &mut ctx);
 
     let state = store.borrow();
     assert_eq!(
@@ -107,6 +110,229 @@ fn settings_changes_update_app_state_before_persistence_completes() {
             .get(DEFAULT_SNOOZE_TIME_SETTING),
         Some(&"08:15".to_string())
     );
+    assert_eq!(
+        state
+            .state()
+            .app_setting_values
+            .get(SPEED_READER_WPM_SETTING),
+        Some(&"425".to_string())
+    );
+    assert_eq!(
+        state
+            .state()
+            .app_setting_values
+            .get(SPEED_READER_MARKDOWN_BLOCK_PAUSE_SETTING),
+        Some(&"1250".to_string())
+    );
+    assert!(ctx.notifications().is_empty());
+}
+
+#[test]
+fn invalid_speed_reader_settings_warn_without_changing_state() {
+    let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+        tasks: Vec::new(),
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(context.store, context.coordinator);
+    let mut valid_ctx = EventCtx::default();
+    app.set_speed_reader_wpm("425".into(), &mut valid_ctx);
+    app.set_markdown_block_pause("1250".into(), &mut valid_ctx);
+    let mut invalid_ctx = EventCtx::default();
+
+    app.set_speed_reader_wpm("99".into(), &mut invalid_ctx);
+    app.set_markdown_block_pause("60001".into(), &mut invalid_ctx);
+
+    let state = store.borrow();
+    assert_eq!(
+        state.state().app_setting_values[SPEED_READER_WPM_SETTING],
+        "425"
+    );
+    assert_eq!(
+        state.state().app_setting_values[SPEED_READER_MARKDOWN_BLOCK_PAUSE_SETTING],
+        "1250"
+    );
+    assert_eq!(
+        invalid_ctx.notifications(),
+        &[
+            tuicore::Notification::warning(
+                "Invalid speed reader WPM",
+                "Enter a whole number from 100 to 1000.",
+            ),
+            tuicore::Notification::warning(
+                "Invalid block delay",
+                "Enter a whole number from 0 to 60000 ms.",
+            ),
+        ]
+    );
+}
+
+#[test]
+fn description_speed_reader_uses_current_dynamic_settings() {
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: Vec::new(),
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(context.store, context.coordinator);
+    let mut settings_ctx = EventCtx::default();
+    app.set_speed_reader_wpm("425".into(), &mut settings_ctx);
+    app.set_markdown_block_pause("1250".into(), &mut settings_ctx);
+
+    app.open_description_speed_reader("First word\n\nSecond".into(), &mut EventCtx::default());
+
+    let AppDialog::SpeedReader(dialog) = app.primary_dialog().layer() else {
+        panic!("speed reader dialog should be active");
+    };
+    let mut reader = dialog.child().clone();
+    reader.play();
+    <SpeedReader as TuiNode<AppMsg>>::tick(
+        &mut reader,
+        Duration::from_millis(140),
+        AnimationSettings::default(),
+    );
+    assert_eq!(reader.current_word(), Some("First"));
+    <SpeedReader as TuiNode<AppMsg>>::tick(
+        &mut reader,
+        Duration::from_millis(2),
+        AnimationSettings::default(),
+    );
+    assert_eq!(reader.current_word(), Some("word"));
+    <SpeedReader as TuiNode<AppMsg>>::tick(
+        &mut reader,
+        Duration::from_millis(1_390),
+        AnimationSettings::default(),
+    );
+    assert_eq!(reader.current_word(), Some("word"));
+    <SpeedReader as TuiNode<AppMsg>>::tick(
+        &mut reader,
+        Duration::from_millis(2),
+        AnimationSettings::default(),
+    );
+    assert_eq!(reader.current_word(), Some("Second"));
+}
+
+#[test]
+fn latest_speed_reader_save_failures_are_visible_and_restore_confirmed_values() {
+    let (_runtime, _context, store) = test_context(WorkspaceSnapshot {
+        tasks: Vec::new(),
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    for (key, confirmed, desired, generation) in [
+        (SPEED_READER_WPM_SETTING, "300", "500", 2),
+        (SPEED_READER_MARKDOWN_BLOCK_PAUSE_SETTING, "250", "1250", 3),
+    ] {
+        store
+            .borrow_mut()
+            .dispatch(AppEvent::AppSettingChangeRequested {
+                key: key.into(),
+                value: confirmed.into(),
+                generation: 1,
+            });
+        store
+            .borrow_mut()
+            .dispatch(AppEvent::AppSettingSaveCompleted {
+                key: key.into(),
+                value: confirmed.into(),
+                generation: 1,
+                error: None,
+            });
+        store
+            .borrow_mut()
+            .dispatch(AppEvent::AppSettingChangeRequested {
+                key: key.into(),
+                value: desired.into(),
+                generation,
+            });
+    }
+    let mut dialog = SettingsDialog::new(
+        Rc::clone(&store),
+        true,
+        default_snooze_time(),
+        &[],
+        None,
+        500,
+        Duration::from_millis(1_250),
+    );
+    store
+        .borrow_mut()
+        .dispatch(AppEvent::AppSettingSaveCompleted {
+            key: SPEED_READER_WPM_SETTING.into(),
+            value: "400".into(),
+            generation: 1,
+            error: Some("stale".into()),
+        });
+    for (key, value, generation, error) in [
+        (SPEED_READER_WPM_SETTING, "500", 2, "WPM save failed"),
+        (
+            SPEED_READER_MARKDOWN_BLOCK_PAUSE_SETTING,
+            "1250",
+            3,
+            "delay save failed",
+        ),
+    ] {
+        store
+            .borrow_mut()
+            .dispatch(AppEvent::AppSettingSaveCompleted {
+                key: key.into(),
+                value: value.into(),
+                generation,
+                error: Some(error.into()),
+            });
+    }
+
+    dialog.layout(Rect::new(0, 0, 200, 12), &mut LayoutCtx::new());
+    let text = rendered_text(&dialog, Rect::new(0, 0, 200, 12));
+    let state = store.borrow();
+    assert_eq!(
+        state.state().app_setting_values[SPEED_READER_WPM_SETTING],
+        "300"
+    );
+    assert_eq!(
+        state.state().app_setting_values[SPEED_READER_MARKDOWN_BLOCK_PAUSE_SETTING],
+        "250"
+    );
+    assert!(text.contains("Setting save failed for speed_reader.wpm: WPM save failed"));
+    assert!(text.contains(
+        "Setting save failed for speed_reader.markdown_block_pause_ms: delay save failed"
+    ));
+    assert!(text.contains("300"));
+    assert!(text.contains("250"));
+    assert!(!text.contains("stale"));
+}
+
+#[test]
+fn malformed_persisted_speed_reader_settings_fail_startup_loading() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime should build");
+    runtime.block_on(async {
+        let service = TuidoService::connect_url("sqlite::memory:")
+            .await
+            .expect("service should connect");
+        for (key, malformed) in [
+            (SPEED_READER_WPM_SETTING, "99"),
+            (SPEED_READER_MARKDOWN_BLOCK_PAUSE_SETTING, "60001"),
+        ] {
+            service
+                .set_app_setting(SPEED_READER_WPM_SETTING, "300")
+                .await
+                .unwrap();
+            service
+                .set_app_setting(SPEED_READER_MARKDOWN_BLOCK_PAUSE_SETTING, "250")
+                .await
+                .unwrap();
+            service.set_app_setting(key, malformed).await.unwrap();
+
+            let error = load_speed_reader_settings(&service).await.unwrap_err();
+            assert!(error.to_string().contains(key));
+        }
+    });
 }
 
 #[test]
@@ -564,7 +790,7 @@ fn task_header_shows_filters_to_the_left_of_new() {
         &keys::TASK_VIEW_MENU.label(),
         &keys::TASK_LABEL_FILTER.label(),
         "󰲋 Space",
-        " Labels",
+        " Tags",
         "New",
     ] {
         assert!(
@@ -575,7 +801,7 @@ fn task_header_shows_filters_to_the_left_of_new() {
     let workspace = text
         .find("󰲋 Space")
         .expect("workspace filter should render");
-    let labels = text.find(" Labels").expect("label filter should render");
+    let labels = text.find(" Tags").expect("tag filter should render");
     let new = text.find("New").expect("new button should render");
     assert!(workspace < labels && labels < new);
     assert!(!text.contains("View:"));
@@ -1639,7 +1865,7 @@ fn escape_from_global_filters_focuses_active_tab_content() {
                 let expected_hotkey = if component == "workspace" {
                     "shift+s"
                 } else {
-                    "shift+l"
+                    "shift+t"
                 };
                 assert_eq!(target.hotkey_sequences, [expected_hotkey]);
                 let mut ctx = EventCtx::default();

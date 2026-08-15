@@ -5,9 +5,9 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
 };
 use tuicore::{
-    AnimationSettings, AxisProposal, ChildKey, EventCtx, EventOutcome, EventRoute, FocusCtx,
-    FocusTarget, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, TickResult,
-    TuiEvent, TuiNode,
+    AnimationSettings, AxisExpand, AxisProposal, ChildKey, EventCtx, EventOutcome, EventRoute,
+    FocusCtx, FocusTarget, HintSource, LayoutCtx, LayoutProposal, LayoutResult, LayoutSize,
+    LayoutSizeHint, LifecycleCtx, TickResult, TuiEvent, TuiNode,
 };
 
 const NARROW_MASTER_MIN_HEIGHT: u16 = 3;
@@ -18,6 +18,7 @@ pub(crate) struct ResponsiveSplit<F, S> {
     breakpoint: u16,
     wide_ratio: (u16, u16),
     narrow_second_content: bool,
+    narrow_second_max_above_min: Option<u16>,
     second_visible: bool,
     first_area: Rect,
     second_area: Rect,
@@ -37,6 +38,7 @@ impl<F, S> ResponsiveSplit<F, S> {
             breakpoint,
             wide_ratio: (50, 50),
             narrow_second_content: false,
+            narrow_second_max_above_min: None,
             second_visible: true,
             first_area: Rect::default(),
             second_area: Rect::default(),
@@ -50,6 +52,11 @@ impl<F, S> ResponsiveSplit<F, S> {
 
     pub(crate) fn narrow_second_content(mut self) -> Self {
         self.narrow_second_content = true;
+        self
+    }
+
+    pub(crate) fn narrow_second_max_above_min(mut self, extra_rows: u16) -> Self {
+        self.narrow_second_max_above_min = Some(extra_rows);
         self
     }
 
@@ -103,6 +110,15 @@ impl<F, S> ResponsiveSplit<F, S> {
             Constraint::Ratio(second.into(), denominator),
         ]
     }
+
+    fn narrow_second_height(&self, hint: LayoutSizeHint) -> u16 {
+        self.narrow_second_max_above_min
+            .map_or(hint.preferred.height, |extra_rows| {
+                hint.preferred
+                    .height
+                    .min(hint.min.height.saturating_add(extra_rows))
+            })
+    }
 }
 
 impl<F, S, M> TuiNode<M> for ResponsiveSplit<F, S>
@@ -120,21 +136,49 @@ where
             AxisProposal::Exact(width) | AxisProposal::AtMost(width) => self.is_stacked(width),
             AxisProposal::Unbounded => false,
         };
-        let (width, height) = if stacked {
+        let (min, preferred) = if stacked {
+            let second_height = if self.narrow_second_content {
+                self.narrow_second_height(second)
+            } else {
+                second.preferred.height
+            };
             (
-                first.preferred.width.max(second.preferred.width),
-                first
-                    .preferred
-                    .height
-                    .saturating_add(second.preferred.height),
+                LayoutSize::new(
+                    first.min.width.max(second.min.width),
+                    if self.narrow_second_content {
+                        first
+                            .min
+                            .height
+                            .max(NARROW_MASTER_MIN_HEIGHT)
+                            .saturating_add(second.min.height)
+                    } else {
+                        first.min.height.saturating_add(second.min.height)
+                    },
+                ),
+                LayoutSize::new(
+                    first.preferred.width.max(second.preferred.width),
+                    first.preferred.height.saturating_add(second_height),
+                ),
             )
         } else {
             (
-                first.preferred.width.saturating_add(second.preferred.width),
-                first.preferred.height.max(second.preferred.height),
+                LayoutSize::new(
+                    first.min.width.saturating_add(second.min.width),
+                    first.min.height.max(second.min.height),
+                ),
+                LayoutSize::new(
+                    first.preferred.width.saturating_add(second.preferred.width),
+                    first.preferred.height.max(second.preferred.height),
+                ),
             )
         };
-        LayoutSizeHint::content(width, height).normalized(proposal)
+        LayoutSizeHint {
+            source: HintSource::Measured,
+            min,
+            preferred,
+            expand: AxisExpand::default(),
+        }
+        .normalized(proposal)
     }
 
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
@@ -153,13 +197,12 @@ where
             Direction::Horizontal
         };
         let constraints = if stacked && self.narrow_second_content {
-            let preferred_second_height = self
+            let second_hint = self
                 .second
-                .measure(LayoutProposal::at_most(area.width, area.height))
-                .preferred
-                .height;
-            let second_height =
-                preferred_second_height.min(area.height.saturating_sub(NARROW_MASTER_MIN_HEIGHT));
+                .measure(LayoutProposal::at_most(area.width, area.height));
+            let second_height = self
+                .narrow_second_height(second_hint)
+                .min(area.height.saturating_sub(NARROW_MASTER_MIN_HEIGHT));
             [Constraint::Fill(1), Constraint::Length(second_height)]
         } else if stacked {
             Self::ratio_constraints((50, 50))
@@ -266,7 +309,41 @@ mod tests {
     use super::*;
     use ratatui::{Terminal, backend::TestBackend};
     use std::{cell::Cell, rc::Rc};
-    use tuicore::{FocusId, Key, Paragraph, RenderCtx};
+    use tuicore::{
+        Flex, FlexItem, FocusId, Key, LayoutAxis, OverflowPolicyName, Paragraph, RenderCtx,
+    };
+
+    #[derive(Clone, Copy)]
+    struct MeasuredNode {
+        min: LayoutSize,
+        preferred: LayoutSize,
+    }
+
+    impl MeasuredNode {
+        fn new(min_height: u16, preferred_height: u16) -> Self {
+            Self {
+                min: LayoutSize::new(10, min_height),
+                preferred: LayoutSize::new(20, preferred_height),
+            }
+        }
+    }
+
+    impl TuiNode<()> for MeasuredNode {
+        fn measure(&self, _proposal: LayoutProposal) -> LayoutSizeHint {
+            LayoutSizeHint {
+                source: HintSource::Measured,
+                min: self.min,
+                preferred: self.preferred,
+                expand: AxisExpand::default(),
+            }
+        }
+
+        fn layout(&mut self, area: Rect, _ctx: &mut LayoutCtx) -> LayoutResult {
+            LayoutResult::new(area)
+        }
+
+        fn render<'a>(&'a self, _frame: &mut Frame, _area: Rect, _ctx: &mut RenderCtx<'a>) {}
+    }
 
     #[derive(Default)]
     struct ProbeState {
@@ -319,6 +396,33 @@ mod tests {
     }
 
     #[test]
+    fn wide_measurement_composes_child_minima_and_preferred_sizes() {
+        let split = ResponsiveSplit::new(MeasuredNode::new(2, 5), MeasuredNode::new(4, 7), 100);
+
+        let hint = <ResponsiveSplit<_, _> as TuiNode<()>>::measure(
+            &split,
+            LayoutProposal::at_most(120, 50),
+        );
+
+        assert_eq!(hint.min, LayoutSize::new(20, 4));
+        assert_eq!(hint.preferred, LayoutSize::new(40, 7));
+        assert_eq!(hint.expand, AxisExpand::default());
+    }
+
+    #[test]
+    fn stacked_measurement_composes_child_minima_and_preferred_sizes() {
+        let split = ResponsiveSplit::new(MeasuredNode::new(2, 5), MeasuredNode::new(4, 7), 100);
+
+        let hint = <ResponsiveSplit<_, _> as TuiNode<()>>::measure(
+            &split,
+            LayoutProposal::at_most(80, 50),
+        );
+
+        assert_eq!(hint.min, LayoutSize::new(10, 6));
+        assert_eq!(hint.preferred, LayoutSize::new(20, 12));
+    }
+
+    #[test]
     fn narrow_layout_sizes_second_child_to_content_and_gives_first_child_the_remainder() {
         let mut split = split();
 
@@ -331,6 +435,95 @@ mod tests {
         let (first, second) = split.child_areas();
         assert_eq!(first, Rect::new(0, 0, 80, 49));
         assert_eq!(second, Rect::new(0, 49, 80, 1));
+    }
+
+    #[test]
+    fn configured_narrow_budget_caps_second_preferred_height_above_minimum() {
+        let mut split =
+            ResponsiveSplit::master_detail(MeasuredNode::new(1, 3), MeasuredNode::new(4, 20))
+                .narrow_second_max_above_min(4);
+        let proposal = LayoutProposal::at_most(80, 50);
+
+        let hint = <ResponsiveSplit<_, _> as TuiNode<()>>::measure(&split, proposal);
+        <ResponsiveSplit<_, _> as TuiNode<()>>::layout(
+            &mut split,
+            Rect::new(0, 0, 80, 50),
+            &mut LayoutCtx::new(),
+        );
+
+        assert_eq!(hint.min, LayoutSize::new(10, 7));
+        assert_eq!(hint.preferred.height, 11);
+        assert_eq!(hint.preferred.height, 3 + split.child_areas().1.height);
+        assert_eq!(split.child_areas().1.height, 8);
+
+        let minimum_limited =
+            ResponsiveSplit::master_detail(MeasuredNode::new(1, 1), MeasuredNode::new(4, 4))
+                .narrow_second_max_above_min(4);
+        let minimum_hint = <ResponsiveSplit<_, _> as TuiNode<()>>::measure(
+            &minimum_limited,
+            LayoutProposal::at_most(80, 5),
+        );
+        assert_eq!(minimum_hint.min.height, 7);
+        assert_eq!(minimum_hint.preferred.height, minimum_hint.min.height);
+    }
+
+    #[test]
+    fn configured_narrow_budget_keeps_shorter_second_content_natural() {
+        let mut split =
+            ResponsiveSplit::master_detail(MeasuredNode::new(1, 3), MeasuredNode::new(4, 6))
+                .narrow_second_max_above_min(4);
+
+        let hint = <ResponsiveSplit<_, _> as TuiNode<()>>::measure(
+            &split,
+            LayoutProposal::at_most(80, 50),
+        );
+        <ResponsiveSplit<_, _> as TuiNode<()>>::layout(
+            &mut split,
+            Rect::new(0, 0, 80, 50),
+            &mut LayoutCtx::new(),
+        );
+
+        assert_eq!(hint.preferred.height, 9);
+        assert_eq!(split.child_areas().1.height, 6);
+    }
+
+    #[test]
+    fn default_narrow_content_behavior_does_not_cap_second_preferred_height() {
+        let mut split =
+            ResponsiveSplit::master_detail(MeasuredNode::new(1, 3), MeasuredNode::new(4, 20));
+
+        let hint = <ResponsiveSplit<_, _> as TuiNode<()>>::measure(
+            &split,
+            LayoutProposal::at_most(80, 50),
+        );
+        <ResponsiveSplit<_, _> as TuiNode<()>>::layout(
+            &mut split,
+            Rect::new(0, 0, 80, 50),
+            &mut LayoutCtx::new(),
+        );
+
+        assert_eq!(hint.preferred.height, 23);
+        assert_eq!(split.child_areas().1.height, 20);
+    }
+
+    #[test]
+    fn wide_measurement_and_layout_ignore_narrow_second_budget() {
+        let mut split =
+            ResponsiveSplit::master_detail(MeasuredNode::new(1, 3), MeasuredNode::new(4, 20))
+                .narrow_second_max_above_min(4);
+
+        let hint = <ResponsiveSplit<_, _> as TuiNode<()>>::measure(
+            &split,
+            LayoutProposal::at_most(120, 50),
+        );
+        <ResponsiveSplit<_, _> as TuiNode<()>>::layout(
+            &mut split,
+            Rect::new(0, 0, 120, 50),
+            &mut LayoutCtx::new(),
+        );
+
+        assert_eq!(hint.preferred, LayoutSize::new(40, 20));
+        assert_eq!(split.child_areas().1, Rect::new(72, 0, 48, 50));
     }
 
     #[test]
@@ -367,6 +560,48 @@ mod tests {
         let (master, detail) = split.child_areas();
         assert_eq!(master.height, 2);
         assert_eq!(detail.height, 0);
+    }
+
+    #[test]
+    fn constrained_area_below_minimum_is_overflow_territory() {
+        let detail =
+            Flex::<()>::column().child("content", MeasuredNode::new(4, 8), FlexItem::content());
+        let mut split = ResponsiveSplit::master_detail(MeasuredNode::new(1, 3), detail);
+        let proposal = LayoutProposal::at_most(80, 5);
+        let hint = <ResponsiveSplit<_, _> as TuiNode<()>>::measure(&split, proposal);
+        let mut ctx = LayoutCtx::new();
+
+        <ResponsiveSplit<_, _> as TuiNode<()>>::layout(
+            &mut split,
+            Rect::new(0, 0, 80, 5),
+            &mut ctx,
+        );
+
+        assert_eq!(hint.min.height, 7);
+        assert!(hint.min.height > 5);
+        assert_eq!(split.child_areas().0.height, NARROW_MASTER_MIN_HEIGHT);
+        assert_eq!(split.child_areas().1.height, 2);
+        assert!(ctx.overflow_diagnostics().iter().any(|diagnostic| {
+            diagnostic.axis == LayoutAxis::Height
+                && diagnostic.needed == 4
+                && diagnostic.available == 2
+                && diagnostic.policy == OverflowPolicyName::Clip
+        }));
+    }
+
+    #[test]
+    fn hidden_detail_measurement_matches_master_hint() {
+        let split =
+            ResponsiveSplit::master_detail(MeasuredNode::new(2, 5), MeasuredNode::new(4, 7))
+                .second_visible(false);
+
+        let hint = <ResponsiveSplit<_, _> as TuiNode<()>>::measure(
+            &split,
+            LayoutProposal::at_most(80, 50),
+        );
+
+        assert_eq!(hint.min, LayoutSize::new(10, 2));
+        assert_eq!(hint.preferred, LayoutSize::new(20, 5));
     }
 
     #[test]

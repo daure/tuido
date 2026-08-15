@@ -188,7 +188,7 @@ fn primary_label(kind: ManagementDialogKind) -> &'static str {
     match kind {
         ManagementDialogKind::People => "Name",
         ManagementDialogKind::Workspaces => "Key",
-        ManagementDialogKind::Tags => "Label",
+        ManagementDialogKind::Tags => "Tag",
     }
 }
 

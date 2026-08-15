@@ -2697,7 +2697,7 @@ fn task_description_registers_edit_and_editor_hotkeys_and_requests_existing_valu
         })
         .expect("description input should be focusable");
 
-    assert_eq!(description.hotkey_sequences, ["dd", "do"]);
+    assert_eq!(description.hotkey_sequences, ["dd", "do", "ds"]);
 
     let effects = TreeDispatcher::new().dispatch_event(
         &mut workspace,
@@ -2706,13 +2706,369 @@ fn task_description_registers_edit_and_editor_hotkeys_and_requests_existing_valu
         AnimationSettings::default(),
     );
 
-    assert_eq!(
-        effects
-            .external_editor
-            .expect("editor hotkey should request external editor")
-            .value,
-        "Existing detail"
+    let editor = effects
+        .external_editor
+        .expect("editor hotkey should request external editor");
+    assert_eq!(editor.value, "Existing detail");
+    assert_eq!(editor.file_extension.as_deref(), Some("md"));
+
+    let effects = TreeDispatcher::new().dispatch_event(
+        &mut workspace,
+        &EventRoute::new(description.path.clone()),
+        &TuiEvent::Hotkey(HotkeyEvent::Commit(
+            keys::TASK_DESCRIPTION_SPEED_READ.hotkey(),
+        )),
+        AnimationSettings::default(),
     );
+
+    assert!(matches!(
+        effects.messages.as_slice(),
+        [AppMsg::OpenDescriptionSpeedReader(description)] if description == "Existing detail"
+    ));
+}
+
+#[test]
+fn task_description_shows_speed_read_hotkey() {
+    let input = TextareaInput::<AppMsg>::new()
+        .value("Existing detail")
+        .panel("Description")
+        .hotkey(keys::TASK_DESCRIPTION_FIELD.hotkey())
+        .editor_hotkey(keys::TASK_DESCRIPTION_EDITOR.hotkey())
+        .action_hotkey(
+            keys::TASK_DESCRIPTION_SPEED_READ.hotkey(),
+            AppMsg::OpenDescriptionSpeedReader,
+        );
+
+    let text = rendered_text(&input, Rect::new(0, 0, 40, 4));
+
+    assert!(text.contains("Description"));
+    assert!(text.contains("┤dd·do·ds│"));
+}
+
+#[test]
+fn desktop_detail_gives_description_remaining_height_before_lower_fields() {
+    let mut task = test_task();
+    task.description = (1..=40)
+        .map(|line| format!("Line {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    task.links = vec![
+        "https://example.com/first".to_string(),
+        "https://example.com/second".to_string(),
+    ];
+    task.relations = vec![TaskRelation {
+        task_id: "related-task".to_string(),
+        kind: TaskRelationKind::Blocks,
+    }];
+    let related = task_with("related-task", "Dependency target", TaskState::Todo);
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![task, related],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut workspace = TaskWorkspace::new(context);
+    let mut layout = LayoutCtx::new();
+
+    let area = Rect::new(0, 0, 160, 45);
+    workspace.layout(area, &mut layout);
+
+    let description = layout
+        .focus_targets()
+        .iter()
+        .find(|target| {
+            target.id.as_str() == "textarea"
+                && target
+                    .path
+                    .keys()
+                    .iter()
+                    .any(|key| key.as_str() == "description")
+        })
+        .expect("description should be focusable");
+    let state = layout
+        .focus_targets()
+        .iter()
+        .find(|target| {
+            target.id.as_str() == "field"
+                && target.path.keys().iter().any(|key| key.as_str() == "state")
+        })
+        .expect("state should be focusable");
+    let relations = layout
+        .focus_targets()
+        .iter()
+        .find(|target| {
+            target
+                .path
+                .keys()
+                .iter()
+                .any(|key| key.as_str() == "relations")
+        })
+        .expect("relations should be focusable");
+    let links = layout
+        .focus_targets()
+        .iter()
+        .find(|target| {
+            target.id.as_str() == "data-view"
+                && target.path.keys().iter().any(|key| key.as_str() == "links")
+        })
+        .expect("URL links should be focusable");
+    let (_, detail) = workspace.layout.child_areas();
+    let text = rendered_text(&workspace, area);
+
+    assert!(description.area.height > 6);
+    assert_eq!(state.area.y, description.area.bottom() + 1);
+    for lower in [links, relations] {
+        assert!(lower.area.x >= detail.x);
+        assert!(lower.area.y >= detail.y);
+        assert!(lower.area.right() <= detail.right());
+        assert!(lower.area.bottom() <= detail.bottom());
+    }
+    assert!(text.contains("https://example.com/first"));
+    assert!(text.contains("https://example.com/second"));
+    assert!(text.contains("blocks"));
+    assert!(text.contains("Dependency target"));
+}
+
+#[test]
+fn desktop_detail_places_state_immediately_after_short_description() {
+    let mut task = test_task();
+    task.description = "Line one\nLine two".to_string();
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![task],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut workspace = TaskWorkspace::new(context);
+    let mut layout = LayoutCtx::new();
+
+    workspace.layout(Rect::new(0, 0, 160, 80), &mut layout);
+
+    let description = layout
+        .focus_targets()
+        .iter()
+        .find(|target| {
+            target.id.as_str() == "textarea"
+                && target
+                    .path
+                    .keys()
+                    .iter()
+                    .any(|key| key.as_str() == "description")
+        })
+        .expect("description should be focusable");
+    let state = layout
+        .focus_targets()
+        .iter()
+        .find(|target| {
+            target.id.as_str() == "field"
+                && target.path.keys().iter().any(|key| key.as_str() == "state")
+        })
+        .expect("state should be focusable");
+
+    assert_eq!(state.area.y, description.area.bottom() + 1);
+}
+
+#[test]
+fn lower_rows_take_height_from_description_without_shrinking_lower_controls() {
+    let mut base_task = test_task();
+    base_task.description = (1..=40)
+        .map(|line| format!("Line {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let related = task_with("related-task", "Dependency target", TaskState::Todo);
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![base_task.clone(), related.clone()],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut base = TaskWorkspace::new(context);
+    let area = Rect::new(0, 0, 160, 45);
+    let mut base_layout = LayoutCtx::new();
+    base.layout(area, &mut base_layout);
+
+    base_task.links = vec![
+        "https://example.com/first".to_string(),
+        "https://example.com/second".to_string(),
+    ];
+    base_task.checklist = vec![
+        ChecklistItem {
+            id: "check-1".into(),
+            parent_id: None,
+            text: "First protected item".into(),
+            checked: false,
+        },
+        ChecklistItem {
+            id: "check-2".into(),
+            parent_id: None,
+            text: "Second protected item".into(),
+            checked: true,
+        },
+    ];
+    base_task.relations = vec![TaskRelation {
+        task_id: related.id.clone(),
+        kind: TaskRelationKind::Blocks,
+    }];
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![base_task, related],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut populated = TaskWorkspace::new(context);
+    let mut populated_layout = LayoutCtx::new();
+    populated.layout(area, &mut populated_layout);
+
+    let focus_area = |layout: &LayoutCtx, id: &str, child: &str| {
+        layout
+            .focus_targets()
+            .iter()
+            .find(|target| {
+                target.id.as_str() == id
+                    && target.path.keys().iter().any(|key| key.as_str() == child)
+            })
+            .unwrap_or_else(|| panic!("{child} should be focusable"))
+            .area
+    };
+    let base_description = focus_area(&base_layout, "textarea", "description");
+    let populated_description = focus_area(&populated_layout, "textarea", "description");
+    let base_links = focus_area(&base_layout, "data-view", "links");
+    let populated_links = focus_area(&populated_layout, "data-view", "links");
+    let base_checklist = focus_area(&base_layout, "data-view", "checklist");
+    let populated_checklist = focus_area(&populated_layout, "data-view", "checklist");
+    let base_relations = focus_area(&base_layout, "data-view", "relations");
+    let populated_relations = focus_area(&populated_layout, "data-view", "relations");
+
+    assert!(populated_description.height < base_description.height);
+    assert_eq!(populated_checklist.height, 2);
+    assert_eq!(populated_links.height, 2);
+    assert_eq!(populated_relations.height, 1);
+    assert_eq!(
+        base_description.height - populated_description.height,
+        (populated_checklist.height - base_checklist.height)
+            + (populated_links.height - base_links.height)
+            + (populated_relations.height - base_relations.height)
+    );
+}
+
+#[test]
+fn narrow_long_description_uses_six_rows_and_preserves_lower_fields() {
+    let mut task = test_task();
+    task.description = (1..=40)
+        .map(|line| format!("Line {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    task.links = vec![
+        "https://example.com/first".to_string(),
+        "https://example.com/second".to_string(),
+    ];
+    task.relations = vec![TaskRelation {
+        task_id: "related-task".to_string(),
+        kind: TaskRelationKind::Blocks,
+    }];
+    let related = task_with("related-task", "Dependency target", TaskState::Todo);
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![task, related],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut workspace = TaskWorkspace::new(context);
+    let area = Rect::new(0, 0, 80, 45);
+    let mut layout = LayoutCtx::new();
+
+    workspace.layout(area, &mut layout);
+
+    let description = layout
+        .focus_targets()
+        .iter()
+        .find(|target| {
+            target.id.as_str() == "textarea"
+                && target
+                    .path
+                    .keys()
+                    .iter()
+                    .any(|key| key.as_str() == "description")
+        })
+        .expect("description should be focusable");
+    let state = layout
+        .focus_targets()
+        .iter()
+        .find(|target| {
+            target.id.as_str() == "field"
+                && target.path.keys().iter().any(|key| key.as_str() == "state")
+        })
+        .expect("state should be focusable");
+    let links = layout
+        .focus_targets()
+        .iter()
+        .find(|target| {
+            target.id.as_str() == "data-view"
+                && target.path.keys().iter().any(|key| key.as_str() == "links")
+        })
+        .expect("URL links should be focusable");
+    let relations = layout
+        .focus_targets()
+        .iter()
+        .find(|target| {
+            target.id.as_str() == "data-view"
+                && target
+                    .path
+                    .keys()
+                    .iter()
+                    .any(|key| key.as_str() == "relations")
+        })
+        .expect("relations should be focusable");
+    let (_, detail) = workspace.layout.child_areas();
+
+    assert_eq!(description.area.height, 6);
+    assert_eq!(state.area.y, description.area.bottom() + 1);
+    assert_eq!(links.area.height, 2);
+    assert_eq!(relations.area.height, 1);
+    assert!(links.area.bottom() <= detail.bottom());
+    assert!(relations.area.bottom() <= detail.bottom());
+    assert_eq!(detail.bottom(), area.bottom());
+}
+
+#[test]
+fn narrow_short_description_stays_natural_without_gap_before_state() {
+    let mut task = test_task();
+    task.description = "Line one\nLine two".to_string();
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![task],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut workspace = TaskWorkspace::new(context);
+    let area = Rect::new(0, 0, 80, 45);
+    let mut layout = LayoutCtx::new();
+
+    workspace.layout(area, &mut layout);
+
+    let description = layout
+        .focus_targets()
+        .iter()
+        .find(|target| {
+            target.id.as_str() == "textarea"
+                && target
+                    .path
+                    .keys()
+                    .iter()
+                    .any(|key| key.as_str() == "description")
+        })
+        .expect("description should be focusable");
+    let state = layout
+        .focus_targets()
+        .iter()
+        .find(|target| {
+            target.id.as_str() == "field"
+                && target.path.keys().iter().any(|key| key.as_str() == "state")
+        })
+        .expect("state should be focusable");
+
+    assert_eq!(description.area.height, 2);
+    assert_eq!(state.area.y, description.area.bottom() + 1);
 }
 
 #[test]

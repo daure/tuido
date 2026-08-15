@@ -12,6 +12,7 @@ mod persistence_coordinator;
 pub mod service;
 mod settings_dialog;
 mod snooze;
+mod speed_reader_settings;
 mod storage;
 mod task_link;
 mod task_quick_menu;

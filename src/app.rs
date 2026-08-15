@@ -24,6 +24,12 @@ use crate::snooze::{
     DEFAULT_SNOOZE_TIME_SETTING, SnoozeDialog, format_datetime, format_default_snooze_time,
     local_now, parse_default_snooze_time,
 };
+use crate::speed_reader_settings::{
+    MAX_MARKDOWN_BLOCK_PAUSE_MS, MAX_SPEED_READER_WPM, MIN_SPEED_READER_WPM,
+    SPEED_READER_MARKDOWN_BLOCK_PAUSE_SETTING, SPEED_READER_WPM_SETTING, SpeedReaderSettings,
+    format_markdown_block_pause, format_speed_reader_wpm, parse_markdown_block_pause,
+    parse_speed_reader_wpm,
+};
 use crate::storage::Storage;
 use crate::task_quick_menu::TaskQuickMenu;
 use crate::task_title::format_title;
@@ -44,12 +50,12 @@ use tuicore::{
     DataViewTypedEvent, DateTimePickerDropdown, Dialog, DialogBackdrop, DialogHost, DialogLayer,
     Dropdown, DropdownCommitMode, DropdownSearchMode, DropdownVariant, EventCtx, EventOutcome,
     EventRoute, Flex, FlexItem, FocusCtx, FocusId, FocusRequest, FocusTarget, HotkeyEvent,
-    HotkeyLabelMode, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx,
-    ListControl, ListControlEvent, ListControlField, ListControlKeyBindings, MenuButton, MenuItem,
-    Padding, Paragraph, Propagation, RenderCtx, SeasonalEmptyState, SelectedTag, SelectionMode,
-    SelectionTrigger, Split, Stack, StackAlign, StackItem, StatusBar, StatusBarMenuItem, Store,
-    Tab, Tabs, TabsVariant, TagInput, TagInputEvent, TextareaInput, TickResult, TreeApp, TreePath,
-    TuiEvent, TuiNode, WeatherProviderConfig,
+    HotkeyLabelMode, Language, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint,
+    LifecycleCtx, ListControl, ListControlEvent, ListControlField, ListControlKeyBindings,
+    MenuButton, MenuItem, Padding, Paragraph, Propagation, RenderCtx, SeasonalEmptyState,
+    SelectedTag, SelectionMode, SelectionTrigger, SpeedReader, Split, Stack, StackAlign, StackItem,
+    StatusBar, StatusBarMenuItem, Store, Tab, Tabs, TabsVariant, TagInput, TagInputEvent,
+    TextareaInput, TickResult, TreeApp, TreePath, TuiEvent, TuiNode, WeatherProviderConfig,
 };
 use uuid::Uuid;
 
@@ -113,6 +119,29 @@ fn seed_app_setting(state: &mut AppState, key: &str, value: String) {
     }
 }
 
+async fn load_speed_reader_settings(
+    service: &TuidoService,
+) -> Result<SpeedReaderSettings, Box<dyn Error>> {
+    let wpm = parse_speed_reader_wpm(
+        service
+            .app_setting(SPEED_READER_WPM_SETTING)
+            .await?
+            .as_deref(),
+    )
+    .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?;
+    let markdown_block_pause = parse_markdown_block_pause(
+        service
+            .app_setting(SPEED_READER_MARKDOWN_BLOCK_PAUSE_SETTING)
+            .await?
+            .as_deref(),
+    )
+    .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?;
+    Ok(SpeedReaderSettings {
+        wpm,
+        markdown_block_pause,
+    })
+}
+
 #[derive(Debug)]
 pub(crate) enum AppMsg {
     Noop,
@@ -120,6 +149,8 @@ pub(crate) enum AppMsg {
     SetShowCalendarWeekends(bool),
     SetDefaultSnoozeTime(Time),
     SetDefaultWorkspace(Option<String>),
+    SetSpeedReaderWpm(String),
+    SetMarkdownBlockPause(String),
     OpenManagementDialog(ManagementDialogKind),
     OpenCreateManagement(ManagementDialogKind),
     CreateManagementSubmitted(ManagementEntityDraft),
@@ -176,6 +207,7 @@ pub(crate) enum AppMsg {
         source_task_id: String,
         target_task_id: String,
     },
+    OpenDescriptionSpeedReader(String),
     SnoozeTask {
         task_id: String,
         until: PrimitiveDateTime,
@@ -226,6 +258,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     )
     .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?;
     let default_workspace_id = runtime.block_on(service.default_workspace_id())?;
+    let speed_reader_settings = runtime.block_on(load_speed_reader_settings(&service))?;
     let mut app_state = AppState::from_snapshot(workspace.snapshot);
     seed_app_setting(
         &mut app_state,
@@ -241,6 +274,16 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         &mut app_state,
         DEFAULT_WORKSPACE_SETTING,
         default_workspace_id.unwrap_or_default(),
+    );
+    seed_app_setting(
+        &mut app_state,
+        SPEED_READER_WPM_SETTING,
+        format_speed_reader_wpm(speed_reader_settings.wpm),
+    );
+    seed_app_setting(
+        &mut app_state,
+        SPEED_READER_MARKDOWN_BLOCK_PAUSE_SETTING,
+        format_markdown_block_pause(speed_reader_settings.markdown_block_pause),
     );
     app_state.refresh_error = startup_expiry_error;
     app_state.workspace_revision = workspace.revision;
@@ -268,6 +311,8 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         AppMsg::SetShowCalendarWeekends(show) => app.set_show_calendar_weekends(show),
         AppMsg::SetDefaultSnoozeTime(time) => app.set_default_snooze_time(time),
         AppMsg::SetDefaultWorkspace(workspace_id) => app.set_default_workspace(workspace_id),
+        AppMsg::SetSpeedReaderWpm(value) => app.set_speed_reader_wpm(value, ctx),
+        AppMsg::SetMarkdownBlockPause(value) => app.set_markdown_block_pause(value, ctx),
         AppMsg::OpenManagementDialog(kind) => app.open_management_dialog(kind, ctx),
         AppMsg::OpenCreateManagement(kind) => app.open_create_management_dialog(kind, ctx),
         AppMsg::CreateManagementSubmitted(draft) => app.submit_create_management(draft, ctx),
@@ -320,6 +365,9 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             source_task_id,
             target_task_id,
         } => app.navigate_to_task(source_task_id, target_task_id, ctx),
+        AppMsg::OpenDescriptionSpeedReader(description) => {
+            app.open_description_speed_reader(description, ctx)
+        }
         AppMsg::CloseManagementOverlay => app.close_management_overlay(ctx),
         AppMsg::CloseSnoozeDialog => app.close_snooze_dialog(ctx),
         AppMsg::CloseDeleteTaskDialog => app.close_delete_task_dialog(ctx),
@@ -658,12 +706,16 @@ impl App {
             .get(DEFAULT_WORKSPACE_SETTING)
             .filter(|value| workspaces.iter().any(|workspace| workspace.id == **value))
             .cloned();
+        let speed_reader_settings = speed_reader_settings(state.state());
         drop(state);
         let settings = SettingsDialog::new(
+            Rc::clone(&self.context.store),
             show_weekends,
             default_time,
             &workspaces,
             default_workspace_id.as_deref(),
+            speed_reader_settings.wpm,
+            speed_reader_settings.markdown_block_pause,
         );
         let dialog = Dialog::new()
             .top_left("Settings")
@@ -675,6 +727,17 @@ impl App {
             .host(settings);
         let primary = self.primary_dialog();
         primary.replace_layer(AppDialog::Settings(dialog), ctx);
+        primary.set_fit_content(true);
+        primary.set_active_with_context(true, ctx);
+    }
+
+    fn open_description_speed_reader(&mut self, description: String, ctx: &mut EventCtx<AppMsg>) {
+        let settings = speed_reader_settings(self.context.store.borrow().state());
+        let reader = settings
+            .apply(SpeedReader::markdown(description).title("Description"))
+            .dialog(|_| AppMsg::CloseDialog);
+        let primary = self.primary_dialog();
+        primary.replace_layer(AppDialog::SpeedReader(reader), ctx);
         primary.set_fit_content(true);
         primary.set_active_with_context(true, ctx);
     }
@@ -692,6 +755,33 @@ impl App {
 
     fn set_default_workspace(&mut self, workspace_id: Option<String>) {
         self.persist_app_setting(DEFAULT_WORKSPACE_SETTING, workspace_id.unwrap_or_default());
+    }
+
+    fn set_speed_reader_wpm(&mut self, value: String, ctx: &mut EventCtx<AppMsg>) {
+        let Ok(wpm) = parse_speed_reader_wpm(Some(&value)) else {
+            ctx.notify(tuicore::Notification::warning(
+                "Invalid speed reader WPM",
+                format!(
+                    "Enter a whole number from {MIN_SPEED_READER_WPM} to {MAX_SPEED_READER_WPM}."
+                ),
+            ));
+            return;
+        };
+        self.persist_app_setting(SPEED_READER_WPM_SETTING, format_speed_reader_wpm(wpm));
+    }
+
+    fn set_markdown_block_pause(&mut self, value: String, ctx: &mut EventCtx<AppMsg>) {
+        let Ok(delay) = parse_markdown_block_pause(Some(&value)) else {
+            ctx.notify(tuicore::Notification::warning(
+                "Invalid block delay",
+                format!("Enter a whole number from 0 to {MAX_MARKDOWN_BLOCK_PAUSE_MS} ms."),
+            ));
+            return;
+        };
+        self.persist_app_setting(
+            SPEED_READER_MARKDOWN_BLOCK_PAUSE_SETTING,
+            format_markdown_block_pause(delay),
+        );
     }
 
     fn persist_app_setting(&mut self, key: &str, value: String) {
@@ -1582,6 +1672,22 @@ impl App {
 
     fn close_management_overlay(&mut self, ctx: &mut EventCtx<AppMsg>) {
         self.root.set_active_with_context(false, ctx);
+    }
+}
+
+fn speed_reader_settings(state: &AppState) -> SpeedReaderSettings {
+    let defaults = SpeedReaderSettings::default();
+    SpeedReaderSettings {
+        wpm: state
+            .app_setting_values
+            .get(SPEED_READER_WPM_SETTING)
+            .and_then(|value| parse_speed_reader_wpm(Some(value)).ok())
+            .unwrap_or(defaults.wpm),
+        markdown_block_pause: state
+            .app_setting_values
+            .get(SPEED_READER_MARKDOWN_BLOCK_PAUSE_SETTING)
+            .and_then(|value| parse_markdown_block_pause(Some(value)).ok())
+            .unwrap_or(defaults.markdown_block_pause),
     }
 }
 

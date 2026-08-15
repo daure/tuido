@@ -355,7 +355,7 @@ pub mod keys {
     pub const TASK_VIEW_MENU: AppBinding = AppBinding::new("TASK_VIEW_MENU", "shift+f");
     pub const TASK_WORKSPACE_FILTER: AppBinding =
         AppBinding::new("TASK_WORKSPACE_FILTER", "shift+s");
-    pub const TASK_LABEL_FILTER: AppBinding = AppBinding::new("TASK_LABEL_FILTER", "shift+l");
+    pub const TASK_LABEL_FILTER: AppBinding = AppBinding::new("TASK_LABEL_FILTER", "shift+t");
     pub const TASK_DELETE: AppBinding = AppBinding::new("TASK_DELETE", "delete");
     pub const TASK_DELETE_BACKSPACE: AppBinding = AppBinding::new("TASK_DELETE_X", "backspace");
     pub const TASK_DELETE_CTRL_X: AppBinding = AppBinding::new("TASK_DELETE_CTRL_X", "ctrl+x");
@@ -395,6 +395,8 @@ pub mod keys {
         AppBinding::new_sequence("TASK_DESCRIPTION_FIELD", "dd");
     pub const TASK_DESCRIPTION_EDITOR: AppBinding =
         AppBinding::new_sequence("TASK_DESCRIPTION_EDITOR", "do");
+    pub const TASK_DESCRIPTION_SPEED_READ: AppBinding =
+        AppBinding::new_sequence("TASK_DESCRIPTION_SPEED_READ", "ds");
     pub const TASK_STATE_FIELD: AppBinding = AppBinding::new_sequence("TASK_STATE_FIELD", "st");
     pub const TASK_SIZE_FIELD: AppBinding = AppBinding::new_sequence("TASK_SIZE_FIELD", "si");
     pub const TASK_PRIORITY_FIELD: AppBinding =
@@ -528,6 +530,7 @@ pub mod keys {
         TASK_TITLE_FIELD,
         TASK_DESCRIPTION_FIELD,
         TASK_DESCRIPTION_EDITOR,
+        TASK_DESCRIPTION_SPEED_READ,
         TASK_STATE_FIELD,
         TASK_SIZE_FIELD,
         TASK_PRIORITY_FIELD,
@@ -647,6 +650,7 @@ pub mod keys {
                 TASK_TITLE_FIELD,
                 TASK_DESCRIPTION_FIELD,
                 TASK_DESCRIPTION_EDITOR,
+                TASK_DESCRIPTION_SPEED_READ,
                 TASK_STATE_FIELD,
                 TASK_SIZE_FIELD,
                 TASK_PRIORITY_FIELD,
@@ -778,6 +782,7 @@ mod tests {
             ("TASK_TITLE_FIELD", "ti"),
             ("TASK_DESCRIPTION_FIELD", "dd"),
             ("TASK_DESCRIPTION_EDITOR", "do"),
+            ("TASK_DESCRIPTION_SPEED_READ", "ds"),
             ("TASK_STATE_FIELD", "st"),
             ("TASK_SIZE_FIELD", "si"),
             ("TASK_PRIORITY_FIELD", "pr"),
@@ -849,7 +854,7 @@ mod tests {
         for (name, expected) in [
             ("TASK_VIEW_MENU", "shift+f"),
             ("TASK_WORKSPACE_FILTER", "shift+s"),
-            ("TASK_LABEL_FILTER", "shift+l"),
+            ("TASK_LABEL_FILTER", "shift+t"),
             ("TASK_QUICK_CREATE", "shift+n"),
             ("TASK_SNOOZE", "ctrl+z"),
             ("TASK_COMPLETE", "ctrl+c"),

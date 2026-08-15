@@ -433,7 +433,7 @@ fn tag_detail_form(
             TextInput::new()
                 .value(tag.label.clone())
                 .placeholder("Tag label")
-                .panel("Label")
+                .panel("Name")
                 .hotkey(keys::TAG_LABEL_FIELD.hotkey())
                 .on_edit_end(move |value| {
                     patches.borrow_mut().push(TagPatch::Label(value));
@@ -474,8 +474,8 @@ mod tests {
         let area = Rect::new(0, 0, 100, 30);
         workspace.layout(area, &mut LayoutCtx::new());
         let text = rendered_text(&workspace, area);
-        for expected in ["Tag", "api", "backend", "Label"] {
-            assert!(text.contains(expected));
+        for expected in ["api", "backend", "Name"] {
+            assert!(text.contains(expected), "missing {expected}: {text}");
         }
         workspace.select_tag("tag-backend", &mut EventCtx::default());
         workspace

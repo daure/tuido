@@ -11,6 +11,7 @@ pub(super) enum AppDialog {
     Generic(Dialog<AppMsg>),
     TaskQuickMenu(Box<TaskQuickMenu>),
     Settings(DialogHost<SettingsDialog, AppMsg>),
+    SpeedReader(DialogHost<SpeedReader, AppMsg>),
     Empty(Dialog<AppMsg>),
     Snooze(Box<SnoozeDialog>),
 }
@@ -42,6 +43,7 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::Generic(dialog) => dialog.measure(proposal),
             Self::TaskQuickMenu(menu) => menu.measure(proposal),
             Self::Settings(dialog) => measure_dialog_host(dialog, proposal),
+            Self::SpeedReader(dialog) => measure_dialog_host(dialog, proposal),
             Self::Empty(dialog) => dialog.measure(proposal),
             Self::Snooze(dialog) => dialog.measure(proposal),
         }
@@ -59,6 +61,7 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::Generic(dialog) => dialog.layout(area, ctx),
             Self::TaskQuickMenu(dialog) => dialog.layout(area, ctx),
             Self::Settings(dialog) => dialog.layout(area, ctx),
+            Self::SpeedReader(dialog) => dialog.layout(area, ctx),
             Self::Empty(dialog) => dialog.layout(area, ctx),
             Self::Snooze(dialog) => dialog.layout(area, ctx),
         }
@@ -76,6 +79,7 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::Generic(dialog) => dialog.render(frame, area),
             Self::TaskQuickMenu(dialog) => dialog.render(frame, area, ctx),
             Self::Settings(dialog) => dialog.render(frame, area, ctx),
+            Self::SpeedReader(dialog) => dialog.render(frame, area, ctx),
             Self::Empty(dialog) => dialog.render(frame, area),
             Self::Snooze(dialog) => dialog.render(frame, area, ctx),
         }
@@ -93,6 +97,7 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::Generic(dialog) => dialog.event(event, ctx),
             Self::TaskQuickMenu(dialog) => dialog.event(event, ctx),
             Self::Settings(dialog) => dialog.event(event, ctx),
+            Self::SpeedReader(dialog) => dialog.event(event, ctx),
             Self::Empty(dialog) => dialog.event(event, ctx),
             Self::Snooze(dialog) => dialog.event(event, ctx),
         }
@@ -115,6 +120,7 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::Generic(dialog) => dialog.dispatch_event(route, event, ctx),
             Self::TaskQuickMenu(dialog) => dialog.dispatch_event(route, event, ctx),
             Self::Settings(dialog) => dialog.dispatch_event(route, event, ctx),
+            Self::SpeedReader(dialog) => dialog.dispatch_event(route, event, ctx),
             Self::Empty(dialog) => dialog.dispatch_event(route, event, ctx),
             Self::Snooze(dialog) => dialog.dispatch_event(route, event, ctx),
         }
@@ -132,6 +138,7 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::Generic(dialog) => dialog.dispatch_focus(target, focused, ctx),
             Self::TaskQuickMenu(dialog) => dialog.dispatch_focus(target, focused, ctx),
             Self::Settings(dialog) => dialog.dispatch_focus(target, focused, ctx),
+            Self::SpeedReader(dialog) => dialog.dispatch_focus(target, focused, ctx),
             Self::Empty(dialog) => dialog.dispatch_focus(target, focused, ctx),
             Self::Snooze(dialog) => dialog.dispatch_focus(target, focused, ctx),
         }
@@ -149,6 +156,7 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::Generic(dialog) => dialog.tick(dt, settings),
             Self::TaskQuickMenu(dialog) => dialog.tick(dt, settings),
             Self::Settings(dialog) => dialog.tick(dt, settings),
+            Self::SpeedReader(dialog) => dialog.tick(dt, settings),
             Self::Empty(dialog) => dialog.tick(dt, settings),
             Self::Snooze(dialog) => dialog.tick(dt, settings),
         }
@@ -166,6 +174,7 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::Generic(dialog) => dialog.init(ctx),
             Self::TaskQuickMenu(dialog) => dialog.init(ctx),
             Self::Settings(dialog) => dialog.init(ctx),
+            Self::SpeedReader(dialog) => dialog.init(ctx),
             Self::Empty(dialog) => dialog.init(ctx),
             Self::Snooze(dialog) => dialog.init(ctx),
         }
@@ -183,6 +192,7 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::Generic(dialog) => dialog.mount(ctx),
             Self::TaskQuickMenu(dialog) => dialog.mount(ctx),
             Self::Settings(dialog) => dialog.mount(ctx),
+            Self::SpeedReader(dialog) => dialog.mount(ctx),
             Self::Empty(dialog) => dialog.mount(ctx),
             Self::Snooze(dialog) => dialog.mount(ctx),
         }
@@ -200,6 +210,7 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::Generic(dialog) => dialog.unmount(ctx),
             Self::TaskQuickMenu(dialog) => dialog.unmount(ctx),
             Self::Settings(dialog) => dialog.unmount(ctx),
+            Self::SpeedReader(dialog) => dialog.unmount(ctx),
             Self::Empty(dialog) => dialog.unmount(ctx),
             Self::Snooze(dialog) => dialog.unmount(ctx),
         }
@@ -217,6 +228,7 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::Generic(dialog) => dialog.destroy(ctx),
             Self::TaskQuickMenu(dialog) => dialog.destroy(ctx),
             Self::Settings(dialog) => dialog.destroy(ctx),
+            Self::SpeedReader(dialog) => dialog.destroy(ctx),
             Self::Empty(dialog) => dialog.destroy(ctx),
             Self::Snooze(dialog) => dialog.destroy(ctx),
         }

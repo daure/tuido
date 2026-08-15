@@ -60,7 +60,7 @@ mod tests {
                 Box::new(workspaces::dialog(context.clone())),
                 &["CORE", "Description", "Lead", "New"],
             ),
-            (Box::new(tags::dialog(context)), &["api", "Label", "New"]),
+            (Box::new(tags::dialog(context)), &["api", "Name", "New"]),
         ];
         let area = Rect::new(0, 0, 80, 30);
 
@@ -106,7 +106,7 @@ mod tests {
             (
                 Box::new(tags::dialog(context)),
                 "No tags yet",
-                &["No tag selected.", "Label"],
+                &["No tag selected."],
             ),
         ];
         let area = Rect::new(0, 0, 100, 30);

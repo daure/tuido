@@ -4,6 +4,10 @@ use super::*;
 use tuicore::SeasonalGlyphs;
 
 const DATE_TIME_PLACEHOLDER: &str = "YYYY-MM-DD HH:MM";
+const TASK_DESCRIPTION_DESKTOP_MIN_CONTENT_ROWS: u16 = 2;
+const TASK_DESCRIPTION_NARROW_MAX_CONTENT_ROWS: u16 = 6;
+const TASK_DESCRIPTION_NARROW_EXTRA_ABOVE_MIN: u16 =
+    TASK_DESCRIPTION_NARROW_MAX_CONTENT_ROWS - TASK_DESCRIPTION_DESKTOP_MIN_CONTENT_ROWS;
 
 pub(super) fn task_toolbar(
     pending_view: TaskViewChange,
@@ -50,7 +54,7 @@ pub(super) fn label_filter_dropdown(
 ) -> Dropdown<Tag, String> {
     let selected = active_filter.borrow().clone();
     Dropdown::multi(tags.to_vec(), |tag| tag.id.clone(), |tag| tag.label.clone())
-        .placeholder(" Labels")
+        .placeholder(" Tags")
         .hotkey(keys::TASK_LABEL_FILTER.hotkey())
         .selected(selected)
         .search_mode(DropdownSearchMode::Fuzzy)
@@ -97,7 +101,9 @@ pub(super) fn task_workspace_layout(
     );
     let master =
         Split::vertical(toolbar, table).constraints(Constraint::Length(1), Constraint::Min(1));
-    ResponsiveSplit::master_detail(master, detail).second_visible(selected_task.is_some())
+    ResponsiveSplit::master_detail(master, detail)
+        .narrow_second_max_above_min(TASK_DESCRIPTION_NARROW_EXTRA_ABOVE_MIN)
+        .second_visible(selected_task.is_some())
 }
 
 pub(super) fn task_rows_for_view(
@@ -512,7 +518,7 @@ pub(crate) fn detail_form(
     }
     Flex::<AppMsg>::column()
         .gap(0)
-        .child("save-status", save_status, FlexItem::content())
+        .child("save-status", save_status, FlexItem::content().shrink(0))
         .child(
             "title",
             TaskTitleInput::new(&task.title, Rc::clone(&display_id), Rc::clone(&patch_sink)),
@@ -524,8 +530,13 @@ pub(crate) fn detail_form(
                 .value(task.description.clone())
                 .placeholder("Task description")
                 .panel("Description")
+                .language(Language::Markdown)
                 .hotkey(keys::TASK_DESCRIPTION_FIELD.hotkey())
                 .editor_hotkey(keys::TASK_DESCRIPTION_EDITOR.hotkey())
+                .action_hotkey(
+                    keys::TASK_DESCRIPTION_SPEED_READ.hotkey(),
+                    AppMsg::OpenDescriptionSpeedReader,
+                )
                 .on_edit_end({
                     let patch_sink = Rc::clone(&patch_sink);
                     move |value| {
@@ -533,12 +544,11 @@ pub(crate) fn detail_form(
                         AppMsg::Noop
                     }
                 })
-                .min_rows(2)
-                .max_rows(6),
-            FlexItem::content(),
+                .min_rows(usize::from(TASK_DESCRIPTION_DESKTOP_MIN_CONTENT_ROWS)),
+            FlexItem::content().shrink(1),
         )
         .child("status-fields", status_fields, FlexItem::fixed(3))
-        .child("date-fields", date_fields, FlexItem::content())
+        .child("date-fields", date_fields, FlexItem::content().shrink(0))
         .child(
             "people-workspaces",
             Flex::<AppMsg>::row()
@@ -563,17 +573,17 @@ pub(crate) fn detail_form(
         .child(
             "tags",
             TaskTagsInput::new(task, tags, Rc::clone(&patch_sink)),
-            FlexItem::content(),
+            FlexItem::content().shrink(0),
         )
         .child(
             "checklist",
             TaskChecklistInput::new(task, Rc::clone(&patch_sink), checklist_highlighted_id),
-            FlexItem::content(),
+            FlexItem::content().shrink(0),
         )
         .child(
             "links",
             TaskLinksInput::new(task, Rc::clone(&patch_sink)),
-            FlexItem::content(),
+            FlexItem::content().shrink(0),
         )
         .child(
             "relations",
@@ -584,7 +594,7 @@ pub(crate) fn detail_form(
                 Rc::clone(&patch_sink),
                 highlighted_issue_link_task_id,
             ),
-            FlexItem::content(),
+            FlexItem::content().shrink(0),
         )
 }
 
