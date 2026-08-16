@@ -749,7 +749,7 @@ fn rendered_area_has_focus_style(node: &impl TuiNode<AppMsg>, canvas: Rect, area
 }
 
 #[test]
-fn task_header_shows_filters_to_the_left_of_new() {
+fn task_header_shows_new_to_the_left_of_filters() {
     assert_eq!(
         TaskView::OPTIONS,
         [
@@ -791,7 +791,7 @@ fn task_header_shows_filters_to_the_left_of_new() {
         &keys::TASK_LABEL_FILTER.label(),
         "󰲋 Space",
         " Tags",
-        "New",
+        "New task",
     ] {
         assert!(
             text.contains(expected),
@@ -802,8 +802,10 @@ fn task_header_shows_filters_to_the_left_of_new() {
         .find("󰲋 Space")
         .expect("workspace filter should render");
     let labels = text.find(" Tags").expect("tag filter should render");
-    let new = text.find("New").expect("new button should render");
-    assert!(workspace < labels && labels < new);
+    let new = text
+        .find("New task")
+        .expect("new task button should render");
+    assert!(new < workspace && workspace < labels);
     assert!(!text.contains("View:"));
     assert!(!text.contains("Resolve"));
     assert!(!text.contains("Permanently"));
@@ -1049,7 +1051,9 @@ fn wide_task_workspace_aligns_detail_with_toolbar_top() {
 
     workspace.layout(Rect::new(0, 0, 120, 40), &mut LayoutCtx::new());
 
-    let (_, detail_area) = workspace.layout.child_areas();
+    let (table_area, detail_area) = workspace.layout.child_areas();
+    assert_eq!(table_area.width, 48);
+    assert_eq!(detail_area.width, 72);
     assert_eq!(detail_area.y, 0);
 }
 
@@ -1635,12 +1639,46 @@ fn app_header_new_button_emits_create_action() {
     let mut layout = LayoutCtx::new();
     let area = Rect::new(0, 0, 80, 40);
     app.layout(area, &mut layout);
+    let tabs = layout
+        .focus_targets()
+        .iter()
+        .find(|target| target.id.as_str() == "tabs")
+        .expect("missing app tabs");
     let button = layout
         .focus_targets()
         .iter()
         .find(|target| target.path.keys().iter().any(|part| part.as_str() == "new"))
         .expect("missing app header new button");
-    assert_eq!(button.area.right(), area.right().saturating_sub(1));
+    for component in ["workspace", "labels"] {
+        let control = layout
+            .focus_targets()
+            .iter()
+            .find(|target| {
+                target
+                    .path
+                    .keys()
+                    .iter()
+                    .any(|part| part.as_str() == component)
+            })
+            .unwrap_or_else(|| panic!("missing app header {component} control"));
+        assert_eq!(control.area.y, area.y);
+        assert!(control.area.x > button.area.x);
+    }
+    let workspace = layout
+        .focus_targets()
+        .iter()
+        .find(|target| {
+            target
+                .path
+                .keys()
+                .iter()
+                .any(|part| part.as_str() == "workspace")
+        })
+        .expect("missing app header workspace control");
+    assert!(workspace.area.x > button.area.x);
+    assert_eq!(tabs.area.y, area.y.saturating_add(1));
+    assert_eq!(button.area.y, area.y);
+    assert_eq!(button.area.x, area.x);
     let button_path = button.path.clone();
 
     let mut create_ctx = EventCtx::default();

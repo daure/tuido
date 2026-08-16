@@ -18,8 +18,8 @@ pub(super) fn task_toolbar(
     Flex::row()
         .align(CrossAlign::Center)
         .gap(1)
-        .child("view", view, FlexItem::content())
         .child("space", Paragraph::new(""), FlexItem::fill(1))
+        .child("view", view, FlexItem::content())
 }
 
 pub(super) fn workspace_filter_dropdown(
@@ -99,9 +99,9 @@ pub(super) fn task_workspace_layout(
         &state.tags,
         save_error,
     );
-    let master =
-        Split::vertical(toolbar, table).constraints(Constraint::Length(1), Constraint::Min(1));
+    let master = TaskMaster::new(toolbar, table);
     ResponsiveSplit::master_detail(master, detail)
+        .wide_ratio(40, 60)
         .narrow_second_max_above_min(TASK_DESCRIPTION_NARROW_EXTRA_ABOVE_MIN)
         .second_visible(selected_task.is_some())
 }

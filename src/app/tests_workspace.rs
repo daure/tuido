@@ -194,12 +194,32 @@ fn empty_task_workspace_collapses_detail_and_gives_table_full_pane() {
     });
     let mut workspace = TaskWorkspace::new(context);
     let area = Rect::new(0, 0, 120, 30);
-    workspace.layout(area, &mut LayoutCtx::new());
+    let mut layout = LayoutCtx::new();
+    workspace.layout(area, &mut layout);
 
     let text = rendered_text(&workspace, area);
-    let (_, table_area) = workspace.layout.first().child_areas();
+    let (toolbar_area, table_area) = workspace.layout.first().child_areas();
     let (_, detail_area) = workspace.layout.child_areas();
-    assert_eq!(table_area, Rect::new(0, 1, 120, 29));
+    let view = layout
+        .focus_targets()
+        .iter()
+        .find(|target| target.path.keys().iter().any(|key| key.as_str() == "view"))
+        .expect("task view menu should be focusable");
+    let search = layout
+        .focus_targets()
+        .iter()
+        .find(|target| {
+            target
+                .path
+                .keys()
+                .iter()
+                .any(|key| key.as_str() == "search")
+        })
+        .expect("task search should be focusable");
+    assert_eq!(toolbar_area, Rect::new(29, 0, 91, 1));
+    assert_eq!(table_area, area);
+    assert_eq!(view.area.y, search.area.y);
+    assert_eq!(view.area.right(), table_area.right());
     assert_eq!(detail_area, Rect::default());
     assert!(text.contains("No active tasks"));
     assert!(!text.contains("No task selected."));

@@ -52,10 +52,10 @@ use tuicore::{
     EventRoute, Flex, FlexItem, FocusCtx, FocusId, FocusRequest, FocusTarget, HotkeyEvent,
     HotkeyLabelMode, Language, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint,
     LifecycleCtx, ListControl, ListControlEvent, ListControlField, ListControlKeyBindings,
-    MenuButton, MenuItem, Padding, Paragraph, Propagation, RenderCtx, SeasonalEmptyState,
-    SelectedTag, SelectionMode, SelectionTrigger, SpeedReader, Split, Stack, StackAlign, StackItem,
-    StatusBar, StatusBarMenuItem, Store, Tab, Tabs, TabsVariant, TagInput, TagInputEvent,
-    TextareaInput, TickResult, TreeApp, TreePath, TuiEvent, TuiNode, WeatherProviderConfig,
+    MainAlign, MenuButton, MenuItem, Padding, Paragraph, Propagation, RenderCtx,
+    SeasonalEmptyState, SelectedTag, SelectionMode, SelectionTrigger, SpeedReader, StatusBar,
+    StatusBarMenuItem, Store, Tab, Tabs, TabsVariant, TagInput, TagInputEvent, TextareaInput,
+    TickResult, TreeApp, TreePath, TuiEvent, TuiNode, WeatherProviderConfig,
 };
 use uuid::Uuid;
 
@@ -554,7 +554,7 @@ impl App {
             ),
         ])
         .selected(0)
-        .variant(TabsVariant::Underline)
+        .variant(TabsVariant::OneRow)
         .bordered(true);
         let task_filters = TaskFilterControls::new(
             context.clone(),
@@ -563,12 +563,16 @@ impl App {
             Rc::clone(&active_tab),
         );
         let actions = Flex::row()
+            .justify(MainAlign::SpaceBetween)
             .align(CrossAlign::Center)
             .gap(1)
-            .child("filters", task_filters, FlexItem::content())
+            .padding(Padding {
+                right: 1,
+                ..Padding::default()
+            })
             .child(
                 "new",
-                Button::new("New")
+                Button::new("New task")
                     .hotkey(keys::TASK_QUICK_CREATE.hotkey())
                     .on_press({
                         let active_tab = Rc::clone(&active_tab);
@@ -579,23 +583,14 @@ impl App {
                         }
                     }),
                 FlexItem::content(),
-            );
-        let content = Stack::new()
+            )
+            .child("filters", task_filters, FlexItem::content());
+        let content = Flex::column()
+            .child("actions", actions, FlexItem::fixed(1))
             .child(
                 "tabs",
                 TrackedTabs::new(tabs, Rc::clone(&active_tab)),
-                StackItem::new(),
-            )
-            .child(
-                "actions",
-                actions,
-                StackItem::new()
-                    .fit_content()
-                    .align(StackAlign::End, StackAlign::Start)
-                    .inset(Padding {
-                        right: 1,
-                        ..Padding::default()
-                    }),
+                FlexItem::fill(1),
             );
 
         let root = Flex::column()
@@ -1769,7 +1764,138 @@ impl TuiNode<AppMsg> for App {
 type TaskRow = Task;
 type TaskTable = ListControl<TaskRow, String, AppMsg>;
 type TaskDetail = TaskDetailForm;
-type TaskMaster = Split<Flex<AppMsg>, TaskTable>;
+const TASK_SEARCH_WIDTH: u16 = 28;
+
+struct TaskMaster {
+    toolbar: Flex<AppMsg>,
+    table: TaskTable,
+    toolbar_area: Rect,
+    table_area: Rect,
+}
+
+impl TaskMaster {
+    fn new(toolbar: Flex<AppMsg>, table: TaskTable) -> Self {
+        Self {
+            toolbar,
+            table,
+            toolbar_area: Rect::default(),
+            table_area: Rect::default(),
+        }
+    }
+
+    fn table(&self) -> &TaskTable {
+        &self.table
+    }
+
+    fn table_mut(&mut self) -> &mut TaskTable {
+        &mut self.table
+    }
+
+    #[cfg(test)]
+    fn child_areas(&self) -> (Rect, Rect) {
+        (self.toolbar_area, self.table_area)
+    }
+}
+
+impl TuiNode<AppMsg> for TaskMaster {
+    fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
+        self.table.measure(proposal)
+    }
+
+    fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
+        let toolbar_x = area
+            .x
+            .saturating_add(area.width.min(TASK_SEARCH_WIDTH))
+            .saturating_add(1)
+            .min(area.right());
+        self.toolbar_area = Rect::new(
+            toolbar_x,
+            area.y,
+            area.right().saturating_sub(toolbar_x),
+            area.height.min(1),
+        );
+        self.table_area = area;
+        ctx.push_slot(ChildKey::first(), self.toolbar_area, |ctx| {
+            self.toolbar.layout(self.toolbar_area, ctx);
+        });
+        ctx.push_slot(ChildKey::second(), self.table_area, |ctx| {
+            self.table.layout(self.table_area, ctx);
+        });
+        LayoutResult::new(area)
+    }
+
+    fn render<'a>(&'a self, frame: &mut Frame, _area: Rect, ctx: &mut RenderCtx<'a>) {
+        self.table.render(frame, self.table_area, ctx);
+        self.toolbar.render(frame, self.toolbar_area, ctx);
+    }
+
+    fn dispatch_event(
+        &mut self,
+        route: &EventRoute,
+        event: &TuiEvent,
+        ctx: &mut EventCtx<AppMsg>,
+    ) -> EventOutcome {
+        if route.path.is_empty() {
+            return self.event(event, ctx);
+        }
+        if let Some(route) = route
+            .path
+            .without_first_if(&ChildKey::first())
+            .map(EventRoute::new)
+        {
+            return self
+                .toolbar
+                .dispatch_event(&route, event, ctx)
+                .bubble(ctx, |ctx| self.event(event, ctx));
+        }
+        if let Some(route) = route
+            .path
+            .without_first_if(&ChildKey::second())
+            .map(EventRoute::new)
+        {
+            return self
+                .table
+                .dispatch_event(&route, event, ctx)
+                .bubble(ctx, |ctx| self.event(event, ctx));
+        }
+        EventOutcome::Ignored
+    }
+
+    fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<AppMsg>) {
+        if let Some(target) = target.for_child(&ChildKey::first()) {
+            self.toolbar.dispatch_focus(&target, focused, ctx);
+        } else if let Some(target) = target.for_child(&ChildKey::second()) {
+            self.table.dispatch_focus(&target, focused, ctx);
+        }
+    }
+
+    fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
+        self.toolbar
+            .tick(dt, settings)
+            .merge(self.table.tick(dt, settings))
+    }
+
+    fn init(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
+        self.toolbar.init(ctx);
+        self.table.init(ctx);
+    }
+
+    fn mount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
+        self.toolbar.mount(ctx);
+        self.table.mount(ctx);
+    }
+
+    fn unmount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
+        self.table.unmount(ctx);
+        self.toolbar.unmount(ctx);
+    }
+
+    fn destroy(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
+        self.table.destroy(ctx);
+        self.toolbar.destroy(ctx);
+    }
+}
+
 type TaskWorkspaceLayout = ResponsiveSplit<TaskMaster, TaskDetail>;
 type TaskViewChange = Rc<RefCell<Option<TaskView>>>;
 type ActiveTaskView = Rc<RefCell<TaskView>>;
@@ -2420,11 +2546,11 @@ impl TaskWorkspace {
     }
 
     fn task_list(&self) -> &TaskTable {
-        self.layout.first().second()
+        self.layout.first().table()
     }
 
     fn task_list_mut(&mut self) -> &mut TaskTable {
-        self.layout.first_mut().second_mut()
+        self.layout.first_mut().table_mut()
     }
 
     fn table(&self) -> &DataView<TaskRow, String> {
