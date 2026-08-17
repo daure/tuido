@@ -1202,6 +1202,58 @@ fn calendar_origin_dialog_cancel_restores_calendar_focus() {
 }
 
 #[test]
+fn calendar_snooze_and_unsnooze_restores_calendar_focus() {
+    let mut task = task_with("task-2", "Calendar task", TaskState::Snoozed);
+    task.snoozed_until = Some(time::macros::datetime!(2026-07-25 08:00));
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![task],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(context.store, context.coordinator);
+    app.active_tab.set(CALENDAR_TAB_INDEX);
+    let calendar_path = TreePath::from_keys([
+        ChildKey::new("tabs"),
+        ChildKey::new("tab-1"),
+        ChildKey::first(),
+    ]);
+
+    app.open_task_snooze_dialog(
+        "task-2",
+        Some(calendar_path.clone()),
+        &mut EventCtx::default(),
+    );
+    let custom = time::macros::datetime!(2026-07-30 14:30);
+    let mut snooze_ctx = EventCtx::default();
+    app.snooze_task("task-2".into(), custom, Some(custom), &mut snooze_ctx);
+    assert_eq!(
+        snooze_ctx.focus_request(),
+        Some(&FocusRequest::Path(calendar_path.clone()))
+    );
+
+    app.open_task_snooze_dialog("task-2", None, &mut EventCtx::default());
+    let mut snooze_no_return_ctx = EventCtx::default();
+    app.snooze_task("task-2".into(), custom, Some(custom), &mut snooze_no_return_ctx);
+    assert_eq!(
+        snooze_no_return_ctx.focus_request(),
+        Some(&initial_calendar_focus_request())
+    );
+
+    app.open_task_snooze_dialog(
+        "task-2",
+        Some(calendar_path.clone()),
+        &mut EventCtx::default(),
+    );
+    let mut unsnooze_ctx = EventCtx::default();
+    app.unsnooze_task("task-2".into(), &mut unsnooze_ctx);
+    assert_eq!(
+        unsnooze_ctx.focus_request(),
+        Some(&FocusRequest::Path(calendar_path))
+    );
+}
+
+#[test]
 fn missing_task_dialog_targets_clear_origin_and_focus_task_table() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
@@ -2763,6 +2815,49 @@ fn task_description_shows_speed_read_hotkey() {
 
     assert!(text.contains("Description"));
     assert!(text.contains("┤dd·do·ds│"));
+}
+
+#[test]
+fn ctrl_t_toggles_task_progress_when_focused_inside_detail_view() {
+    let task = test_task();
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![task],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut workspace = TaskWorkspace::new(context);
+    let mut layout = LayoutCtx::new();
+    workspace.layout(Rect::new(0, 0, 160, 45), &mut layout);
+
+    let title_input = layout
+        .focus_targets()
+        .iter()
+        .find(|target| {
+            target
+                .path
+                .keys()
+                .iter()
+                .any(|key| key.as_str() == "title")
+        })
+        .expect("title input should be focusable");
+
+    workspace.dispatch_focus(title_input, true, &mut FocusCtx::default());
+
+    let effects = TreeDispatcher::new().dispatch_event(
+        &mut workspace,
+        &EventRoute::new(title_input.path.clone()),
+        &TuiEvent::Key(tuicore::KeyEvent {
+            code: tuicore::Key::Char('t'),
+            modifiers: tuicore::KeyModifiers::CONTROL,
+        }),
+        AnimationSettings::default(),
+    );
+
+    assert!(matches!(
+        effects.messages.as_slice(),
+        [AppMsg::ToggleTaskProgress(task_id)] if task_id == "task-1"
+    ));
 }
 
 #[test]

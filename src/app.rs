@@ -52,7 +52,7 @@ use tuicore::{
     EventRoute, Flex, FlexItem, FocusCtx, FocusId, FocusRequest, FocusTarget, HotkeyEvent,
     HotkeyLabelMode, Language, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint,
     LifecycleCtx, ListControl, ListControlEvent, ListControlField, ListControlKeyBindings,
-    MainAlign, MenuButton, MenuItem, Padding, Paragraph, Propagation, RenderCtx,
+    MainAlign, MenuButton, MenuItem, Paragraph, Propagation, RenderCtx,
     SeasonalEmptyState, SelectedTag, SelectionMode, SelectionTrigger, SpeedReader, StatusBar,
     StatusBarMenuItem, Store, Tab, Tabs, TabsVariant, TagInput, TagInputEvent, TextareaInput,
     TickResult, TreeApp, TreePath, TuiEvent, TuiNode, WeatherProviderConfig,
@@ -566,10 +566,6 @@ impl App {
             .justify(MainAlign::SpaceBetween)
             .align(CrossAlign::Center)
             .gap(1)
-            .padding(Padding {
-                right: 1,
-                ..Padding::default()
-            })
             .child(
                 "new",
                 Button::new("New task")
@@ -1562,9 +1558,24 @@ impl App {
                 ));
             }
         }
-        self.snooze_return_focus = None;
+        let return_focus = if self.active_tab.get() == CALENDAR_TAB_INDEX {
+            self.snooze_return_focus.take()
+        } else {
+            self.snooze_return_focus = None;
+            None
+        };
         self.close_dialog(ctx);
-        focus_task_table(ctx);
+        if let Some(path) = return_focus {
+            ctx.focus(FocusRequest::Path(path));
+            ctx.stop_propagation();
+            ctx.request_redraw();
+        } else if self.active_tab.get() == CALENDAR_TAB_INDEX {
+            ctx.focus(initial_calendar_focus_request());
+            ctx.stop_propagation();
+            ctx.request_redraw();
+        } else {
+            focus_task_table(ctx);
+        }
     }
 
     fn unsnooze_task(&mut self, task_id: String, ctx: &mut EventCtx<AppMsg>) {
@@ -1590,9 +1601,24 @@ impl App {
                 ));
             }
         }
-        self.snooze_return_focus = None;
+        let return_focus = if self.active_tab.get() == CALENDAR_TAB_INDEX {
+            self.snooze_return_focus.take()
+        } else {
+            self.snooze_return_focus = None;
+            None
+        };
         self.close_dialog(ctx);
-        focus_task_table(ctx);
+        if let Some(path) = return_focus {
+            ctx.focus(FocusRequest::Path(path));
+            ctx.stop_propagation();
+            ctx.request_redraw();
+        } else if self.active_tab.get() == CALENDAR_TAB_INDEX {
+            ctx.focus(initial_calendar_focus_request());
+            ctx.stop_propagation();
+            ctx.request_redraw();
+        } else {
+            focus_task_table(ctx);
+        }
     }
 
     fn task(&self, task_id: &str) -> Option<Task> {
@@ -1625,6 +1651,10 @@ impl App {
             ctx.focus(FocusRequest::Path(path));
             ctx.stop_propagation();
             ctx.request_redraw();
+        } else if self.active_tab.get() == CALENDAR_TAB_INDEX {
+            ctx.focus(initial_calendar_focus_request());
+            ctx.stop_propagation();
+            ctx.request_redraw();
         } else {
             focus_task_table(ctx);
         }
@@ -1635,6 +1665,10 @@ impl App {
         self.close_dialog(ctx);
         if let Some(path) = return_focus {
             ctx.focus(FocusRequest::Path(path));
+            ctx.stop_propagation();
+            ctx.request_redraw();
+        } else if self.active_tab.get() == CALENDAR_TAB_INDEX {
+            ctx.focus(initial_calendar_focus_request());
             ctx.stop_propagation();
             ctx.request_redraw();
         } else {
@@ -1659,6 +1693,10 @@ impl App {
         });
         if let Some(path) = valid_return_path {
             ctx.focus(FocusRequest::Path(path));
+            ctx.stop_propagation();
+            ctx.request_redraw();
+        } else if self.active_tab.get() == CALENDAR_TAB_INDEX {
+            ctx.focus(initial_calendar_focus_request());
             ctx.stop_propagation();
             ctx.request_redraw();
         } else {
@@ -3057,6 +3095,13 @@ impl TaskWorkspace {
             return None;
         }
         let task_id = self.visible_selection.borrow().clone()?;
+        if keys::TASK_TOGGLE_PROGRESS.matches(event)
+            && self.can_toggle_task_progress(&task_id)
+        {
+            ctx.emit(AppMsg::ToggleTaskProgress(task_id));
+            ctx.stop_propagation();
+            return Some(EventOutcome::Handled);
+        }
         if keys::TASK_SNOOZE.matches(event) {
             ctx.emit(AppMsg::OpenTaskSnooze {
                 task_id,

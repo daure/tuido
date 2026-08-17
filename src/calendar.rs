@@ -17,7 +17,9 @@ use tuicore::{
 
 use crate::app::{
     ActiveLabelFilter, ActiveWorkspaceFilter, AppContext, AppMsg, persist_task_order,
-    task_agent_command, task_detail::detail_escape, task_ids_at_snooze_time,
+    task_agent_command,
+    task_detail::{TASK_DESCRIPTION_NARROW_EXTRA_ABOVE_MIN, detail_escape},
+    task_ids_at_snooze_time,
 };
 use crate::app_keymap::keys;
 use crate::domain::{Task, TaskState, Workspace};
@@ -141,7 +143,9 @@ impl CalendarWorkspace {
         Self {
             context,
             create_context,
-            pane: ResponsiveSplit::master_detail(calendar, detail).second_visible(false),
+            pane: ResponsiveSplit::master_detail(calendar, detail)
+                .narrow_second_max_above_min(TASK_DESCRIPTION_NARROW_EXTRA_ABOVE_MIN)
+                .second_visible(false),
             visible_entries,
             empty_state: SeasonalEmptyState::new("No tasks scheduled for this day"),
             observed_version,
@@ -854,7 +858,7 @@ impl TuiNode<AppMsg> for CalendarWorkspace {
         self.sync_empty_day_message();
         self.persist_weekend_visibility_change(previous);
         self.sync_after_event(true, ctx);
-        self.handle_task_shortcut(outcome, event, None, ctx)
+        self.handle_task_shortcut(outcome, event, Some(ctx.current_path()), ctx)
     }
 
     fn dispatch_event(
@@ -1390,6 +1394,49 @@ mod tests {
         workspace.calendar_mut().on_key(Key::Char('M'));
         workspace.sync_calendar_detail(&mut EventCtx::default());
         assert!(!workspace.pane.is_second_visible());
+    }
+
+    #[test]
+    fn day_view_narrow_long_description_uses_six_rows_max() {
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks: Vec::new(),
+            people: Vec::new(),
+            workspaces: Vec::new(),
+            tags: Vec::new(),
+        });
+        let mut workspace = CalendarWorkspace::new(context.clone(), true);
+        let until = workspace.today.with_time(Time::from_hms(8, 0, 0).unwrap());
+        let mut snoozed = task("snoozed", "Follow up", TaskState::Snoozed, Some(until));
+        snoozed.description = (1..=40)
+            .map(|line| format!("Line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        context
+            .store
+            .borrow_mut()
+            .dispatch(AppEvent::TaskCreated(snoozed));
+        workspace.sync_store_version();
+        workspace.calendar_mut().on_key(Key::Char('D'));
+        workspace.sync_calendar_detail(&mut EventCtx::default());
+
+        let narrow = Rect::new(0, 0, 80, 45);
+        let mut layout = LayoutCtx::new();
+        workspace.layout(narrow, &mut layout);
+
+        let description = layout
+            .focus_targets()
+            .iter()
+            .find(|target| {
+                target.id.as_str() == "textarea"
+                    && target
+                        .path
+                        .keys()
+                        .iter()
+                        .any(|key| key.as_str() == "description")
+            })
+            .expect("description should be focusable");
+
+        assert_eq!(description.area.height, 6);
     }
 
     #[test]
