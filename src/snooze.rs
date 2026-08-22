@@ -429,7 +429,7 @@ impl SnoozeDialog {
             }
         };
         if let Some(until) = until {
-            ctx.emit(self.target.selection_message(until, false));
+            ctx.emit(self.target.selection_message(until, true));
         }
     }
 
@@ -794,8 +794,26 @@ mod tests {
             ctx.messages(),
             [AppMsg::ScheduleCreatedTask {
                 until,
-                remember_custom: None,
-            }] if *until == selected
+                remember_custom: Some(custom),
+            }] if *until == selected && *custom == selected
+        ));
+    }
+
+    #[test]
+    fn quick_snooze_is_remembered_for_the_next_task() {
+        let mut dialog = SnoozeDialog::new("task".into(), datetime!(2026-07-23 12:00), None, false);
+        let tomorrow = dialog.quick.tomorrow;
+        let mut ctx = EventCtx::default();
+
+        dialog.activate(SnoozeChoice::Tomorrow, &mut ctx);
+
+        assert!(matches!(
+            ctx.messages(),
+            [AppMsg::SnoozeTask {
+                until,
+                remember_custom: Some(remembered),
+                ..
+            }] if *until == tomorrow && *remembered == tomorrow
         ));
     }
 

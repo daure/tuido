@@ -101,7 +101,7 @@ pub(super) fn task_workspace_layout(
     );
     let master = TaskMaster::new(toolbar, table);
     ResponsiveSplit::master_detail(master, detail)
-        .wide_ratio(40, 60)
+        .wide_ratio(45, 55)
         .narrow_second_max_above_min(TASK_DESCRIPTION_NARROW_EXTRA_ABOVE_MIN)
         .second_visible(selected_task.is_some())
 }

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use time::PrimitiveDateTime;
 use tuicore::{ChipColorRole, DispatchOutcome};
@@ -35,6 +35,8 @@ pub struct AppState {
     pub external_refresh_version: u64,
     pub workspace_revision: u64,
     pub entity_revisions: HashMap<String, u64>,
+    pub external_started_task_id: Option<String>,
+    pub link_title_fetches: HashSet<(String, String)>,
 }
 
 impl AppState {
@@ -70,6 +72,8 @@ impl AppState {
             external_refresh_version: 0,
             workspace_revision: 0,
             entity_revisions: HashMap::new(),
+            external_started_task_id: None,
+            link_title_fetches: HashSet::new(),
         }
     }
 
@@ -226,8 +230,23 @@ pub enum AppEvent {
         revision: u64,
         entity_revisions: HashMap<String, u64>,
     },
+    ExternalStartedTaskHandled(String),
     RefreshFailed(String),
     RefreshSucceeded,
+    TaskLinkTitleFetchStarted {
+        task_id: String,
+        url: String,
+    },
+    TaskLinkTitleFetched {
+        task_id: String,
+        url: String,
+        title: Option<String>,
+        last_fetched: String,
+    },
+    TaskLinkTitleFetchFailed {
+        task_id: String,
+        url: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -697,6 +716,19 @@ pub fn reduce_app_state(state: &mut AppState, event: AppEvent) -> DispatchOutcom
             revision,
             entity_revisions,
         } => {
+            let external_started_task_id = snapshot
+                .tasks
+                .iter()
+                .filter(|task| task.state == TaskState::InProgress)
+                .filter(|task| {
+                    state
+                        .tasks
+                        .iter()
+                        .find(|previous| previous.id == task.id)
+                        .is_none_or(|previous| previous.state != TaskState::InProgress)
+                })
+                .min_by_key(|task| task.rank)
+                .map(|task| task.id.clone());
             let selected_task = state.selected_task_id.clone();
             let selected_person = state.selected_person_id.clone();
             let selected_workspace = state.selected_workspace_id.clone();
@@ -713,10 +745,17 @@ pub fn reduce_app_state(state: &mut AppState, event: AppEvent) -> DispatchOutcom
             state.selected_tag_id = retained_selection(selected_tag, &state.tags, |v| &v.id);
             state.workspace_revision = revision;
             state.entity_revisions = entity_revisions;
+            state.external_started_task_id = external_started_task_id;
             state.refresh_error = None;
             state.external_refresh_version += 1;
             state.version += 1;
             DispatchOutcome::layout()
+        }
+        AppEvent::ExternalStartedTaskHandled(task_id) => {
+            if state.external_started_task_id.as_deref() == Some(&task_id) {
+                state.external_started_task_id = None;
+            }
+            DispatchOutcome::unchanged()
         }
         AppEvent::RefreshFailed(error) => {
             let message = format!("Space refresh failed: {error}");
@@ -730,6 +769,52 @@ pub fn reduce_app_state(state: &mut AppState, event: AppEvent) -> DispatchOutcom
         }
         AppEvent::RefreshSucceeded => {
             if state.refresh_error.take().is_some() {
+                state.version += 1;
+                DispatchOutcome::changed()
+            } else {
+                DispatchOutcome::unchanged()
+            }
+        }
+        AppEvent::TaskLinkTitleFetchStarted { task_id, url } => {
+            if state.link_title_fetches.insert((task_id, url)) {
+                state.version += 1;
+                DispatchOutcome::changed()
+            } else {
+                DispatchOutcome::unchanged()
+            }
+        }
+        AppEvent::TaskLinkTitleFetched {
+            task_id,
+            url,
+            title,
+            last_fetched,
+        } => {
+            let fetching_removed = state
+                .link_title_fetches
+                .remove(&(task_id.clone(), url.clone()));
+            let metadata_changed = state
+                .tasks
+                .iter_mut()
+                .find(|task| task.id == task_id)
+                .and_then(|task| task.links.iter_mut().find(|link| link.url == url))
+                .is_some_and(|link| {
+                    if link.title == title && link.last_fetched == Some(last_fetched.clone()) {
+                        false
+                    } else {
+                        link.title = title;
+                        link.last_fetched = Some(last_fetched);
+                        true
+                    }
+                });
+            if fetching_removed || metadata_changed {
+                state.version += 1;
+                DispatchOutcome::changed()
+            } else {
+                DispatchOutcome::unchanged()
+            }
+        }
+        AppEvent::TaskLinkTitleFetchFailed { task_id, url } => {
+            if state.link_title_fetches.remove(&(task_id, url)) {
                 state.version += 1;
                 DispatchOutcome::changed()
             } else {
@@ -764,7 +849,7 @@ pub struct Task {
     pub workspace_id: Option<String>,
     pub tag_ids: Vec<String>,
     pub checklist: Vec<ChecklistItem>,
-    pub links: Vec<String>,
+    pub links: Vec<TaskLink>,
     pub relations: Vec<TaskRelation>,
     pub description: String,
 }
@@ -789,6 +874,35 @@ impl Task {
             relations: Vec::new(),
             description,
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskLink {
+    pub url: String,
+    pub title: Option<String>,
+    pub last_fetched: Option<String>,
+}
+
+impl TaskLink {
+    pub fn new(url: String) -> Self {
+        Self {
+            url,
+            title: None,
+            last_fetched: None,
+        }
+    }
+}
+
+impl From<String> for TaskLink {
+    fn from(url: String) -> Self {
+        Self::new(url)
+    }
+}
+
+impl From<&str> for TaskLink {
+    fn from(url: &str) -> Self {
+        Self::new(url.to_string())
     }
 }
 
@@ -1322,10 +1436,20 @@ fn apply_task_patch(task: &mut Task, available_tags: &mut Vec<Tag>, patch: &Task
             let mut links = links.clone();
             links.sort();
             links.dedup();
-            if task.links == links {
+            let next_links = links
+                .into_iter()
+                .map(|url| {
+                    task.links
+                        .iter()
+                        .find(|link| link.url == url)
+                        .cloned()
+                        .unwrap_or_else(|| TaskLink::new(url))
+                })
+                .collect();
+            if task.links == next_links {
                 false
             } else {
-                task.links = links;
+                task.links = next_links;
                 true
             }
         }
@@ -1465,6 +1589,41 @@ mod tests {
             .app_setting_desired_values
             .insert("setting".into(), value.into());
         state
+    }
+
+    #[test]
+    fn external_refresh_marks_newly_started_task_for_navigation() {
+        let mut backlog = Task::quick_capture(
+            "task-1".into(),
+            "Start now".into(),
+            String::new(),
+            TaskSize::Small,
+        );
+        backlog.rank = 2;
+        let mut state = AppState::from_snapshot(WorkspaceSnapshot {
+            tasks: vec![backlog.clone()],
+            people: Vec::new(),
+            workspaces: Vec::new(),
+            tags: Vec::new(),
+        });
+        backlog.state = TaskState::InProgress;
+        backlog.rank = 0;
+
+        reduce_app_state(
+            &mut state,
+            AppEvent::WorkspaceRefreshed {
+                snapshot: WorkspaceSnapshot {
+                    tasks: vec![backlog],
+                    people: Vec::new(),
+                    workspaces: Vec::new(),
+                    tags: Vec::new(),
+                },
+                revision: 1,
+                entity_revisions: HashMap::new(),
+            },
+        );
+
+        assert_eq!(state.external_started_task_id.as_deref(), Some("task-1"));
     }
 
     fn request_setting(state: &mut AppState, value: &str, generation: u64) {

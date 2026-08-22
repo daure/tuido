@@ -80,6 +80,7 @@ const SETTINGS_MENU_ID: &str = "settings";
 const TASKS_TAB_INDEX: usize = 0;
 const CALENDAR_TAB_INDEX: usize = 1;
 static NEXT_PENDING_TASK_ID: AtomicU64 = AtomicU64::new(1);
+const LINK_TITLE_STALE_AFTER: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const STATUS_BAR_MENU_ITEMS: [StatusBarMenuItem; 6] = [
     StatusBarMenuItem::Custom {
         id: SETTINGS_MENU_ID,
@@ -107,6 +108,23 @@ fn weather_provider_config() -> WeatherProviderConfig {
 
 fn default_snooze_time() -> Time {
     parse_default_snooze_time(None).expect("default snooze time should be valid")
+}
+
+fn stale_link_urls(task: &Task) -> Vec<String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    task.links
+        .iter()
+        .filter(|link| {
+            link.last_fetched
+                .as_deref()
+                .and_then(|value| value.parse::<u128>().ok())
+                .is_none_or(|fetched| now.saturating_sub(fetched) >= LINK_TITLE_STALE_AFTER.as_nanos())
+        })
+        .map(|link| link.url.clone())
+        .collect()
 }
 
 fn seed_app_setting(state: &mut AppState, key: &str, value: String) {
@@ -192,7 +210,7 @@ pub(crate) enum AppMsg {
     },
     OpenTaskSnooze {
         task_id: String,
-        return_focus: Option<TreePath>,
+        return_focus: Option<SnoozeReturnFocus>,
     },
     OpenCompleteTask {
         task_id: String,
@@ -207,6 +225,10 @@ pub(crate) enum AppMsg {
         source_task_id: String,
         target_task_id: String,
     },
+    FetchTaskLinkTitle {
+        task_id: String,
+        url: String,
+    },
     OpenDescriptionSpeedReader(String),
     SnoozeTask {
         task_id: String,
@@ -219,6 +241,24 @@ pub(crate) enum AppMsg {
     CloseDeleteTaskDialog,
     CloseCompleteTaskDialog,
     CloseDialog,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SnoozeReturnFocus {
+    Path(TreePath),
+    CalendarDay {
+        path: TreePath,
+        date: Date,
+        has_other_tasks: bool,
+    },
+}
+
+impl SnoozeReturnFocus {
+    fn path(&self) -> &TreePath {
+        match self {
+            Self::Path(path) | Self::CalendarDay { path, .. } => path,
+        }
+    }
 }
 
 pub fn run() -> Result<(), Box<dyn Error>> {
@@ -365,6 +405,11 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             source_task_id,
             target_task_id,
         } => app.navigate_to_task(source_task_id, target_task_id, ctx),
+        AppMsg::FetchTaskLinkTitle { task_id, url } => app
+            .context
+            .coordinator
+            .borrow_mut()
+            .fetch_task_link_title(task_id, url),
         AppMsg::OpenDescriptionSpeedReader(description) => {
             app.open_description_speed_reader(description, ctx)
         }
@@ -471,12 +516,13 @@ struct App {
     calendar_create_context: CalendarCreateContext,
     create_task_calendar_date: Option<Date>,
     pending_calendar_task: Option<CreateTaskDraft>,
-    snooze_return_focus: Option<TreePath>,
+    snooze_return_focus: Option<SnoozeReturnFocus>,
     delete_return_focus: Option<TreePath>,
     complete_return_focus: Option<CompleteReturnFocus>,
     active_tab: Rc<Cell<usize>>,
     pending_task_view: TaskViewChange,
     pending_task_navigation: PendingTaskNavigation,
+    pending_focus_request: Option<FocusRequest>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -498,7 +544,7 @@ fn toggled_task_progress_state(state: TaskState) -> TaskState {
     }
 }
 
-pub(crate) fn task_agent_command(state: &AppState, task_id: &str) -> Option<String> {
+fn task_agent_identifier(state: &AppState, task_id: &str) -> Option<String> {
     let task = state.tasks.iter().find(|task| task.id == task_id)?;
     let number = task_number(&task.id)?;
     let workspace_key = task.workspace_id.as_deref().and_then(|workspace_id| {
@@ -508,9 +554,27 @@ pub(crate) fn task_agent_command(state: &AppState, task_id: &str) -> Option<Stri
             .find(|workspace| workspace.id == workspace_id)
             .map(|workspace| workspace.key.as_str())
     });
-    let identifier = task_identifier(number, workspace_key);
+    Some(task_identifier(number, workspace_key))
+}
+
+fn task_agent_command_for(state: &AppState, task_id: &str, action: &str) -> Option<String> {
+    let task = state.tasks.iter().find(|task| task.id == task_id)?;
+    let identifier = task_agent_identifier(state, task_id)?;
     let title = task.title.replace('\\', "\\\\").replace('"', "\\\"");
-    Some(format!("Tuido execute {identifier} \"{title}\""))
+    Some(format!("Tuido {action} {identifier} \"{title}\""))
+}
+
+pub(crate) fn task_agent_command(state: &AppState, task_id: &str) -> Option<String> {
+    task_agent_command_for(state, task_id, "execute")
+}
+
+pub(crate) fn task_agent_clarify_command(state: &AppState, task_id: &str) -> Option<String> {
+    task_agent_command_for(state, task_id, "clarify")
+}
+
+pub(crate) fn task_copy_payload(state: &AppState, task_id: &str) -> Option<String> {
+    let task = state.tasks.iter().find(|task| task.id == task_id)?;
+    Some(TaskCopyContext::new(&state.people, &state.workspaces, &state.tags).export(task))
 }
 
 impl App {
@@ -633,6 +697,7 @@ impl App {
             active_tab,
             pending_task_view,
             pending_task_navigation,
+            pending_focus_request: None,
         }
     }
 
@@ -664,7 +729,7 @@ impl App {
         drop(state);
         *self.pending_task_navigation.borrow_mut() = Some(TaskNavigation {
             target_task_id,
-            source_task_id,
+            source_task_id: Some(source_task_id),
             view,
         });
         self.active_tab.set(TASKS_TAB_INDEX);
@@ -675,6 +740,16 @@ impl App {
 
     fn primary_dialog(&mut self) -> &mut PrimaryDialogLayer {
         self.root.base_mut()
+    }
+
+    fn show_externally_started_task(&mut self, task_id: String) {
+        *self.pending_task_navigation.borrow_mut() = Some(TaskNavigation {
+            target_task_id: task_id,
+            source_task_id: None,
+            view: TaskView::Active,
+        });
+        self.active_tab.set(TASKS_TAB_INDEX);
+        self.pending_focus_request = Some(initial_task_table_focus_request());
     }
 
     fn open_settings_dialog(&mut self, ctx: &mut EventCtx<AppMsg>) {
@@ -1365,7 +1440,7 @@ impl App {
     fn open_task_snooze_dialog(
         &mut self,
         task_id: &str,
-        return_focus: Option<TreePath>,
+        return_focus: Option<SnoozeReturnFocus>,
         ctx: &mut EventCtx<AppMsg>,
     ) {
         self.snooze_return_focus = None;
@@ -1565,7 +1640,20 @@ impl App {
             None
         };
         self.close_dialog(ctx);
-        if let Some(path) = return_focus {
+        if let Some(SnoozeReturnFocus::CalendarDay {
+            path,
+            date,
+            has_other_tasks,
+        }) = return_focus
+        {
+            if until.date() != date && !has_other_tasks {
+                ctx.focus(app_tabs_focus_request());
+            } else {
+                ctx.focus(FocusRequest::Path(path));
+            }
+            ctx.stop_propagation();
+            ctx.request_redraw();
+        } else if let Some(SnoozeReturnFocus::Path(path)) = return_focus {
             ctx.focus(FocusRequest::Path(path));
             ctx.stop_propagation();
             ctx.request_redraw();
@@ -1608,8 +1696,8 @@ impl App {
             None
         };
         self.close_dialog(ctx);
-        if let Some(path) = return_focus {
-            ctx.focus(FocusRequest::Path(path));
+        if let Some(return_focus) = return_focus {
+            ctx.focus(FocusRequest::Path(return_focus.path().clone()));
             ctx.stop_propagation();
             ctx.request_redraw();
         } else if self.active_tab.get() == CALENDAR_TAB_INDEX {
@@ -1647,8 +1735,8 @@ impl App {
         }
         let return_focus = self.snooze_return_focus.take();
         self.close_dialog(ctx);
-        if let Some(path) = return_focus {
-            ctx.focus(FocusRequest::Path(path));
+        if let Some(return_focus) = return_focus {
+            ctx.focus(FocusRequest::Path(return_focus.path().clone()));
             ctx.stop_propagation();
             ctx.request_redraw();
         } else if self.active_tab.get() == CALENDAR_TAB_INDEX {
@@ -1766,6 +1854,20 @@ impl TuiNode<AppMsg> for App {
     fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
         let mut result = self.root.tick(dt, settings);
         if self.context.coordinator.borrow_mut().poll() {
+            let started_task_id = self
+                .context
+                .store
+                .borrow()
+                .state()
+                .external_started_task_id
+                .clone();
+            if let Some(task_id) = started_task_id {
+                self.context
+                    .store
+                    .borrow_mut()
+                    .dispatch(AppEvent::ExternalStartedTaskHandled(task_id.clone()));
+                self.show_externally_started_task(task_id);
+            }
             result = result.merge(TickResult {
                 changed: true,
                 layout: true,
@@ -1780,6 +1882,10 @@ impl TuiNode<AppMsg> for App {
         };
         result = result.merge(TickResult::scheduled_after(Duration::from_millis(delay)));
         result
+    }
+
+    fn take_pending_focus_request(&mut self) -> Option<FocusRequest> {
+        self.pending_focus_request.take()
     }
 
     fn init(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
@@ -1857,7 +1963,12 @@ impl TuiNode<AppMsg> for TaskMaster {
             self.toolbar.layout(self.toolbar_area, ctx);
         });
         ctx.push_slot(ChildKey::second(), self.table_area, |ctx| {
-            self.table.layout(self.table_area, ctx);
+            ctx.with_focus_fallback_hotkey_sequences_status(
+                FocusId::new("task-table"),
+                self.table_area,
+                vec![keys::TASK_AGENT_YANK_CLARIFY.hotkey()],
+                |ctx| self.table.layout(self.table_area, ctx),
+            );
         });
         LayoutResult::new(area)
     }
@@ -2091,7 +2202,7 @@ enum TaskView {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TaskNavigation {
     target_task_id: String,
-    source_task_id: String,
+    source_task_id: Option<String>,
     view: TaskView,
 }
 
@@ -2544,6 +2655,17 @@ impl TaskWorkspace {
                 .borrow_mut()
                 .dispatch(AppEvent::SelectTask(task_id.clone()));
         }
+        if let Some(task) = selected_task_id
+            .as_deref()
+            .and_then(|id| state.tasks.iter().find(|task| task.id == id))
+        {
+            for url in stale_link_urls(task) {
+                context
+                    .coordinator
+                    .borrow_mut()
+                    .fetch_task_link_title(task.id.clone(), url);
+            }
+        }
 
         let active_task_view = Rc::new(RefCell::new(task_view));
         let visible_selection = Rc::new(RefCell::new(selected_task_id.clone()));
@@ -2650,8 +2772,10 @@ impl TaskWorkspace {
         *self.active_workspace_filter.borrow_mut() = None;
         self.label_filter.clear();
         self.active_label_filter.borrow_mut().clear();
-        self.detail_mut()
-            .queue_issue_link_highlight(navigation.source_task_id);
+        if let Some(source_task_id) = navigation.source_task_id {
+            self.detail_mut()
+                .queue_issue_link_highlight(source_task_id);
+        }
         self.context
             .store
             .borrow_mut()
@@ -2925,6 +3049,14 @@ impl TaskWorkspace {
             .dispatch(AppEvent::SelectTask(id.to_string()));
         let state = self.context.store.borrow().state().clone();
         let selected_task = state.tasks.iter().find(|task| task.id == id);
+        if let Some(task) = selected_task {
+            for url in stale_link_urls(task) {
+                self.context
+                    .coordinator
+                    .borrow_mut()
+                    .fetch_task_link_title(task.id.clone(), url);
+            }
+        }
         let save_error = selected_task.and_then(|task| state.task_status_error(&task.id));
         if self.detail().task_id.as_deref() != Some(id) {
             self.detail_mut().set_task(
@@ -3105,7 +3237,7 @@ impl TaskWorkspace {
         if keys::TASK_SNOOZE.matches(event) {
             ctx.emit(AppMsg::OpenTaskSnooze {
                 task_id,
-                return_focus: snooze_return_focus,
+                return_focus: snooze_return_focus.map(SnoozeReturnFocus::Path),
             });
             return Some(EventOutcome::Handled);
         }
@@ -3180,14 +3312,23 @@ impl TaskWorkspace {
         let TuiEvent::Hotkey(HotkeyEvent::Commit(sequence)) = event else {
             return None;
         };
-        if sequence != &keys::TASK_AGENT_YANK.hotkey() {
+        if sequence != &keys::TASK_AGENT_YANK.hotkey()
+            && sequence != &keys::TASK_AGENT_YANK_CLARIFY.hotkey()
+        {
             return None;
         }
         let command = self
             .visible_selection
             .borrow()
             .as_ref()
-            .and_then(|task_id| task_agent_command(self.context.store.borrow().state(), task_id));
+            .and_then(|task_id| {
+                let state = self.context.store.borrow();
+                if sequence == &keys::TASK_AGENT_YANK.hotkey() {
+                    task_agent_command(state.state(), task_id)
+                } else {
+                    task_agent_clarify_command(state.state(), task_id)
+                }
+            });
         if let Some(command) = command {
             ctx.copy_to_clipboard(command);
         }

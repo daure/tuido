@@ -32,6 +32,32 @@ fn task_create(title: &str) -> TaskCreate {
     }
 }
 
+#[tokio::test]
+async fn task_link_metadata_is_persisted_and_returned_by_service_views() {
+    let service = test_service().await;
+    let mut input = task_create("Link metadata");
+    input.links = vec!["https://example.com/docs".into()];
+    let created = service.create_task(input).await.unwrap();
+
+    service
+        .store_task_link_metadata(
+            &created.value.id,
+            "https://example.com/docs",
+            Some("Example documentation"),
+            "123456789",
+        )
+        .await
+        .unwrap();
+
+    let loaded = service.get_task(&created.value.id).await.unwrap();
+    assert_eq!(loaded.value.links[0].url, "https://example.com/docs");
+    assert_eq!(
+        loaded.value.links[0].title.as_deref(),
+        Some("Example documentation")
+    );
+    assert_eq!(loaded.value.links[0].last_fetched.as_deref(), Some("123456789"));
+}
+
 #[test]
 fn omitted_task_state_defaults_to_backlog() {
     let input: TaskCreate = serde_json::from_value(serde_json::json!({
@@ -1152,7 +1178,14 @@ fn task_relations_are_bidirectional_and_replaceable_from_either_task() {
         assert_eq!(linked.id, second.value.id);
         assert_eq!(linked.title, "Second");
         assert_eq!(linked.description, "Linked task details");
-        assert_eq!(linked.links, vec!["https://example.com/second"]);
+        assert_eq!(
+            linked
+                .links
+                .iter()
+                .map(|link| link.url.as_str())
+                .collect::<Vec<_>>(),
+            vec!["https://example.com/second"]
+        );
         assert_eq!(linked.relations[0].task.id, first.value.id);
         let json = serde_json::to_value(details).unwrap();
         assert!(
@@ -1198,7 +1231,7 @@ fn full_task_update_replaces_relations_and_bumps_related_revision() {
                 people_ids: first.value.people_ids,
                 workspace_id: first.value.workspace_id,
                 tag_ids: first.value.tag_ids,
-                links: first.value.links,
+                links: first.value.links.into_iter().map(|link| link.url).collect(),
                 relations: vec![TaskRelationInput {
                     task_id: second.value.id.clone(),
                     relation_type: "blocks".into(),

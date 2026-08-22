@@ -125,7 +125,7 @@ impl<'a> TaskExport<'a> {
             links: task
                 .links
                 .iter()
-                .map(|url| crate::task_link::browser_target(url))
+                .map(|link| crate::task_link::browser_target(&link.url))
                 .collect(),
         })
     }

@@ -646,6 +646,55 @@ fn promoting_snoozed_task_opens_tasks_active_view_and_selects_it() {
 }
 
 #[test]
+fn externally_started_task_opens_tasks_active_view_and_selects_it() {
+    let mut active = task_with("active", "Existing active task", TaskState::Todo);
+    active.rank = 1;
+    let mut started = task_with("started", "Started from chat", TaskState::Backlog);
+    started.rank = 2;
+    let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+        tasks: vec![active, started.clone()],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(context.store, context.coordinator);
+    app.active_tab.set(CALENDAR_TAB_INDEX);
+    started.state = TaskState::InProgress;
+    started.rank = 0;
+    store.borrow_mut().dispatch(AppEvent::WorkspaceRefreshed {
+        snapshot: WorkspaceSnapshot {
+            tasks: vec![task_with("active", "Existing active task", TaskState::Todo), started],
+            people: Vec::new(),
+            workspaces: Vec::new(),
+            tags: Vec::new(),
+        },
+        revision: 1,
+        entity_revisions: std::collections::HashMap::new(),
+    });
+
+    app.show_externally_started_task(
+        store
+            .borrow()
+            .state()
+            .external_started_task_id
+            .clone()
+            .expect("refresh should identify the started task"),
+    );
+    let area = Rect::new(0, 0, 120, 40);
+    app.layout(area, &mut LayoutCtx::new());
+
+    assert_eq!(app.active_tab.get(), TASKS_TAB_INDEX);
+    assert_eq!(store.borrow().state().selected_task_id.as_deref(), Some("started"));
+    assert_eq!(
+        app.take_pending_focus_request(),
+        Some(initial_task_table_focus_request())
+    );
+    let text = rendered_text(&app, area);
+    assert!(text.contains(" Active"));
+    assert!(text.contains("Started from chat"));
+}
+
+#[test]
 fn ctrl_t_is_inert_without_a_highlighted_task() {
     let (_runtime, context, store) = test_context(WorkspaceSnapshot {
         tasks: Vec::new(),
@@ -785,7 +834,7 @@ fn ctrl_x_from_task_detail_opens_delete_except_under_links() {
     );
     assert!(stopped_ctx.messages().is_empty());
 
-    for links in [Vec::new(), vec!["https://example.com".to_string()]] {
+    for links in [Vec::new(), vec![crate::domain::TaskLink::new("https://example.com".into())]] {
         let populated = !links.is_empty();
         let mut task = test_task();
         task.links = links;
@@ -827,7 +876,7 @@ fn ctrl_x_from_task_detail_opens_delete_except_under_links() {
 
     for editor_key in [Key::Char('+'), Key::Char('e')] {
         let mut task = test_task();
-        task.links = vec!["https://example.com".to_string()];
+        task.links = vec!["https://example.com".into()];
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
             tasks: vec![task],
             people: Vec::new(),
@@ -1019,7 +1068,10 @@ fn detail_dialog_cancel_restores_resolvable_full_app_focus_path() {
         panic!("detail snooze should carry return focus");
     };
     assert_eq!(task_id, "task-1");
-    assert_eq!(return_focus, &description_path);
+    assert_eq!(
+        return_focus,
+        &SnoozeReturnFocus::Path(description_path.clone())
+    );
 
     app.open_task_snooze_dialog(
         task_id,
@@ -1166,7 +1218,7 @@ fn calendar_origin_dialog_cancel_restores_calendar_focus() {
 
     app.open_task_snooze_dialog(
         "task-2",
-        Some(calendar_path.clone()),
+        Some(SnoozeReturnFocus::Path(calendar_path.clone())),
         &mut EventCtx::default(),
     );
     let mut snooze_ctx = EventCtx::default();
@@ -1202,7 +1254,7 @@ fn calendar_origin_dialog_cancel_restores_calendar_focus() {
 }
 
 #[test]
-fn calendar_snooze_and_unsnooze_restores_calendar_focus() {
+fn calendar_snooze_focuses_tabs_when_rescheduling_leaves_day_empty() {
     let mut task = task_with("task-2", "Calendar task", TaskState::Snoozed);
     task.snoozed_until = Some(time::macros::datetime!(2026-07-25 08:00));
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
@@ -1221,20 +1273,26 @@ fn calendar_snooze_and_unsnooze_restores_calendar_focus() {
 
     app.open_task_snooze_dialog(
         "task-2",
-        Some(calendar_path.clone()),
+        Some(SnoozeReturnFocus::CalendarDay {
+            path: calendar_path.clone(),
+            date: time::macros::date!(2026 - 07 - 25),
+            has_other_tasks: false,
+        }),
         &mut EventCtx::default(),
     );
     let custom = time::macros::datetime!(2026-07-30 14:30);
     let mut snooze_ctx = EventCtx::default();
     app.snooze_task("task-2".into(), custom, Some(custom), &mut snooze_ctx);
-    assert_eq!(
-        snooze_ctx.focus_request(),
-        Some(&FocusRequest::Path(calendar_path.clone()))
-    );
+    assert_eq!(snooze_ctx.focus_request(), Some(&app_tabs_focus_request()));
 
     app.open_task_snooze_dialog("task-2", None, &mut EventCtx::default());
     let mut snooze_no_return_ctx = EventCtx::default();
-    app.snooze_task("task-2".into(), custom, Some(custom), &mut snooze_no_return_ctx);
+    app.snooze_task(
+        "task-2".into(),
+        custom,
+        Some(custom),
+        &mut snooze_no_return_ctx,
+    );
     assert_eq!(
         snooze_no_return_ctx.focus_request(),
         Some(&initial_calendar_focus_request())
@@ -1242,13 +1300,57 @@ fn calendar_snooze_and_unsnooze_restores_calendar_focus() {
 
     app.open_task_snooze_dialog(
         "task-2",
-        Some(calendar_path.clone()),
+        Some(SnoozeReturnFocus::Path(calendar_path.clone())),
         &mut EventCtx::default(),
     );
     let mut unsnooze_ctx = EventCtx::default();
     app.unsnooze_task("task-2".into(), &mut unsnooze_ctx);
     assert_eq!(
         unsnooze_ctx.focus_request(),
+        Some(&FocusRequest::Path(calendar_path))
+    );
+}
+
+#[test]
+fn calendar_snooze_focuses_calendar_when_day_has_another_task() {
+    let original_until = time::macros::datetime!(2026-07-25 08:00);
+    let mut task = task_with("task-2", "Calendar task", TaskState::Snoozed);
+    task.snoozed_until = Some(original_until);
+    let mut other = task_with("task-3", "Next calendar task", TaskState::Snoozed);
+    other.snoozed_until = Some(original_until);
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![task, other],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(context.store, context.coordinator);
+    app.active_tab.set(CALENDAR_TAB_INDEX);
+    let calendar_path = TreePath::from_keys([
+        ChildKey::new("tabs"),
+        ChildKey::new("tab-1"),
+        ChildKey::first(),
+    ]);
+
+    app.open_task_snooze_dialog(
+        "task-2",
+        Some(SnoozeReturnFocus::CalendarDay {
+            path: calendar_path.clone(),
+            date: original_until.date(),
+            has_other_tasks: true,
+        }),
+        &mut EventCtx::default(),
+    );
+    let mut ctx = EventCtx::default();
+    app.snooze_task(
+        "task-2".into(),
+        time::macros::datetime!(2026-07-30 14:30),
+        None,
+        &mut ctx,
+    );
+
+    assert_eq!(
+        ctx.focus_request(),
         Some(&FocusRequest::Path(calendar_path))
     );
 }
@@ -1263,7 +1365,9 @@ fn missing_task_dialog_targets_clear_origin_and_focus_task_table() {
     });
     let mut app = App::new(context.store, context.coordinator);
     app.open_task_quick_menu("task-1", &mut EventCtx::default());
-    app.snooze_return_focus = Some(TreePath::from_keys([ChildKey::new("stale")]));
+    app.snooze_return_focus = Some(SnoozeReturnFocus::Path(TreePath::from_keys([
+        ChildKey::new("stale"),
+    ])));
     let mut ctx = EventCtx::default();
 
     app.open_task_snooze_dialog("missing", None, &mut ctx);
@@ -1496,7 +1600,11 @@ fn successful_snooze_and_unsnooze_clear_return_focus_and_focus_task_table() {
     let mut app = App::new(context.store, context.coordinator);
     let mut open_ctx = EventCtx::default();
     let detail_path = TreePath::from_keys([ChildKey::new("detail"), ChildKey::new("title")]);
-    app.open_task_snooze_dialog("task-1", Some(detail_path.clone()), &mut open_ctx);
+    app.open_task_snooze_dialog(
+        "task-1",
+        Some(SnoozeReturnFocus::Path(detail_path.clone())),
+        &mut open_ctx,
+    );
     let custom = time::macros::datetime!(2026-07-30 14:30);
     let mut submit_ctx = EventCtx::default();
 
@@ -1519,7 +1627,7 @@ fn successful_snooze_and_unsnooze_clear_return_focus_and_focus_task_table() {
         )]
     );
 
-    app.snooze_return_focus = Some(detail_path);
+    app.snooze_return_focus = Some(SnoozeReturnFocus::Path(detail_path));
     let mut unsnooze_ctx = EventCtx::default();
     app.unsnooze_task("task-1".into(), &mut unsnooze_ctx);
 
@@ -2727,7 +2835,7 @@ fn focused_dropdown_search_allows_ctrl_z_to_snooze_task() {
         [AppMsg::OpenTaskSnooze {
             task_id,
             return_focus: Some(return_focus),
-        }] if task_id == "task-1" && return_focus == &focused_path
+        }] if task_id == "task-1" && return_focus == &SnoozeReturnFocus::Path(focused_path.clone())
     ));
 }
 
@@ -2868,8 +2976,8 @@ fn desktop_detail_gives_description_remaining_height_before_lower_fields() {
         .collect::<Vec<_>>()
         .join("\n");
     task.links = vec![
-        "https://example.com/first".to_string(),
-        "https://example.com/second".to_string(),
+        "https://example.com/first".into(),
+        "https://example.com/second".into(),
     ];
     task.relations = vec![TaskRelation {
         task_id: "related-task".to_string(),
@@ -3003,8 +3111,8 @@ fn lower_rows_take_height_from_description_without_shrinking_lower_controls() {
     base.layout(area, &mut base_layout);
 
     base_task.links = vec![
-        "https://example.com/first".to_string(),
-        "https://example.com/second".to_string(),
+        "https://example.com/first".into(),
+        "https://example.com/second".into(),
     ];
     base_task.checklist = vec![
         ChecklistItem {
@@ -3074,8 +3182,8 @@ fn narrow_long_description_uses_six_rows_and_preserves_lower_fields() {
         .collect::<Vec<_>>()
         .join("\n");
     task.links = vec![
-        "https://example.com/first".to_string(),
-        "https://example.com/second".to_string(),
+        "https://example.com/first".into(),
+        "https://example.com/second".into(),
     ];
     task.relations = vec![TaskRelation {
         task_id: "related-task".to_string(),

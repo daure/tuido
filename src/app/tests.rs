@@ -1,6 +1,7 @@
 use super::*;
 use crate::domain::{
-    ChecklistItem, SaveTarget, TaskField, TaskRelation, TaskRelationKind, WorkspaceSnapshot,
+    ChecklistItem, SaveTarget, TaskField, TaskLink, TaskRelation, TaskRelationKind,
+    WorkspaceSnapshot,
 };
 use ratatui::{Terminal, backend::TestBackend};
 use sqlx::any::AnyPoolOptions;
@@ -515,7 +516,7 @@ fn task_navigation_uses_the_most_specific_view_for_each_state() {
         let mut workspace = TaskWorkspace::new(context);
         *workspace.pending_navigation.borrow_mut() = Some(TaskNavigation {
             target_task_id: target.id.clone(),
-            source_task_id: "source".into(),
+            source_task_id: Some("source".into()),
             view: expected_view,
         });
 
@@ -560,7 +561,7 @@ fn app_task_navigation_chooses_the_view_for_each_task_state() {
             app.pending_task_navigation.borrow().as_ref(),
             Some(&TaskNavigation {
                 target_task_id: target.id,
-                source_task_id: "source".into(),
+                source_task_id: Some("source".into()),
                 view: expected_view,
             })
         );
@@ -1052,8 +1053,8 @@ fn wide_task_workspace_aligns_detail_with_toolbar_top() {
     workspace.layout(Rect::new(0, 0, 120, 40), &mut LayoutCtx::new());
 
     let (table_area, detail_area) = workspace.layout.child_areas();
-    assert_eq!(table_area.width, 48);
-    assert_eq!(detail_area.width, 72);
+    assert_eq!(table_area.width, 54);
+    assert_eq!(detail_area.width, 66);
     assert_eq!(detail_area.y, 0);
 }
 
@@ -1338,6 +1339,47 @@ fn agent_yank_copies_workspace_key_task_command() {
 }
 
 #[test]
+fn clarify_yank_copies_selected_task_command_from_detail_view() {
+    let workspace = Workspace::new(
+        "workspace-1".into(),
+        "proj".into(),
+        "Workspace".into(),
+        String::new(),
+    );
+    let mut task = task_with("OLD-1234", "Clarify this task", TaskState::Todo);
+    task.workspace_id = Some(workspace.id.clone());
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![task],
+        people: Vec::new(),
+        workspaces: vec![workspace],
+        tags: Vec::new(),
+    });
+    let mut workspace = TaskWorkspace::new(context);
+    let mut layout = LayoutCtx::new();
+    workspace.layout(Rect::new(0, 0, 120, 24), &mut layout);
+    let detail_path = layout
+        .focus_targets()
+        .iter()
+        .find(|target| target.path.keys().first() == Some(&ChildKey::second()))
+        .expect("detail control should be focusable")
+        .path
+        .clone();
+
+    let mut ctx = EventCtx::default();
+    let outcome = workspace.dispatch_event(
+        &EventRoute::new(detail_path),
+        &TuiEvent::Hotkey(HotkeyEvent::Commit(keys::TASK_AGENT_YANK_CLARIFY.hotkey())),
+        &mut ctx,
+    );
+    let effects = tuicore::DispatchEffects::from_event_ctx(outcome, ctx);
+
+    assert_eq!(
+        effects.clipboard.as_deref(),
+        Some("Tuido clarify PROJ-1234 \"Clarify this task\"")
+    );
+}
+
+#[test]
 fn app_startup_selects_and_focuses_first_ranked_task() {
     let mut older_low = task_with("older-low", "Older low", TaskState::InProgress);
     older_low.priority = TaskPriority::Low;
@@ -1418,6 +1460,11 @@ fn task_detail_hotkeys_are_registered_while_task_table_is_focused() {
             .hotkey_sequences
             .contains(&keys::TASK_AGENT_YANK.hotkey())
     );
+    assert!(
+        task_table
+            .hotkey_sequences
+            .contains(&keys::TASK_AGENT_YANK_CLARIFY.hotkey())
+    );
 
     for hotkey in [
         keys::TASK_TITLE_FIELD.hotkey(),
@@ -1461,7 +1508,7 @@ fn reselecting_current_task_does_not_rebuild_detail_controls() {
 #[test]
 fn enter_on_task_link_opens_it_in_the_browser() {
     let mut task = test_task();
-    task.links = vec!["www.example.com/item".to_string()];
+    task.links = vec!["www.example.com/item".into()];
     let opened = Rc::new(RefCell::new(Vec::new()));
     let opened_by_handler = Rc::clone(&opened);
     let mut input = TaskLinksInput::with_opener(
@@ -1514,7 +1561,7 @@ fn enter_on_task_link_opens_it_in_the_browser() {
 #[test]
 fn ctrl_enter_on_task_link_opens_it_without_requesting_focus() {
     let mut task = test_task();
-    task.links = vec!["www.example.com/item".to_string()];
+    task.links = vec!["www.example.com/item".into()];
     let opened = Rc::new(RefCell::new(Vec::new()));
     let opened_by_handler = Rc::clone(&opened);
     let mut input = TaskLinksInput::with_opener(
@@ -1586,9 +1633,55 @@ fn ctrl_enter_on_task_link_opens_it_without_requesting_focus() {
 }
 
 #[test]
+fn space_reveals_highlighted_task_link_title_for_two_seconds() {
+    let mut task = test_task();
+    task.links = vec![TaskLink {
+        url: "https://example.com/docs".into(),
+        title: Some("Example documentation".into()),
+        last_fetched: Some("123".into()),
+    }];
+    let mut input =
+        TaskLinksInput::with_opener(&task, Rc::new(RefCell::new(Vec::new())), |_, _| Ok(()));
+    let area = Rect::new(0, 0, 60, 5);
+    let mut layout = LayoutCtx::new();
+    input.layout(area, &mut layout);
+    let target = layout
+        .focus_targets()
+        .iter()
+        .find(|target| target.id.as_str() == "data-view")
+        .expect("links list should be focusable")
+        .clone();
+    let mut focus = FocusManager::new();
+    let transition = focus
+        .apply_request(
+            &FocusRequest::TargetAt {
+                path: target.path.clone(),
+                id: target.id.clone(),
+            },
+            layout.focus_targets(),
+        )
+        .expect("links list focus should apply");
+    let mut dispatcher = TreeDispatcher::new();
+    dispatcher.dispatch_focus(&mut input, transition, AnimationSettings::default());
+
+    assert!(rendered_text(&input, area).contains("https://example.com/docs"));
+    let effects = dispatcher.dispatch_event(
+        &mut input,
+        &EventRoute::new(target.path.clone()),
+        &TuiEvent::Key(Key::Char(' ').into()),
+        AnimationSettings::default(),
+    );
+    assert!(effects.outcome.handled());
+    assert!(rendered_text(&input, area).contains("Example documentation"));
+
+    input.tick(Duration::from_secs(2), AnimationSettings::default());
+    assert!(rendered_text(&input, area).contains("https://example.com/docs"));
+}
+
+#[test]
 fn ctrl_x_removes_highlighted_task_link() {
     let mut task = test_task();
-    task.links = vec!["https://example.com/item".to_string()];
+    task.links = vec!["https://example.com/item".into()];
     let patches = Rc::new(RefCell::new(Vec::new()));
     let mut input = TaskLinksInput::with_opener(&task, Rc::clone(&patches), |_, _| Ok(()));
     let area = Rect::new(0, 0, 40, 5);

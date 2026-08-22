@@ -6,6 +6,7 @@ mod create_management_dialog;
 mod create_task_dialog;
 mod domain;
 mod link_icons;
+mod link_title;
 mod mcp;
 mod paths;
 mod persistence_coordinator;

@@ -529,6 +529,7 @@ fn failed_active_patch_defers_completion_to_successful_queued_patch() {
         error: Some("active title failure".to_string()),
         related_revisions: HashMap::new(),
         created_task: None,
+        link_title: None,
     }));
     assert!(coordinator.drain(Duration::from_secs(2)));
 
@@ -574,6 +575,7 @@ fn custom_snooze_then_state_then_quick_keeps_latest_workflow() {
         error: None,
         related_revisions: HashMap::new(),
         created_task: None,
+        link_title: None,
     });
     assert!(coordinator.drain(Duration::from_secs(2)));
 
@@ -642,6 +644,7 @@ fn custom_snooze_replaced_before_execution_preserves_remembered_value() {
         error: None,
         related_revisions: HashMap::new(),
         created_task: None,
+        link_title: None,
     });
     assert!(coordinator.drain(Duration::from_secs(2)));
     let task_row = runtime
@@ -740,6 +743,7 @@ fn other_task_custom_blocks_same_task_quick_from_reordering_global_last() {
         error: None,
         related_revisions: HashMap::new(),
         created_task: None,
+        link_title: None,
     });
     assert!(coordinator.drain(Duration::from_secs(2)));
 
@@ -790,6 +794,7 @@ fn custom_snooze_then_unsnooze_keeps_workflow_without_persisting_last() {
         error: None,
         related_revisions: HashMap::new(),
         created_task: None,
+        link_title: None,
     });
     assert!(coordinator.drain(Duration::from_secs(2)));
 
@@ -841,6 +846,7 @@ fn failed_active_custom_snooze_is_not_suppressed_by_queued_state() {
         error: Some("custom snooze failed".into()),
         related_revisions: HashMap::new(),
         created_task: None,
+        link_title: None,
     }));
     assert!(coordinator.drain(Duration::from_secs(2)));
 
@@ -885,6 +891,7 @@ fn failed_active_custom_merges_into_queued_quick_compound_snooze() {
         error: Some("custom snooze failed".into()),
         related_revisions: HashMap::new(),
         created_task: None,
+        link_title: None,
     }));
     assert!(coordinator.drain(Duration::from_secs(2)));
 
@@ -933,6 +940,7 @@ fn successful_active_patch_defers_completion_to_failed_queued_patch() {
         error: None,
         related_revisions: HashMap::new(),
         created_task: None,
+        link_title: None,
     }));
     assert!(store.borrow().state().save_errors.contains_key(&target));
     assert_eq!(store.borrow().state().version, initial_version);

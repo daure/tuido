@@ -278,13 +278,11 @@ impl McpServer {
     ) -> Result<Json<Versioned<TaskView>>, String> {
         preflight_task_expirations(&self.service).await?;
         let state = TaskState::parse(&v.state).ok_or_else(|| "invalid task state".to_string())?;
-        mutate_task(
-            &self.service,
-            v.id,
-            v.expected_revision,
-            TaskPatch::State(state),
-        )
-        .await
+        self.service
+            .set_task_state(v.id, v.expected_revision, state)
+            .await
+            .map(Json)
+            .map_err(mcp_error)
     }
     #[tool(description = "Mark task status done")]
     async fn complete_task(
@@ -1215,7 +1213,12 @@ mod tests {
             assert_eq!(created.value.updated_at, created.value.created_at);
             tokio::time::sleep(std::time::Duration::from_millis(1)).await;
             assert_eq!(
-                created.value.links,
+                created
+                    .value
+                    .links
+                    .iter()
+                    .map(|link| link.url.as_str())
+                    .collect::<Vec<_>>(),
                 ["https://a.example/item", "https://z.example/item"]
             );
 
@@ -1236,7 +1239,12 @@ mod tests {
             assert_eq!(updated.value.created_at, created.value.created_at);
             assert!(updated.value.updated_at > created.value.updated_at);
             assert_eq!(
-                updated.value.links,
+                updated
+                    .value
+                    .links
+                    .iter()
+                    .map(|link| link.url.as_str())
+                    .collect::<Vec<_>>(),
                 ["https://b.example/added", "https://m.example/edited"]
             );
 
@@ -1337,6 +1345,69 @@ mod tests {
                     .await;
                 assert_eq!(result.err().as_deref(), Some("invalid task state"));
             }
+        });
+    }
+
+    #[test]
+    fn setting_task_in_progress_places_it_first_in_active_order() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let service = TuidoService::connect_url("sqlite::memory:").await.unwrap();
+            let server = McpServer::new(service);
+            let active = server
+                .create_task(Parameters(TaskCreate {
+                    title: "Existing active".into(),
+                    description: String::new(),
+                    size: "small".into(),
+                    state: "todo".into(),
+                    priority: "medium".into(),
+                    snoozed_until: None,
+                    people_ids: Vec::new(),
+                    workspace_id: None,
+                    tag_ids: Vec::new(),
+                    links: Vec::new(),
+                }))
+                .await
+                .unwrap()
+                .0;
+            let started = server
+                .create_task(Parameters(TaskCreate {
+                    title: "Start now".into(),
+                    description: String::new(),
+                    size: "small".into(),
+                    state: "backlog".into(),
+                    priority: "medium".into(),
+                    snoozed_until: None,
+                    people_ids: Vec::new(),
+                    workspace_id: None,
+                    tag_ids: Vec::new(),
+                    links: Vec::new(),
+                }))
+                .await
+                .unwrap()
+                .0;
+
+            server
+                .set_task_state(Parameters(TaskStateInput {
+                    id: started.value.id.clone(),
+                    expected_revision: started.revision,
+                    state: "in_progress".into(),
+                }))
+                .await
+                .unwrap();
+
+            let tasks = server.service.consistent_workspace().await.unwrap().snapshot.tasks;
+            let rank = |id: &str| {
+                tasks
+                    .iter()
+                    .find(|task| task.id == id)
+                    .expect("task should exist")
+                    .rank
+            };
+            assert!(rank(&started.value.id) < rank(&active.value.id));
         });
     }
 }

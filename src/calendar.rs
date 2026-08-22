@@ -16,10 +16,9 @@ use tuicore::{
 };
 
 use crate::app::{
-    ActiveLabelFilter, ActiveWorkspaceFilter, AppContext, AppMsg, persist_task_order,
-    task_agent_command,
+    ActiveLabelFilter, ActiveWorkspaceFilter, AppContext, AppMsg, SnoozeReturnFocus,
+    persist_task_order, task_agent_clarify_command, task_agent_command, task_copy_payload,
     task_detail::{TASK_DESCRIPTION_NARROW_EXTRA_ABOVE_MIN, detail_escape},
-    task_ids_at_snooze_time,
 };
 use crate::app_keymap::keys;
 use crate::domain::{Task, TaskState, Workspace};
@@ -83,7 +82,6 @@ pub(crate) struct CalendarWorkspace {
     observed_version: u64,
     setting_status: SaveStatusLine,
     today: Date,
-    reordering: bool,
     workspace_filter: Option<String>,
     label_filter: Vec<String>,
     active_workspace_filter: ActiveWorkspaceFilter,
@@ -144,6 +142,7 @@ impl CalendarWorkspace {
             context,
             create_context,
             pane: ResponsiveSplit::master_detail(calendar, detail)
+                .wide_ratio(45, 55)
                 .narrow_second_max_above_min(TASK_DESCRIPTION_NARROW_EXTRA_ABOVE_MIN)
                 .second_visible(false),
             visible_entries,
@@ -151,7 +150,6 @@ impl CalendarWorkspace {
             observed_version,
             setting_status: SaveStatusLine::new(None),
             today,
-            reordering: false,
             workspace_filter,
             label_filter,
             active_workspace_filter,
@@ -443,15 +441,24 @@ impl CalendarWorkspace {
     }
 
     fn sync_after_event(&mut self, calendar_handled_event: bool, ctx: &mut EventCtx<AppMsg>) {
+        let mut reordered = false;
+        let calendar_events = self.calendar_mut().take_events();
         let focus_detail = calendar_handled_event
-            && self
-                .calendar_mut()
-                .take_events()
-                .into_iter()
+            && calendar_events
+                .iter()
                 .any(|event| matches!(event, CalendarTypedEvent::EntryActivated { .. }));
+        for event in calendar_events {
+            if let CalendarTypedEvent::EntriesReordered { entry_ids } = event {
+                let state = self.context.store.borrow().state().clone();
+                reordered |= persist_task_order(&self.context, &state, &entry_ids);
+            }
+        }
+        if reordered {
+            self.sync_store_version();
+        }
         let detail_changed = self.sync_calendar_detail(ctx);
         let patches_changed = self.drain_detail_patches();
-        if detail_changed || patches_changed {
+        if detail_changed || patches_changed || reordered {
             ctx.request_layout();
             ctx.request_redraw();
         }
@@ -466,6 +473,7 @@ impl CalendarWorkspace {
         outcome: EventOutcome,
         event: &TuiEvent,
         return_focus: Option<tuicore::TreePath>,
+        snooze_return_focus: Option<SnoozeReturnFocus>,
         ctx: &mut EventCtx<AppMsg>,
     ) -> EventOutcome {
         if outcome.handled() {
@@ -487,7 +495,7 @@ impl CalendarWorkspace {
         } else if keys::TASK_SNOOZE.matches(event) {
             Some(AppMsg::OpenTaskSnooze {
                 task_id,
-                return_focus,
+                return_focus: snooze_return_focus,
             })
         } else if keys::TASK_DELETE_CTRL_X.matches(event) {
             Some(AppMsg::OpenDeleteTask {
@@ -520,60 +528,38 @@ impl CalendarWorkspace {
         let TuiEvent::Hotkey(tuicore::HotkeyEvent::Commit(sequence)) = event else {
             return None;
         };
-        if sequence != &keys::TASK_AGENT_YANK.hotkey() {
+        if sequence != &keys::TASK_AGENT_YANK.hotkey()
+            && sequence != &keys::TASK_AGENT_YANK_CLARIFY.hotkey()
+        {
             return None;
         }
         let task_id = self.highlighted_task_id()?;
-        if let Some(command) = task_agent_command(self.context.store.borrow().state(), &task_id) {
+        let state = self.context.store.borrow();
+        let command = if sequence == &keys::TASK_AGENT_YANK.hotkey() {
+            task_agent_command(state.state(), &task_id)
+        } else {
+            task_agent_clarify_command(state.state(), &task_id)
+        };
+        if let Some(command) = command {
             ctx.copy_to_clipboard(command);
         }
         ctx.stop_propagation();
         Some(EventOutcome::Handled)
     }
 
-    fn handle_move_mode(
-        &mut self,
+    fn handle_task_json_yank(
+        &self,
         event: &TuiEvent,
         ctx: &mut EventCtx<AppMsg>,
     ) -> Option<EventOutcome> {
-        if !self.reordering {
-            if !keys::TASK_MOVE_MODE.matches(event) {
-                return None;
-            }
-            let task_id = self.highlighted_task_id()?;
-            let state = self.context.store.borrow();
-            let task = state.state().tasks.iter().find(|task| task.id == task_id)?;
-            let time = task.snoozed_until?;
-            if task_ids_at_snooze_time(state.state(), time).len() < 2 {
-                ctx.notify(tuicore::Notification::warning(
-                    "Task cannot move",
-                    "No other tasks are scheduled at the same time.",
-                ));
-                ctx.stop_propagation();
-                return Some(EventOutcome::Handled);
-            }
-            drop(state);
-            self.reordering = true;
-            ctx.request_redraw();
-            ctx.stop_propagation();
-            return Some(EventOutcome::Handled);
+        if !matches!(event, TuiEvent::Yank) {
+            return None;
         }
-
-        if keys::TASK_MOVE_MODE.matches(event)
-            || matches!(event, TuiEvent::Key(key) if key.code == tuicore::Key::Enter)
-            || detail_escape(event)
-        {
-            self.reordering = false;
-            ctx.request_redraw();
-            ctx.stop_propagation();
-            return Some(EventOutcome::Handled);
+        let task_id = self.highlighted_task_id()?;
+        let state = self.context.store.borrow();
+        if let Some(payload) = task_copy_payload(state.state(), &task_id) {
+            ctx.copy_to_clipboard(payload);
         }
-
-        let direction = calendar_move_direction(event)?;
-        self.move_highlighted_task(direction);
-        self.sync_store_version();
-        ctx.request_layout();
-        ctx.request_redraw();
         ctx.stop_propagation();
         Some(EventOutcome::Handled)
     }
@@ -593,44 +579,33 @@ impl CalendarWorkspace {
         Some(EventOutcome::Handled)
     }
 
-    fn move_highlighted_task(&mut self, direction: isize) -> bool {
-        let Some(task_id) = self.highlighted_task_id() else {
-            return false;
-        };
-        let state = self.context.store.borrow().state().clone();
-        let Some(time) = state
-            .tasks
-            .iter()
-            .find(|task| task.id == task_id)
-            .and_then(|task| task.snoozed_until)
-        else {
-            return false;
-        };
-        let mut ordered = task_ids_at_snooze_time(&state, time);
-        let Some(index) = ordered.iter().position(|id| id == &task_id) else {
-            return false;
-        };
-        let next = index
-            .saturating_add_signed(direction)
-            .min(ordered.len() - 1);
-        if next == index {
-            return false;
-        }
-        ordered.swap(index, next);
-        persist_task_order(&self.context, &state, &ordered)
-    }
-
     fn focus_calendar(route: &EventRoute, ctx: &mut EventCtx<AppMsg>) {
-        let workspace_path = ctx
-            .current_path()
-            .strip_suffix(&route.path)
-            .unwrap_or_default();
+        let workspace_path = Self::workspace_path(route, ctx);
         ctx.focus(FocusRequest::TargetAt {
             path: workspace_path.child(ChildKey::first()),
             id: FocusId::new("calendar"),
         });
         ctx.stop_propagation();
         ctx.request_redraw();
+    }
+
+    fn workspace_path(route: &EventRoute, ctx: &EventCtx<AppMsg>) -> tuicore::TreePath {
+        ctx.current_path()
+            .strip_suffix(&route.path)
+            .unwrap_or_default()
+    }
+
+    fn calendar_snooze_return_focus(&self, calendar_path: tuicore::TreePath) -> SnoozeReturnFocus {
+        let date = self.calendar().cursor_date();
+        let selected = self.highlighted_task_id();
+        let has_other_tasks = day_entry_ids(&self.visible_entries, date)
+            .iter()
+            .any(|task_id| Some(task_id.as_str()) != selected.as_deref());
+        SnoozeReturnFocus::CalendarDay {
+            path: calendar_path,
+            date,
+            has_other_tasks,
+        }
     }
 }
 
@@ -701,6 +676,8 @@ fn task_calendar(entries: Vec<SnoozedTaskEntry>) -> TaskCalendar {
     .hotkey(keys::TASK_AGENT_YANK.hotkey())
     .bordered(false)
     .entry_order(compare_snoozed_task_entries)
+    .reorderable(|left, right| left.until == right.until)
+    .keybindings(CalendarKeyBindings::default().reorder([keys::TASK_MOVE_MODE.key_spec()]))
     .role(|_| Some(CalendarEntryRole::Muted))
     .event_marker(|_| SNOOZE_ICON)
 }
@@ -746,20 +723,6 @@ fn is_calendar_view_hotkey(event: &TuiEvent) -> bool {
         .any(|binding| binding.matches(*key))
 }
 
-fn calendar_move_direction(event: &TuiEvent) -> Option<isize> {
-    let TuiEvent::Key(key) = event else {
-        return None;
-    };
-    let bindings = CalendarKeyBindings::default();
-    if bindings.up.iter().any(|binding| binding.matches(*key)) {
-        Some(-1)
-    } else if bindings.down.iter().any(|binding| binding.matches(*key)) {
-        Some(1)
-    } else {
-        None
-    }
-}
-
 fn unbordered_calendar_content_area(area: Rect) -> Rect {
     Rect::new(
         area.x,
@@ -790,7 +753,12 @@ impl TuiNode<AppMsg> for CalendarWorkspace {
             area.width,
             area.height.saturating_sub(u16::from(has_error)),
         );
-        self.pane.layout(calendar_area, ctx);
+        ctx.with_focus_fallback_hotkey_sequences_status(
+            FocusId::new("calendar"),
+            calendar_area,
+            vec![keys::TASK_AGENT_YANK_CLARIFY.hotkey()],
+            |ctx| self.pane.layout(calendar_area, ctx),
+        );
         if self.day_is_empty() {
             self.sync_empty_day_message();
             <SeasonalEmptyState as TuiNode<AppMsg>>::layout(
@@ -846,10 +814,10 @@ impl TuiNode<AppMsg> for CalendarWorkspace {
         if let Some(outcome) = self.handle_month_escape(event, ctx) {
             return outcome;
         }
-        if let Some(outcome) = self.handle_move_mode(event, ctx) {
+        if let Some(outcome) = self.handle_task_agent_yank(event, ctx) {
             return outcome;
         }
-        if let Some(outcome) = self.handle_task_agent_yank(event, ctx) {
+        if let Some(outcome) = self.handle_task_json_yank(event, ctx) {
             return outcome;
         }
         let previous = self.calendar().is_showing_weekends();
@@ -858,7 +826,15 @@ impl TuiNode<AppMsg> for CalendarWorkspace {
         self.sync_empty_day_message();
         self.persist_weekend_visibility_change(previous);
         self.sync_after_event(true, ctx);
-        self.handle_task_shortcut(outcome, event, Some(ctx.current_path()), ctx)
+        let calendar_path = ctx.current_path();
+        let snooze_return_focus = self.calendar_snooze_return_focus(calendar_path.clone());
+        self.handle_task_shortcut(
+            outcome,
+            event,
+            Some(calendar_path),
+            Some(snooze_return_focus),
+            ctx,
+        )
     }
 
     fn dispatch_event(
@@ -870,14 +846,14 @@ impl TuiNode<AppMsg> for CalendarWorkspace {
         if let Some(outcome) = self.handle_month_escape(event, ctx) {
             return outcome;
         }
-        if let Some(outcome) = self.handle_move_mode(event, ctx) {
-            return outcome;
-        }
         if let Some(outcome) = self.handle_task_agent_yank(event, ctx) {
             return outcome;
         }
-        let previous = self.calendar().is_showing_weekends();
         let detail_route = route.path.keys().first() == Some(&ChildKey::second());
+        if !detail_route && let Some(outcome) = self.handle_task_json_yank(event, ctx) {
+            return outcome;
+        }
+        let previous = self.calendar().is_showing_weekends();
         let mut calendar_event = !detail_route;
         let mut outcome = if detail_route {
             self.pane.dispatch_event(route, event, ctx)
@@ -900,7 +876,17 @@ impl TuiNode<AppMsg> for CalendarWorkspace {
             Self::focus_calendar(route, ctx);
             return EventOutcome::Handled;
         }
-        self.handle_task_shortcut(outcome, event, Some(ctx.current_path()), ctx)
+        let return_focus = ctx.current_path();
+        let snooze_return_focus = self.calendar_snooze_return_focus(
+            Self::workspace_path(route, ctx).child(ChildKey::first()),
+        );
+        self.handle_task_shortcut(
+            outcome,
+            event,
+            Some(return_focus),
+            Some(snooze_return_focus),
+            ctx,
+        )
     }
 
     fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<AppMsg>) {
@@ -1378,8 +1364,8 @@ mod tests {
         let wide = Rect::new(0, 0, 120, 30);
         workspace.layout(wide, &mut LayoutCtx::new());
         let (wide_calendar, wide_detail) = workspace.pane.child_areas();
-        assert_eq!(wide_calendar, Rect::new(0, 0, 72, 30));
-        assert_eq!(wide_detail, Rect::new(72, 0, 48, 30));
+        assert_eq!(wide_calendar, Rect::new(0, 0, 54, 30));
+        assert_eq!(wide_detail, Rect::new(54, 0, 66, 30));
 
         let narrow = Rect::new(0, 0, 80, 30);
         workspace.layout(narrow, &mut LayoutCtx::new());
@@ -1507,6 +1493,11 @@ mod tests {
                 .hotkey_sequences
                 .contains(&keys::TASK_AGENT_YANK.hotkey())
         }));
+        assert!(layout.focus_targets().iter().any(|target| {
+            target
+                .hotkey_sequences
+                .contains(&keys::TASK_AGENT_YANK_CLARIFY.hotkey())
+        }));
         let mut ctx = EventCtx::default();
 
         let outcome = workspace.event(&TuiEvent::Key(Key::Char('.').into()), &mut ctx);
@@ -1551,6 +1542,73 @@ mod tests {
         assert_eq!(
             effects.clipboard.as_deref(),
             Some("Tuido execute 1234 \"Calendar task\"")
+        );
+
+        let mut clarify_ctx = EventCtx::default();
+        let outcome = workspace.event(
+            &TuiEvent::Hotkey(HotkeyEvent::Commit(keys::TASK_AGENT_YANK_CLARIFY.hotkey())),
+            &mut clarify_ctx,
+        );
+        let effects = tuicore::DispatchEffects::from_event_ctx(outcome, clarify_ctx);
+
+        assert_eq!(
+            effects.clipboard.as_deref(),
+            Some("Tuido clarify 1234 \"Calendar task\"")
+        );
+
+        let mut json_ctx = EventCtx::default();
+        let outcome = workspace.event(&TuiEvent::Yank, &mut json_ctx);
+        let effects = tuicore::DispatchEffects::from_event_ctx(outcome, json_ctx);
+        let payload = effects.clipboard.expect("yank should copy task JSON");
+        let json: serde_json::Value = serde_json::from_str(&payload).expect("copy should be JSON");
+
+        assert_eq!(json["id"], "1234");
+        assert_eq!(json["title"], "Calendar task");
+    }
+
+    #[test]
+    fn calendar_detail_clarify_yank_copies_highlighted_task_command() {
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks: Vec::new(),
+            people: Vec::new(),
+            workspaces: Vec::new(),
+            tags: Vec::new(),
+        });
+        let mut workspace = CalendarWorkspace::new(context.clone(), true);
+        let until = workspace.today.with_time(Time::from_hms(8, 0, 0).unwrap());
+        context
+            .store
+            .borrow_mut()
+            .dispatch(AppEvent::TaskCreated(task(
+                "1234",
+                "Calendar task",
+                TaskState::Snoozed,
+                Some(until),
+            )));
+        workspace.sync_store_version();
+        workspace.calendar_mut().on_key(Key::Char('D'));
+        workspace.sync_calendar_detail(&mut EventCtx::default());
+        let mut layout = LayoutCtx::new();
+        workspace.layout(Rect::new(0, 0, 120, 30), &mut layout);
+        let detail_path = layout
+            .focus_targets()
+            .iter()
+            .find(|target| target.path.keys().first() == Some(&ChildKey::second()))
+            .expect("detail control should be focusable")
+            .path
+            .clone();
+
+        let mut ctx = EventCtx::default();
+        let outcome = workspace.dispatch_event(
+            &EventRoute::new(detail_path),
+            &TuiEvent::Hotkey(HotkeyEvent::Commit(keys::TASK_AGENT_YANK_CLARIFY.hotkey())),
+            &mut ctx,
+        );
+        let effects = tuicore::DispatchEffects::from_event_ctx(outcome, ctx);
+
+        assert_eq!(
+            effects.clipboard.as_deref(),
+            Some("Tuido clarify 1234 \"Calendar task\"")
         );
     }
 
@@ -1609,6 +1667,44 @@ mod tests {
         assert_eq!(workspace.highlighted_task_id().as_deref(), Some("second"));
         let text = rendered_text(workspace.calendar(), Rect::new(0, 0, 80, 20));
         assert!(text.find("Third").unwrap() < text.find("Second").unwrap());
+    }
+
+    #[test]
+    fn day_view_move_mode_with_one_task_is_silent() {
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks: Vec::new(),
+            people: Vec::new(),
+            workspaces: Vec::new(),
+            tags: Vec::new(),
+        });
+        let until = workspace_time(8);
+        context
+            .store
+            .borrow_mut()
+            .dispatch(AppEvent::TaskCreated(task(
+                "only",
+                "Only task",
+                TaskState::Snoozed,
+                Some(until),
+            )));
+        let mut workspace = CalendarWorkspace::new(context, true);
+        workspace.calendar_mut().on_key(Key::Char('D'));
+        let mut ctx = EventCtx::default();
+
+        assert!(
+            workspace
+                .event(
+                    &TuiEvent::Key(KeyEvent {
+                        code: Key::Char('m'),
+                        modifiers: KeyModifiers::CONTROL,
+                    }),
+                    &mut ctx,
+                )
+                .handled()
+        );
+
+        assert!(!workspace.calendar().is_reordering());
+        assert!(ctx.notifications().is_empty());
     }
 
     fn workspace_time(hour: u8) -> PrimitiveDateTime {
@@ -1773,13 +1869,31 @@ mod tests {
                 }),
                 AnimationSettings::default(),
             );
-            let return_focus = match (key, effects.messages.as_slice()) {
-                ('z', [AppMsg::OpenTaskSnooze { return_focus, .. }])
-                | ('x', [AppMsg::OpenDeleteTask { return_focus, .. }])
-                | ('c', [AppMsg::OpenCompleteTask { return_focus, .. }]) => return_focus,
+            match (key, effects.messages.as_slice()) {
+                (
+                    'z',
+                    [
+                        AppMsg::OpenTaskSnooze {
+                            return_focus:
+                                Some(SnoozeReturnFocus::CalendarDay {
+                                    path,
+                                    date,
+                                    has_other_tasks,
+                                }),
+                            ..
+                        },
+                    ],
+                ) => {
+                    assert_eq!(path, &calendar_path);
+                    assert_eq!(*date, workspace.today);
+                    assert!(!has_other_tasks);
+                }
+                ('x', [AppMsg::OpenDeleteTask { return_focus, .. }])
+                | ('c', [AppMsg::OpenCompleteTask { return_focus, .. }]) => {
+                    assert_eq!(return_focus.as_ref(), Some(&calendar_path));
+                }
                 _ => panic!("calendar shortcut should open its task dialog"),
-            };
-            assert_eq!(return_focus.as_ref(), Some(&calendar_path));
+            }
         }
     }
 

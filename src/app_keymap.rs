@@ -308,7 +308,6 @@ fn parse_key_event(value: &str) -> Option<KeyEvent> {
     if let Some(rest) = value.strip_prefix("shift+") {
         return modified_key_event(rest, KeyModifiers::SHIFT);
     }
-
     let code = match value.as_str() {
         "esc" => Key::Esc,
         "enter" => Key::Enter,
@@ -365,8 +364,12 @@ pub mod keys {
     pub const TASK_COMPLETE: AppBinding = AppBinding::new("TASK_COMPLETE", "ctrl+c");
     pub const TASK_TOGGLE_PROGRESS: AppBinding = AppBinding::new("TASK_TOGGLE_PROGRESS", "ctrl+t");
     pub const TASK_AGENT_YANK: AppBinding = AppBinding::new_sequence("TASK_AGENT_YANK", "ya");
+    pub const TASK_AGENT_YANK_CLARIFY: AppBinding =
+        AppBinding::new_sequence("TASK_AGENT_YANK_CLARIFY", "yc");
     pub const TASK_LINK_OPEN_BACKGROUND: AppBinding =
         AppBinding::new("TASK_LINK_OPEN_BACKGROUND", "ctrl+enter");
+    pub const TASK_LINK_TOGGLE_TITLE: AppBinding =
+        AppBinding::new("TASK_LINK_TOGGLE_TITLE", "space");
     pub const MANAGEMENT_CREATE: AppBinding = AppBinding::new("MANAGEMENT_CREATE", "n");
     pub const MANAGEMENT_DELETE: AppBinding = AppBinding::new("MANAGEMENT_DELETE", "delete");
     pub const MANAGEMENT_DELETE_BACKSPACE: AppBinding =
@@ -511,7 +514,9 @@ pub mod keys {
         TASK_COMPLETE,
         TASK_TOGGLE_PROGRESS,
         TASK_AGENT_YANK,
+        TASK_AGENT_YANK_CLARIFY,
         TASK_LINK_OPEN_BACKGROUND,
+        TASK_LINK_TOGGLE_TITLE,
         MANAGEMENT_CREATE,
         MANAGEMENT_DELETE,
         MANAGEMENT_DELETE_BACKSPACE,
@@ -639,12 +644,15 @@ pub mod keys {
                 TASK_COMPLETE,
                 TASK_TOGGLE_PROGRESS,
                 TASK_AGENT_YANK,
+                TASK_AGENT_YANK_CLARIFY,
             ],
         },
         BindingContext {
             name: "task detail",
             bindings: &[
                 TASK_COMPLETE,
+                TASK_AGENT_YANK,
+                TASK_AGENT_YANK_CLARIFY,
                 TASK_WORKSPACE_FILTER,
                 TASK_LABEL_FILTER,
                 TASK_TITLE_FIELD,
@@ -660,6 +668,7 @@ pub mod keys {
                 TASK_CHECKLIST_FIELD,
                 TASK_URL_LINKS_FIELD,
                 TASK_LINK_OPEN_BACKGROUND,
+                TASK_LINK_TOGGLE_TITLE,
                 TASK_ISSUE_LINKS_FIELD,
                 TASK_LINK_DELETE,
                 TASK_SNOOZED_UNTIL_FIELD,
@@ -859,7 +868,10 @@ mod tests {
             ("TASK_SNOOZE", "ctrl+z"),
             ("TASK_COMPLETE", "ctrl+c"),
             ("TASK_TOGGLE_PROGRESS", "ctrl+t"),
+            ("TASK_AGENT_YANK", "ya"),
+            ("TASK_AGENT_YANK_CLARIFY", "yc"),
             ("TASK_LINK_OPEN_BACKGROUND", "ctrl+enter"),
+            ("TASK_LINK_TOGGLE_TITLE", "space"),
             ("TASK_DELETE_CTRL_X", "ctrl+x"),
             ("TASK_DELETE", "delete"),
             ("TASK_DELETE_X", "backspace"),

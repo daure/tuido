@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::{
     domain::{
-        ChecklistItem, Person, PersonPatch, Tag, TagPatch, Task, TaskPatch, TaskRank, TaskRelation,
+        ChecklistItem, Person, PersonPatch, Tag, TagPatch, Task, TaskLink, TaskPatch, TaskRank, TaskRelation,
         TaskRelationKind, Workspace, WorkspacePatch, WorkspaceSnapshot, task_identifier,
         task_number,
     },
@@ -152,8 +152,8 @@ pub struct TaskView {
     pub tag_ids: Vec<String>,
     /// Ordered checklist tree. Children are ordered as shown in the task detail view.
     pub checklist: Vec<ChecklistItemView>,
-    /// Task URLs, deduplicated and sorted lexicographically.
-    pub links: Vec<String>,
+    /// Task URLs, titles, and title fetch times. Links are deduplicated and sorted by URL.
+    pub links: Vec<TaskLinkView>,
     /// Relations to other tasks, expressed from this task's perspective.
     pub relations: Vec<TaskRelationView>,
     pub description: String,
@@ -188,7 +188,7 @@ pub struct TaskDetailsView {
     pub workspace_id: Option<String>,
     pub tag_ids: Vec<String>,
     pub checklist: Vec<ChecklistItemView>,
-    pub links: Vec<String>,
+    pub links: Vec<TaskLinkView>,
     pub relations: Vec<TaskRelationDetailsView>,
     pub description: String,
 }
@@ -212,6 +212,14 @@ pub struct ChecklistItemView {
     pub text: String,
     pub checked: bool,
     pub children: Vec<ChecklistItemView>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
+pub struct TaskLinkView {
+    pub url: String,
+    pub title: Option<String>,
+    /// Last title fetch time as Unix epoch nanoseconds, including unsuccessful fetches.
+    pub last_fetched: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -613,10 +621,15 @@ impl TuidoService {
             return Err(ServiceError::Invalid("task title is required".into()));
         }
         validate_task_temporal_fields(task.state, task.snoozed_until.is_some())?;
-        normalize_task_links(&mut task.links);
+        normalize_task_link_models(&mut task.links);
         normalize_task_checklist(&mut task.checklist);
         normalize_task_relations(&mut task.relations);
-        validation::validate_task_links(&task.links)?;
+        let task_link_urls = task
+            .links
+            .iter()
+            .map(|link| link.url.clone())
+            .collect::<Vec<_>>();
+        validation::validate_task_links(&task_link_urls)?;
         validate_task_checklist(&task.checklist)?;
         if task.workspace_id.is_none() {
             task.workspace_id = self.default_workspace_id().await?;
@@ -679,7 +692,7 @@ impl TuidoService {
             .await?;
         self.replace_links(&mut tx, "task_tags", "tag_id", &task.id, &task.tag_ids)
             .await?;
-        self.replace_task_links(&mut tx, &task.id, &task.links)
+        self.replace_task_links(&mut tx, &task.id, &task_link_urls)
             .await?;
         self.replace_task_checklist(&mut tx, &task.id, &task.checklist)
             .await?;
@@ -719,7 +732,7 @@ impl TuidoService {
             workspace_id: input.workspace_id,
             tag_ids: input.tag_ids,
             checklist: Vec::new(),
-            links: input.links,
+            links: input.links.into_iter().map(TaskLink::new).collect(),
             relations: Vec::new(),
             description: input.description,
         })
@@ -892,6 +905,60 @@ impl TuidoService {
         })
     }
 
+    pub async fn set_task_state(
+        &self,
+        id: String,
+        expected_revision: u64,
+        state: crate::domain::TaskState,
+    ) -> ServiceResult<Versioned<TaskView>> {
+        if state != crate::domain::TaskState::InProgress {
+            self.patch_task(id.clone(), expected_revision, TaskPatch::State(state))
+                .await?;
+            return self.get_task(&id).await;
+        }
+
+        let mut tx = self.pool.begin().await.map_err(storage_error)?;
+        let number = parse_task_number(&id)?;
+        self.claim_task(&mut tx, &id, expected_revision).await?;
+        apply_task_patch(
+            &mut tx,
+            self.dialect,
+            &id,
+            TaskPatch::State(crate::domain::TaskState::InProgress),
+        )
+        .await?;
+        let minimum_rank = format!(
+            "SELECT MIN(rank) AS rank FROM tasks WHERE state IN ('next', 'doing') AND rejected = false AND id <> {}",
+            self.dialect.placeholder(1)
+        );
+        let rank = sqlx::query(AssertSqlSafe(minimum_rank.as_str()))
+            .bind(number)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(storage_error)?
+            .try_get::<Option<i64>, _>("rank")
+            .map_err(storage_error)?
+            .unwrap_or(0)
+            .checked_sub(1)
+            .ok_or_else(|| ServiceError::Invalid("cannot promote task beyond minimum rank".into()))?;
+        let update = format!(
+            "UPDATE tasks SET rank = {}, updated_at = {} WHERE id = {}",
+            self.dialect.placeholder(1),
+            self.dialect.placeholder(2),
+            self.dialect.placeholder(3)
+        );
+        sqlx::query(AssertSqlSafe(update.as_str()))
+            .bind(rank)
+            .bind(now_text())
+            .bind(number)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage_error)?;
+        bump_workspace(&mut tx, self.dialect).await?;
+        tx.commit().await.map_err(storage_error)?;
+        self.get_task(&id).await
+    }
+
     pub async fn set_task_links(
         &self,
         id: String,
@@ -901,6 +968,38 @@ impl TuidoService {
         self.patch_task(id.clone(), expected_revision, TaskPatch::Links(links))
             .await?;
         self.get_task(&id).await
+    }
+
+    pub(crate) async fn store_task_link_metadata(
+        &self,
+        task_id: &str,
+        url: &str,
+        title: Option<&str>,
+        last_fetched: &str,
+    ) -> ServiceResult<()> {
+        let task_number = parse_task_number(task_id)?;
+        let update = format!(
+            "UPDATE task_links SET title = {}, last_fetched = {} WHERE task_id = {} AND url = {}",
+            self.dialect.placeholder(1),
+            self.dialect.placeholder(2),
+            self.dialect.placeholder(3),
+            self.dialect.placeholder(4)
+        );
+        let result = sqlx::query(AssertSqlSafe(update.as_str()))
+            .bind(title)
+            .bind(last_fetched)
+            .bind(task_number)
+            .bind(url)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_error)?;
+        if result.rows_affected() == 0 {
+            return Err(ServiceError::NotFound {
+                entity: "task link",
+                id: format!("{task_id}:{url}"),
+            });
+        }
+        Ok(())
     }
 
     pub async fn set_task_checklist(
@@ -1608,17 +1707,33 @@ impl TuidoService {
         links: &[String],
     ) -> ServiceResult<()> {
         let task_number = parse_task_number(task_id)?;
+        if links.is_empty() {
+            let delete = format!(
+                "DELETE FROM task_links WHERE task_id = {}",
+                self.dialect.placeholder(1)
+            );
+            sqlx::query(AssertSqlSafe(delete.as_str()))
+                .bind(task_number)
+                .execute(&mut **tx)
+                .await
+                .map_err(storage_error)?;
+            return Ok(());
+        }
+        let placeholders = (2..=links.len() + 1)
+            .map(|index| self.dialect.placeholder(index))
+            .collect::<Vec<_>>()
+            .join(", ");
         let delete = format!(
-            "DELETE FROM task_links WHERE task_id = {}",
+            "DELETE FROM task_links WHERE task_id = {} AND url NOT IN ({placeholders})",
             self.dialect.placeholder(1)
         );
-        sqlx::query(AssertSqlSafe(delete.as_str()))
-            .bind(task_number)
-            .execute(&mut **tx)
-            .await
-            .map_err(storage_error)?;
+        let mut delete_query = sqlx::query(AssertSqlSafe(delete.as_str())).bind(task_number);
+        for link in links {
+            delete_query = delete_query.bind(link);
+        }
+        delete_query.execute(&mut **tx).await.map_err(storage_error)?;
         let insert = format!(
-            "INSERT INTO task_links (task_id, url) VALUES ({}, {})",
+            "INSERT INTO task_links (task_id, url) VALUES ({}, {}) ON CONFLICT(task_id, url) DO NOTHING",
             self.dialect.placeholder(1),
             self.dialect.placeholder(2)
         );
@@ -1968,7 +2083,15 @@ fn task_view(v: Task, linked_tasks: &HashMap<String, LinkedTaskView>) -> TaskVie
         workspace_id: v.workspace_id,
         tag_ids: v.tag_ids,
         checklist,
-        links: v.links,
+        links: v
+            .links
+            .into_iter()
+            .map(|link| TaskLinkView {
+                url: link.url,
+                title: link.title,
+                last_fetched: link.last_fetched,
+            })
+            .collect(),
         relations: v
             .relations
             .into_iter()
@@ -2035,6 +2158,11 @@ fn flatten_checklist_inputs(
         });
         flatten_checklist_inputs(children, Some(id), output);
     }
+}
+
+fn normalize_task_link_models(links: &mut Vec<TaskLink>) {
+    links.sort_by(|left, right| left.url.cmp(&right.url));
+    links.dedup_by(|left, right| left.url == right.url);
 }
 
 fn normalize_task_links(links: &mut Vec<String>) {

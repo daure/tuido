@@ -420,21 +420,25 @@ async fn load_task_links(
     pool: &AnyPool,
     dialect: SqlDialect,
     task_id: i64,
-) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+) -> Result<Vec<crate::domain::TaskLink>, Box<dyn std::error::Error>> {
     let query = format!(
-        "SELECT url FROM task_links WHERE task_id = {}",
+        "SELECT url, title, last_fetched FROM task_links WHERE task_id = {} ORDER BY url",
         dialect.placeholder(1)
     );
     let rows = sqlx::query(AssertSqlSafe(query.as_str()))
         .bind(task_id)
         .fetch_all(pool)
         .await?;
-    let mut links = rows
+    rows
         .into_iter()
-        .map(|row| Ok(row.try_get("url")?))
-        .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
-    links.sort();
-    Ok(links)
+        .map(|row| {
+            Ok(crate::domain::TaskLink {
+                url: row.try_get("url")?,
+                title: row.try_get("title")?,
+                last_fetched: row.try_get("last_fetched")?,
+            })
+        })
+        .collect()
 }
 
 fn default_sqlite_path() -> Result<PathBuf, Box<dyn std::error::Error>> {

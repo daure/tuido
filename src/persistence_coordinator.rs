@@ -37,6 +37,10 @@ pub(crate) enum PersistenceCommand {
     CreateTask(Task),
     DeleteTask(Task),
     PatchTask(String, TaskPatch),
+    FetchTaskLinkTitle {
+        task_id: String,
+        url: String,
+    },
     ReorderTasks {
         before: Vec<TaskRank>,
         after: Vec<TaskRank>,
@@ -64,6 +68,7 @@ impl PersistenceCommand {
             Self::CreateTask(_)
             | Self::DeleteTask(_)
             | Self::PatchTask(_, _)
+            | Self::FetchTaskLinkTitle { .. }
             | Self::ReorderTasks { .. } => CommandKey::Task,
             Self::CreatePerson(person) => CommandKey::Person(person.id.clone()),
             Self::DeletePerson(deletion) => CommandKey::Person(deletion.person.id.clone()),
@@ -86,11 +91,20 @@ struct Completion {
     error: Option<String>,
     related_revisions: HashMap<String, u64>,
     created_task: Option<Task>,
+    link_title: Option<LinkTitleCompletion>,
 }
 
 struct ExecutionResult {
     related_revisions: HashMap<String, u64>,
     created_task: Option<Task>,
+    link_title: Option<LinkTitleCompletion>,
+}
+
+struct LinkTitleCompletion {
+    task_id: String,
+    url: String,
+    title: Option<String>,
+    last_fetched: String,
 }
 
 struct RefreshCompletion {
@@ -208,6 +222,24 @@ impl PersistenceCoordinator {
             queue.push_back(command);
         } else {
             self.start(command);
+        }
+    }
+
+    pub(crate) fn fetch_task_link_title(&mut self, task_id: String, url: String) {
+        if !self
+            .store
+            .borrow()
+            .state()
+            .link_title_fetches
+            .contains(&(task_id.clone(), url.clone()))
+        {
+            self.store
+                .borrow_mut()
+                .dispatch(AppEvent::TaskLinkTitleFetchStarted {
+                    task_id: task_id.clone(),
+                    url: url.clone(),
+                });
+            self.submit(PersistenceCommand::FetchTaskLinkTitle { task_id, url });
         }
     }
 
@@ -378,9 +410,14 @@ impl PersistenceCoordinator {
         let tx = self.completion_tx.clone();
         self.runtime.spawn(async move {
             let result = execute(service, command.clone(), expected_revision).await;
-            let (error, related_revisions, created_task) = match result {
-                Ok(result) => (None, result.related_revisions, result.created_task),
-                Err(error) => (Some(error.to_string()), HashMap::new(), None),
+            let (error, related_revisions, created_task, link_title) = match result {
+                Ok(result) => (
+                    None,
+                    result.related_revisions,
+                    result.created_task,
+                    result.link_title,
+                ),
+                Err(error) => (Some(error.to_string()), HashMap::new(), None, None),
             };
             let _ = tx.send(Completion {
                 key,
@@ -389,6 +426,7 @@ impl PersistenceCoordinator {
                 error,
                 related_revisions,
                 created_task,
+                link_title,
             });
         });
     }
@@ -429,7 +467,9 @@ impl PersistenceCoordinator {
                     completion.related_revisions.clone(),
                 ));
         }
-        if completion.error.is_some() {
+        if completion.error.is_some()
+            && !matches!(completion.command, PersistenceCommand::FetchTaskLinkTitle { .. })
+        {
             self.reconcile_required = true;
             preserve_failed_active_custom(
                 &completion.command,
@@ -459,6 +499,21 @@ impl PersistenceCoordinator {
             _ => false,
         };
         let mut changed = false;
+        if let PersistenceCommand::FetchTaskLinkTitle { task_id, url } = &completion.command {
+            let event = completion.link_title.map_or_else(
+                || AppEvent::TaskLinkTitleFetchFailed {
+                    task_id: task_id.clone(),
+                    url: url.clone(),
+                },
+                |result| AppEvent::TaskLinkTitleFetched {
+                    task_id: result.task_id,
+                    url: result.url,
+                    title: result.title,
+                    last_fetched: result.last_fetched,
+                },
+            );
+            changed |= self.store.borrow_mut().dispatch(event).changed;
+        }
         match completion.command {
             PersistenceCommand::CreateTask(task) => {
                 if completion.error.is_some() {
@@ -581,6 +636,7 @@ impl PersistenceCoordinator {
                         .changed;
                 }
             }
+            PersistenceCommand::FetchTaskLinkTitle { .. } => {}
             PersistenceCommand::ReorderTasks { before, .. } => {
                 if let Some(error) = completion.error {
                     changed |= self
@@ -702,6 +758,7 @@ async fn execute(
         expected_revision.ok_or_else(|| "missing entity revision; refresh required".into())
     };
     let mut created_task = None;
+    let mut link_title = None;
     let related_revisions = match command {
         PersistenceCommand::CreateTask(task) => {
             let created = service
@@ -756,6 +813,21 @@ async fn execute(
             .await
             .map(|result| result.related_revisions)
             .map_err(boxed_service_error),
+        PersistenceCommand::FetchTaskLinkTitle { task_id, url } => {
+            let title = crate::link_title::fetch(&url).await;
+            let last_fetched = current_timestamp();
+            service
+                .store_task_link_metadata(&task_id, &url, title.as_deref(), &last_fetched)
+                .await
+                .map_err(boxed_service_error)?;
+            link_title = Some(LinkTitleCompletion {
+                task_id,
+                url,
+                title,
+                last_fetched,
+            });
+            Ok(HashMap::new())
+        }
         PersistenceCommand::ReorderTasks {
             after,
             expected_revisions,
@@ -803,7 +875,16 @@ async fn execute(
     Ok(ExecutionResult {
         related_revisions,
         created_task,
+        link_title,
     })
+}
+
+fn current_timestamp() -> String {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .to_string()
 }
 
 fn boxed_service_error(
@@ -820,6 +901,7 @@ fn command_entity(command: &PersistenceCommand) -> Option<(&'static str, &str)> 
         | PersistenceCommand::CreateTag(_) => None,
         PersistenceCommand::DeleteTask(v) => Some(("task", &v.id)),
         PersistenceCommand::PatchTask(id, _) => Some(("task", id)),
+        PersistenceCommand::FetchTaskLinkTitle { .. } => None,
         PersistenceCommand::ReorderTasks { .. } => None,
         PersistenceCommand::DeletePerson(v) => Some(("person", &v.person.id)),
         PersistenceCommand::PatchPerson(id, _) => Some(("person", id)),
@@ -1000,6 +1082,9 @@ fn remap_queued_task_id(
             PersistenceCommand::PatchTask(id, _) if id == old_id => {
                 *id = new_id.to_string();
             }
+            PersistenceCommand::FetchTaskLinkTitle { task_id, .. } if task_id == old_id => {
+                *task_id = new_id.to_string();
+            }
             PersistenceCommand::ReorderTasks {
                 before,
                 after,
@@ -1025,6 +1110,7 @@ fn command_task_id(command: &PersistenceCommand) -> Option<&str> {
             Some(&task.id)
         }
         PersistenceCommand::PatchTask(id, _) => Some(id),
+        PersistenceCommand::FetchTaskLinkTitle { task_id, .. } => Some(task_id),
         _ => None,
     }
 }

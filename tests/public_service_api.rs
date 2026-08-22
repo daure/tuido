@@ -73,7 +73,15 @@ async fn external_client_can_use_public_service_dtos() {
         .unwrap();
 
     assert_eq!(updated.value.state, "in_progress");
-    assert_eq!(updated.value.links, vec!["file:///tmp/task.txt"]);
+    assert_eq!(
+        updated
+            .value
+            .links
+            .iter()
+            .map(|link| link.url.as_str())
+            .collect::<Vec<_>>(),
+        vec!["file:///tmp/task.txt"]
+    );
     assert_eq!(tagged.value.tag_ids.len(), 1);
     assert_eq!(checklist.value.checklist[0].text, "Ship it");
     assert!(checklist.value.checklist[0].children[0].checked);
@@ -125,7 +133,15 @@ async fn public_service_accepts_www_links_and_rejects_other_protocol_free_links(
         })
         .await
         .unwrap();
-    assert_eq!(created.value.links, vec!["www.google.com/search?q=tuido"]);
+    assert_eq!(
+        created
+            .value
+            .links
+            .iter()
+            .map(|link| link.url.as_str())
+            .collect::<Vec<_>>(),
+        vec!["www.google.com/search?q=tuido"]
+    );
 
     drop(service);
     let _ = std::fs::remove_file(path);
