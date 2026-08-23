@@ -31,6 +31,10 @@ fn test_store(tasks: Vec<Task>) -> AppStore {
     )))
 }
 
+fn set_notes(store: &AppStore, notes: Vec<Versioned<NoteView>>) {
+    store.borrow_mut().dispatch(AppEvent::NotesLoaded(notes));
+}
+
 fn test_database() -> (tokio::runtime::Runtime, AnyPool) {
     sqlx::any::install_default_drivers();
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -108,6 +112,152 @@ fn create_finishes_before_queued_patch() {
 }
 
 #[test]
+fn note_create_remaps_temporary_id_before_queued_patch() {
+    let (runtime, pool) = test_database();
+    let store = test_store(Vec::new());
+    let temporary = Versioned {
+        revision: 0,
+        value: NoteView {
+            id: "pending-note-1".into(),
+            position: 0,
+            content: String::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        },
+    };
+    set_notes(&store, vec![temporary.clone()]);
+    let mut coordinator = test_coordinator(&runtime, &pool, Rc::clone(&store));
+
+    coordinator.submit(PersistenceCommand::CreateNote {
+        temporary_id: temporary.value.id.clone(),
+        content: String::new(),
+        removed_notes: Vec::new(),
+    });
+    coordinator.submit(PersistenceCommand::PatchNote {
+        before: temporary,
+        content: "typed before create completed".into(),
+    });
+    settle(&mut coordinator);
+
+    let persisted = runtime
+        .block_on(TuidoService::from_parts(pool, SqlDialect::Sqlite).list_notes())
+        .unwrap();
+    assert_eq!(persisted.len(), 1);
+    assert_eq!(persisted[0].value.content, "typed before create completed");
+    let local = store.borrow();
+    assert_eq!(local.state().notes[0].value.id, persisted[0].value.id);
+    assert_eq!(local.state().notes[0].value.content, persisted[0].value.content);
+    assert_eq!(local.state().notes[0].revision, persisted[0].revision);
+}
+
+#[test]
+fn note_create_moves_all_queued_operations_to_the_real_note_key() {
+    let (runtime, pool) = test_database();
+    let store = test_store(Vec::new());
+    let mut coordinator = test_coordinator(&runtime, &pool, store);
+    let temporary = Versioned {
+        revision: 0,
+        value: NoteView {
+            id: "pending-note-1".into(),
+            position: 0,
+            content: String::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        },
+    };
+
+    coordinator.submit(PersistenceCommand::CreateNote {
+        temporary_id: temporary.value.id.clone(),
+        content: String::new(),
+        removed_notes: Vec::new(),
+    });
+    for content in ["first queued edit", "second queued edit"] {
+        coordinator.submit(PersistenceCommand::PatchNote {
+            before: temporary.clone(),
+            content: content.into(),
+        });
+    }
+    settle(&mut coordinator);
+
+    let persisted = runtime
+        .block_on(TuidoService::from_parts(pool, SqlDialect::Sqlite).list_notes())
+        .unwrap();
+    assert_eq!(persisted.len(), 1);
+    assert_eq!(persisted[0].value.content, "second queued edit");
+    assert_eq!(persisted[0].revision, 3);
+    assert!(!coordinator.has_pending());
+}
+
+#[test]
+fn note_create_remaps_temporary_id_before_queued_delete() {
+    let (runtime, pool) = test_database();
+    let store = test_store(Vec::new());
+    let temporary = Versioned {
+        revision: 0,
+        value: NoteView {
+            id: "pending-note-1".into(),
+            position: 0,
+            content: String::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        },
+    };
+    set_notes(&store, vec![temporary.clone()]);
+    let mut coordinator = test_coordinator(&runtime, &pool, Rc::clone(&store));
+
+    coordinator.submit(PersistenceCommand::CreateNote {
+        temporary_id: temporary.value.id.clone(),
+        content: String::new(),
+        removed_notes: Vec::new(),
+    });
+    store
+        .borrow_mut()
+        .dispatch(AppEvent::NoteDeleted(temporary.value.id.clone()));
+    coordinator.submit(PersistenceCommand::DeleteNote {
+        note: temporary,
+        index: 0,
+    });
+    settle(&mut coordinator);
+
+    let persisted = runtime
+        .block_on(TuidoService::from_parts(pool, SqlDialect::Sqlite).list_notes())
+        .unwrap();
+    assert!(persisted.is_empty());
+    assert!(store.borrow().state().notes.is_empty());
+}
+
+#[test]
+fn queued_note_patches_use_revision_from_previous_completion() {
+    let (runtime, pool) = test_database();
+    let service = TuidoService::from_parts(pool.clone(), SqlDialect::Sqlite);
+    let original = runtime
+        .block_on(service.create_note(NoteInput {
+            content: "original".into(),
+        }))
+        .unwrap();
+    let store = test_store(Vec::new());
+    set_notes(&store, vec![original.clone()]);
+    let mut coordinator = test_coordinator(&runtime, &pool, Rc::clone(&store));
+
+    coordinator.submit(PersistenceCommand::PatchNote {
+        before: original.clone(),
+        content: "first edit".into(),
+    });
+    coordinator.submit(PersistenceCommand::PatchNote {
+        before: original,
+        content: "second edit".into(),
+    });
+    settle(&mut coordinator);
+
+    let persisted = runtime.block_on(service.list_notes()).unwrap();
+    assert_eq!(persisted[0].value.content, "second edit");
+    assert_eq!(persisted[0].revision, 3);
+    let local = store.borrow();
+    assert_eq!(local.state().notes[0].value.content, persisted[0].value.content);
+    assert_eq!(local.state().notes[0].revision, persisted[0].revision);
+}
+
+#[test]
 fn stale_refresh_cannot_replace_newer_local_workspace() {
     let (runtime, pool) = test_database();
     let latest = test_task("latest");
@@ -121,6 +271,16 @@ fn stale_refresh_cannot_replace_newer_local_workspace() {
             });
     }
     let mut coordinator = test_coordinator(&runtime, &pool, Rc::clone(&store));
+    set_notes(&store, vec![Versioned {
+        revision: 1,
+        value: NoteView {
+            id: "latest-note".into(),
+            position: 0,
+            content: "local note".into(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        },
+    }]);
     coordinator
         .refresh_tx
         .send(Ok(RefreshCompletion {
@@ -133,6 +293,16 @@ fn stale_refresh_cannot_replace_newer_local_workspace() {
             revision: 1,
             revisions: HashMap::new(),
             expiry_error: None,
+            notes: Some(vec![Versioned {
+                revision: 1,
+                value: NoteView {
+                    id: "stale-note".into(),
+                    position: 0,
+                    content: "stale note".into(),
+                    created_at: String::new(),
+                    updated_at: String::new(),
+                },
+            }]),
         }))
         .unwrap();
 
@@ -142,6 +312,7 @@ fn stale_refresh_cannot_replace_newer_local_workspace() {
     assert_eq!(state.state().workspace_revision, 2);
     assert_eq!(state.state().tasks[0].id, "latest");
     assert_eq!(state.state().selected_task_id.as_deref(), Some("latest"));
+    assert_eq!(state.state().notes[0].value.id, "latest-note");
 }
 
 #[test]
@@ -334,6 +505,7 @@ fn refresh_failure_is_visible_and_success_clears_it() {
             revision: 1,
             revisions: HashMap::new(),
             expiry_error: None,
+            notes: None,
         }))
         .unwrap();
     assert!(coordinator.poll());
@@ -530,6 +702,8 @@ fn failed_active_patch_defers_completion_to_successful_queued_patch() {
         related_revisions: HashMap::new(),
         created_task: None,
         link_title: None,
+        created_note: None,
+        note: None,
     }));
     assert!(coordinator.drain(Duration::from_secs(2)));
 
@@ -576,6 +750,8 @@ fn custom_snooze_then_state_then_quick_keeps_latest_workflow() {
         related_revisions: HashMap::new(),
         created_task: None,
         link_title: None,
+        created_note: None,
+        note: None,
     });
     assert!(coordinator.drain(Duration::from_secs(2)));
 
@@ -645,6 +821,8 @@ fn custom_snooze_replaced_before_execution_preserves_remembered_value() {
         related_revisions: HashMap::new(),
         created_task: None,
         link_title: None,
+        created_note: None,
+        note: None,
     });
     assert!(coordinator.drain(Duration::from_secs(2)));
     let task_row = runtime
@@ -744,6 +922,8 @@ fn other_task_custom_blocks_same_task_quick_from_reordering_global_last() {
         related_revisions: HashMap::new(),
         created_task: None,
         link_title: None,
+        created_note: None,
+        note: None,
     });
     assert!(coordinator.drain(Duration::from_secs(2)));
 
@@ -795,6 +975,8 @@ fn custom_snooze_then_unsnooze_keeps_workflow_without_persisting_last() {
         related_revisions: HashMap::new(),
         created_task: None,
         link_title: None,
+        created_note: None,
+        note: None,
     });
     assert!(coordinator.drain(Duration::from_secs(2)));
 
@@ -847,6 +1029,8 @@ fn failed_active_custom_snooze_is_not_suppressed_by_queued_state() {
         related_revisions: HashMap::new(),
         created_task: None,
         link_title: None,
+        created_note: None,
+        note: None,
     }));
     assert!(coordinator.drain(Duration::from_secs(2)));
 
@@ -892,6 +1076,8 @@ fn failed_active_custom_merges_into_queued_quick_compound_snooze() {
         related_revisions: HashMap::new(),
         created_task: None,
         link_title: None,
+        created_note: None,
+        note: None,
     }));
     assert!(coordinator.drain(Duration::from_secs(2)));
 
@@ -941,6 +1127,8 @@ fn successful_active_patch_defers_completion_to_failed_queued_patch() {
         related_revisions: HashMap::new(),
         created_task: None,
         link_title: None,
+        created_note: None,
+        note: None,
     }));
     assert!(store.borrow().state().save_errors.contains_key(&target));
     assert_eq!(store.borrow().state().version, initial_version);
@@ -983,6 +1171,310 @@ fn failed_create_discards_queued_delete_and_removes_optimistic_task() {
     assert!(coordinator.drain(Duration::from_secs(2)));
     assert!(!coordinator.has_pending());
     assert!(store.borrow().state().tasks.is_empty());
+}
+
+#[test]
+fn failed_note_create_discards_queued_delete_without_restoring_a_phantom() {
+    let (runtime, pool) = test_database();
+    runtime.block_on(pool.close());
+    let store = test_store(Vec::new());
+    let mut coordinator = PersistenceCoordinator::new(
+        Rc::clone(&store),
+        pool,
+        SqlDialect::Sqlite,
+        runtime.handle().clone(),
+        None,
+    );
+    let temporary = Versioned {
+        revision: 0,
+        value: NoteView {
+            id: "pending-note-1".into(),
+            position: 0,
+            content: String::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        },
+    };
+    set_notes(&store, vec![temporary.clone()]);
+
+    coordinator.submit(PersistenceCommand::CreateNote {
+        temporary_id: temporary.value.id.clone(),
+        content: String::new(),
+        removed_notes: Vec::new(),
+    });
+    store
+        .borrow_mut()
+        .dispatch(AppEvent::NoteDeleted(temporary.value.id.clone()));
+    coordinator.submit(PersistenceCommand::DeleteNote {
+        note: temporary,
+        index: 0,
+    });
+
+    assert!(coordinator.drain(Duration::from_secs(2)));
+    assert!(!coordinator.has_pending());
+    assert!(store.borrow().state().notes.is_empty());
+}
+
+#[test]
+fn failed_note_create_restores_optimistically_removed_empty_notes() {
+    let (runtime, pool) = test_database();
+    runtime.block_on(pool.close());
+    let store = test_store(Vec::new());
+    let mut coordinator = PersistenceCoordinator::new(
+        Rc::clone(&store),
+        pool,
+        SqlDialect::Sqlite,
+        runtime.handle().clone(),
+        None,
+    );
+    let removed = Versioned {
+        revision: 1,
+        value: NoteView {
+            id: "blank".into(),
+            position: 0,
+            content: " \n".into(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        },
+    };
+    let temporary = Versioned {
+        revision: 0,
+        value: NoteView {
+            id: "pending-note-1".into(),
+            position: 0,
+            content: String::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        },
+    };
+    set_notes(&store, vec![removed.clone()]);
+    store.borrow_mut().dispatch(AppEvent::NoteCreateStarted {
+        temporary_note: temporary.clone(),
+        removed_notes: vec![removed.clone()],
+        inherited_placeholder: None,
+    });
+    coordinator.submit(PersistenceCommand::CreateNote {
+        temporary_id: temporary.value.id,
+        content: String::new(),
+        removed_notes: vec![removed.clone()],
+    });
+
+    assert!(coordinator.drain(Duration::from_secs(2)));
+    let state = store.borrow();
+    assert!(matches!(
+        state.state().notes.as_slice(),
+        [note] if note.value.id == removed.value.id && note.value.position == removed.value.position
+    ));
+    assert!(state
+        .state()
+        .note_error
+        .as_deref()
+        .is_some_and(|error| error.starts_with("Note create failed:")));
+}
+
+#[test]
+fn note_create_restores_only_authoritative_candidates_retained_by_concurrent_updates() {
+    let (runtime, pool) = test_database();
+    runtime
+        .block_on(
+            sqlx::query(
+                "INSERT INTO notes (id, position, content, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            )
+            .bind("guarded")
+            .bind(0)
+            .bind("")
+            .bind("0")
+            .bind("0")
+            .execute(&pool),
+        )
+        .unwrap();
+    runtime
+        .block_on(
+            sqlx::query(
+                "CREATE TRIGGER retain_guarded_note BEFORE DELETE ON notes WHEN OLD.id = 'guarded' BEGIN UPDATE notes SET content = 'written elsewhere', revision = revision + 1 WHERE id = OLD.id; SELECT RAISE(IGNORE); END",
+            )
+            .execute(&pool),
+        )
+        .unwrap();
+    let removed = Versioned {
+        revision: 1,
+        value: NoteView {
+            id: "guarded".into(),
+            position: 0,
+            content: String::new(),
+            created_at: "0".into(),
+            updated_at: "0".into(),
+        },
+    };
+    let temporary = Versioned {
+        revision: 0,
+        value: NoteView {
+            id: "pending-note-1".into(),
+            position: -1,
+            content: String::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        },
+    };
+    let store = test_store(Vec::new());
+    set_notes(&store, vec![removed.clone()]);
+    store.borrow_mut().dispatch(AppEvent::NoteCreateStarted {
+        temporary_note: temporary.clone(),
+        removed_notes: vec![removed.clone()],
+        inherited_placeholder: None,
+    });
+    let mut coordinator = test_coordinator(&runtime, &pool, Rc::clone(&store));
+    coordinator.submit(PersistenceCommand::CreateNote {
+        temporary_id: temporary.value.id,
+        content: String::new(),
+        removed_notes: vec![removed],
+    });
+    settle(&mut coordinator);
+
+    let state = store.borrow();
+    assert!(matches!(
+        state.state().notes.as_slice(),
+        [created, retained]
+            if created.value.id == "pending-note-1"
+                && retained.value.id == "guarded"
+                && retained.value.content == "written elsewhere"
+                && retained.revision == 2
+    ));
+}
+
+#[test]
+fn note_failures_restore_state_and_expose_operation_errors() {
+    let (runtime, pool) = test_database();
+    let service = TuidoService::from_parts(pool.clone(), SqlDialect::Sqlite);
+    let persisted = runtime
+        .block_on(service.create_note(NoteInput {
+            content: "persisted".into(),
+        }))
+        .unwrap();
+    let store = test_store(Vec::new());
+    set_notes(&store, vec![persisted.clone()]);
+    let mut coordinator = test_coordinator(&runtime, &pool, Rc::clone(&store));
+
+    let mut optimistic = persisted.clone();
+    optimistic.value.content = "edited".into();
+    store.borrow_mut().dispatch(AppEvent::NotePatched {
+        before: persisted.clone(),
+        result: Ok(optimistic),
+    });
+    coordinator.submit(PersistenceCommand::PatchNote {
+        before: Versioned {
+            revision: persisted.revision + 1,
+            ..persisted.clone()
+        },
+        content: "edited".into(),
+    });
+    assert!(coordinator.drain(Duration::from_secs(2)));
+
+    let state = store.borrow();
+    assert_eq!(state.state().notes[0].value.content, "persisted");
+    assert!(state
+        .state()
+        .note_error
+        .as_deref()
+        .is_some_and(|error| error.starts_with("Note update failed:")));
+    drop(state);
+    settle(&mut coordinator);
+    assert_eq!(store.borrow().state().note_error, None);
+}
+
+#[test]
+fn failed_note_deletes_restore_first_middle_and_last_order() {
+    let (runtime, pool) = test_database();
+    let service = TuidoService::from_parts(pool.clone(), SqlDialect::Sqlite);
+    for content in ["first", "middle", "last"] {
+        runtime
+            .block_on(service.create_note(NoteInput {
+                content: content.into(),
+            }))
+            .unwrap();
+    }
+    let original = runtime.block_on(service.list_notes()).unwrap();
+    let store = test_store(Vec::new());
+    set_notes(&store, original.clone());
+    let mut coordinator = test_coordinator(&runtime, &pool, Rc::clone(&store));
+
+    for index in [0, 1, 2] {
+        let note = original[index].clone();
+        store
+            .borrow_mut()
+            .dispatch(AppEvent::NoteDeleted(note.value.id.clone()));
+        coordinator.submit(PersistenceCommand::DeleteNote {
+            note: Versioned {
+                revision: note.revision + 1,
+                ..note
+            },
+            index,
+        });
+        settle(&mut coordinator);
+        assert_eq!(
+            store
+                .borrow()
+                .state()
+                .notes
+                .iter()
+                .map(|note| note.value.id.as_str())
+                .collect::<Vec<_>>(),
+            original
+                .iter()
+                .map(|note| note.value.id.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+    assert_eq!(store.borrow().state().note_error, None);
+}
+
+#[test]
+fn overlapping_note_creates_and_failed_deletes_restore_position_order() {
+    let store = test_store(Vec::new());
+    let note = |id: &str, position| Versioned {
+        revision: 1,
+        value: NoteView {
+            id: id.into(),
+            position,
+            content: id.into(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        },
+    };
+    let first = note("first", 1);
+    let second = note("second", 2);
+    set_notes(&store, vec![first.clone(), second.clone()]);
+    store
+        .borrow_mut()
+        .dispatch(AppEvent::NoteDeleted(first.value.id.clone()));
+    store
+        .borrow_mut()
+        .dispatch(AppEvent::NoteDeleted(second.value.id.clone()));
+    store
+        .borrow_mut()
+        .dispatch(AppEvent::NotesLoaded(vec![note("created", 0)]));
+
+    store.borrow_mut().dispatch(AppEvent::NoteDeleteFailed {
+        note: second,
+        index: 0,
+        error: "conflict".into(),
+    });
+    store.borrow_mut().dispatch(AppEvent::NoteDeleteFailed {
+        note: first,
+        index: 0,
+        error: "conflict".into(),
+    });
+
+    assert_eq!(
+        store
+            .borrow()
+            .state()
+            .notes
+            .iter()
+            .map(|note| note.value.id.as_str())
+            .collect::<Vec<_>>(),
+        ["created", "first", "second"]
+    );
 }
 
 #[test]

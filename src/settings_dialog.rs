@@ -12,6 +12,7 @@ use tuicore::{
 use crate::{
     app::AppMsg,
     domain::Workspace,
+    notes_config::NoteEditingMode,
     persistence_coordinator::AppStore,
     speed_reader_settings::{SPEED_READER_MARKDOWN_BLOCK_PAUSE_SETTING, SPEED_READER_WPM_SETTING},
     ui::save_status::SaveStatusLine,
@@ -26,6 +27,7 @@ struct WorkspaceChoice {
 pub(crate) struct SettingsDialog {
     root: Flex<AppMsg>,
     default_workspace_changes: Rc<RefCell<Vec<Option<String>>>>,
+    note_editing_changes: Rc<RefCell<Vec<NoteEditingMode>>>,
 }
 
 impl SettingsDialog {
@@ -35,6 +37,7 @@ impl SettingsDialog {
         default_snooze_time: Time,
         workspaces: &[Workspace],
         default_workspace_id: Option<&str>,
+        default_note_editing: NoteEditingMode,
         speed_reader_wpm: u16,
         markdown_block_pause: Duration,
     ) -> Self {
@@ -69,6 +72,26 @@ impl SettingsDialog {
         .on_select(move |ids| {
             change_sink.borrow_mut().push(ids.into_iter().next());
         });
+        let note_editing_changes = Rc::new(RefCell::new(Vec::new()));
+        let change_sink = Rc::clone(&note_editing_changes);
+        let default_note_editing = Dropdown::single(
+            NoteEditingMode::ALL,
+            |mode| mode.setting_value().to_string(),
+            |mode| mode.label().to_string(),
+        )
+        .label("Default note editing")
+        .selected_one(default_note_editing.setting_value().to_string())
+        .search_mode(DropdownSearchMode::Contains)
+        .commit_mode(DropdownCommitMode::Explicit)
+        .on_select(move |ids| {
+            if let Some(mode) = ids.into_iter().find_map(|id| match id.as_str() {
+                "inline" => Some(NoteEditingMode::Inline),
+                "external" => Some(NoteEditingMode::External),
+                _ => None,
+            }) {
+                change_sink.borrow_mut().push(mode);
+            }
+        });
         let speed_reader = Flex::row()
             .gap(1)
             .child(
@@ -98,16 +121,21 @@ impl SettingsDialog {
             .child("calendar-view", calendar_view, FlexItem::content())
             .child("snooze-time", snooze_time, FlexItem::fixed(3))
             .child("default-workspace", default_workspace, FlexItem::content())
+            .child("default-note-editing", default_note_editing, FlexItem::content())
             .child("speed-reader", speed_reader, FlexItem::content());
         Self {
             root,
             default_workspace_changes,
+            note_editing_changes,
         }
     }
 
     fn emit_default_workspace_changes(&self, ctx: &mut EventCtx<AppMsg>) {
         for workspace_id in self.default_workspace_changes.borrow_mut().drain(..) {
             ctx.emit(AppMsg::SetDefaultWorkspace(workspace_id));
+        }
+        for mode in self.note_editing_changes.borrow_mut().drain(..) {
+            ctx.emit(AppMsg::SetDefaultNoteEditing(mode));
         }
     }
 }
@@ -361,6 +389,7 @@ mod tests {
             time!(8:15),
             &[],
             None,
+            NoteEditingMode::Inline,
             300,
             Duration::from_millis(250),
         );
@@ -391,6 +420,7 @@ mod tests {
             time!(8:15),
             &[],
             None,
+            NoteEditingMode::Inline,
             300,
             Duration::from_millis(250),
         );
@@ -424,6 +454,7 @@ mod tests {
             time!(8:15),
             std::slice::from_ref(&workspace),
             Some(&workspace.id),
+            NoteEditingMode::Inline,
             300,
             Duration::from_millis(250),
         );
@@ -445,6 +476,42 @@ mod tests {
     }
 
     #[test]
+    fn default_note_editing_dropdown_persists_the_selected_mode() {
+        let mut dialog = SettingsDialog::new(
+            store(),
+            true,
+            time!(8:15),
+            &[],
+            None,
+            NoteEditingMode::Inline,
+            300,
+            Duration::from_millis(250),
+        );
+        let mut layout = LayoutCtx::new();
+        dialog.layout(Rect::new(0, 0, 60, 16), &mut layout);
+        let editing = target_with_key(layout.focus_targets(), "default-note-editing").clone();
+        let route = EventRoute::new(editing.path.clone());
+        let mut ctx = EventCtx::default();
+        dialog.dispatch_focus(&editing, true, &mut FocusCtx::default());
+
+        for key in [
+            KeyEvent::from(Key::Enter),
+            KeyEvent {
+                code: Key::Char('j'),
+                modifiers: tuicore::KeyModifiers::CONTROL,
+            },
+            KeyEvent::from(Key::Enter),
+        ] {
+            dialog.dispatch_event(&route, &TuiEvent::Key(key.into()), &mut ctx);
+        }
+
+        assert!(matches!(
+            ctx.messages(),
+            [AppMsg::SetDefaultNoteEditing(NoteEditingMode::External)]
+        ));
+    }
+
+    #[test]
     fn speed_reader_inputs_follow_default_workspace_side_by_side() {
         let workspace = workspace();
         let mut dialog = SettingsDialog::new(
@@ -453,6 +520,7 @@ mod tests {
             time!(8:15),
             std::slice::from_ref(&workspace),
             Some(&workspace.id),
+            NoteEditingMode::Inline,
             425,
             Duration::from_millis(1_250),
         );
@@ -460,9 +528,11 @@ mod tests {
         dialog.layout(Rect::new(0, 0, 60, 11), &mut layout);
         let targets = layout.focus_targets();
         let workspace = target_with_key(targets, "default-workspace");
+        let note_editing = target_with_key(targets, "default-note-editing");
         let wpm = target_with_key(targets, "speed-reader-wpm");
         let delay = target_with_key(targets, "markdown-block-pause");
 
+        assert!(note_editing.area.y > workspace.area.y);
         assert!(wpm.area.y > workspace.area.y);
         assert_eq!(wpm.area.y, delay.area.y);
         assert!(wpm.area.right() < delay.area.x);
@@ -476,6 +546,7 @@ mod tests {
             time!(8:15),
             &[],
             None,
+            NoteEditingMode::Inline,
             300,
             Duration::from_millis(250),
         );

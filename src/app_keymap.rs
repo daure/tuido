@@ -348,13 +348,27 @@ pub mod keys {
 
     pub const APP_TASKS_TAB: AppBinding = AppBinding::new("APP_TASKS_TAB", "t");
     pub const APP_CALENDAR_TAB: AppBinding = AppBinding::new("APP_CALENDAR_TAB", "c");
+    pub const NOTES_MOVE_LEFT: AppBinding = AppBinding::new("NOTES_MOVE_LEFT", "h");
+    pub const NOTES_MOVE_DOWN: AppBinding = AppBinding::new("NOTES_MOVE_DOWN", "j");
+    pub const NOTES_MOVE_UP: AppBinding = AppBinding::new("NOTES_MOVE_UP", "k");
+    pub const NOTES_MOVE_RIGHT: AppBinding = AppBinding::new("NOTES_MOVE_RIGHT", "l");
+    pub const NOTES_ZOOM_IN_EQUALS: AppBinding = AppBinding::new("NOTES_ZOOM_IN_EQUALS", "=");
+    pub const NOTES_ZOOM_IN_PLUS: AppBinding = AppBinding::new("NOTES_ZOOM_IN_PLUS", "+");
+    pub const NOTES_ZOOM_OUT_MINUS: AppBinding = AppBinding::new("NOTES_ZOOM_OUT_MINUS", "-");
+    pub const NOTES_ZOOM_OUT_UNDERSCORE: AppBinding =
+        AppBinding::new("NOTES_ZOOM_OUT_UNDERSCORE", "_");
+    pub const NOTES_EDIT: AppBinding = AppBinding::new_sequence("NOTES_EDIT", "dd");
+    pub const NOTES_OPEN_EDITOR: AppBinding = AppBinding::new_sequence("NOTES_OPEN_EDITOR", "do");
+    pub const NOTES_SPEED_READ: AppBinding = AppBinding::new_sequence("NOTES_SPEED_READ", "ds");
+    pub const NOTES_DELETE: AppBinding = AppBinding::new("NOTES_DELETE", "ctrl+x");
     pub const APP_WORKSPACES_TAB: AppBinding = AppBinding::new_sequence("APP_WORKSPACES_TAB", "wo");
     pub const APP_PEOPLE_TAB: AppBinding = AppBinding::new_sequence("APP_PEOPLE_TAB", "pe");
-    pub const TASK_QUICK_CREATE: AppBinding = AppBinding::new("TASK_QUICK_CREATE", "shift+n");
+    pub const TASK_QUICK_CREATE: AppBinding = AppBinding::new("TASK_QUICK_CREATE", "shift+k");
+    pub const NOTE_QUICK_CREATE: AppBinding = AppBinding::new("NOTE_QUICK_CREATE", "shift+n");
     pub const TASK_VIEW_MENU: AppBinding = AppBinding::new("TASK_VIEW_MENU", "shift+f");
     pub const TASK_WORKSPACE_FILTER: AppBinding =
         AppBinding::new("TASK_WORKSPACE_FILTER", "shift+s");
-    pub const TASK_LABEL_FILTER: AppBinding = AppBinding::new("TASK_LABEL_FILTER", "shift+t");
+    pub const TASK_LABEL_FILTER: AppBinding = AppBinding::new("TASK_LABEL_FILTER", "shift+a");
     pub const TASK_DELETE: AppBinding = AppBinding::new("TASK_DELETE", "delete");
     pub const TASK_DELETE_BACKSPACE: AppBinding = AppBinding::new("TASK_DELETE_X", "backspace");
     pub const TASK_DELETE_CTRL_X: AppBinding = AppBinding::new("TASK_DELETE_CTRL_X", "ctrl+x");
@@ -499,9 +513,22 @@ pub mod keys {
     pub const ALL: &[AppBinding] = &[
         APP_TASKS_TAB,
         APP_CALENDAR_TAB,
+        NOTES_MOVE_LEFT,
+        NOTES_MOVE_DOWN,
+        NOTES_MOVE_UP,
+        NOTES_MOVE_RIGHT,
+        NOTES_ZOOM_IN_EQUALS,
+        NOTES_ZOOM_IN_PLUS,
+        NOTES_ZOOM_OUT_MINUS,
+        NOTES_ZOOM_OUT_UNDERSCORE,
+        NOTES_EDIT,
+        NOTES_OPEN_EDITOR,
+        NOTES_SPEED_READ,
+        NOTES_DELETE,
         APP_WORKSPACES_TAB,
         APP_PEOPLE_TAB,
         TASK_QUICK_CREATE,
+        NOTE_QUICK_CREATE,
         TASK_VIEW_MENU,
         TASK_WORKSPACE_FILTER,
         TASK_LABEL_FILTER,
@@ -627,6 +654,28 @@ pub mod keys {
         BindingContext {
             name: "app tabs",
             bindings: &[APP_TASKS_TAB, APP_CALENDAR_TAB],
+        },
+        BindingContext {
+            name: "notes grid",
+            bindings: &[
+                NOTES_MOVE_LEFT,
+                NOTES_MOVE_DOWN,
+                NOTES_MOVE_UP,
+                NOTES_MOVE_RIGHT,
+                NOTES_ZOOM_IN_EQUALS,
+                NOTES_ZOOM_IN_PLUS,
+                NOTES_ZOOM_OUT_MINUS,
+                NOTES_ZOOM_OUT_UNDERSCORE,
+                NOTES_EDIT,
+                NOTES_OPEN_EDITOR,
+                NOTES_SPEED_READ,
+                NOTES_DELETE,
+                NOTE_QUICK_CREATE,
+            ],
+        },
+        BindingContext {
+            name: "app create actions",
+            bindings: &[TASK_QUICK_CREATE, NOTE_QUICK_CREATE],
         },
         BindingContext {
             name: "task space",
@@ -863,8 +912,9 @@ mod tests {
         for (name, expected) in [
             ("TASK_VIEW_MENU", "shift+f"),
             ("TASK_WORKSPACE_FILTER", "shift+s"),
-            ("TASK_LABEL_FILTER", "shift+t"),
-            ("TASK_QUICK_CREATE", "shift+n"),
+            ("TASK_LABEL_FILTER", "shift+a"),
+            ("TASK_QUICK_CREATE", "shift+k"),
+            ("NOTE_QUICK_CREATE", "shift+n"),
             ("TASK_SNOOZE", "ctrl+z"),
             ("TASK_COMPLETE", "ctrl+c"),
             ("TASK_TOGGLE_PROGRESS", "ctrl+t"),
@@ -911,9 +961,25 @@ mod tests {
     #[test]
     fn active_context_rejects_duplicate_bindings() {
         let error =
-            AppKeymap::from_overrides([("TASK_VIEW_MENU".into(), "shift+n".into())]).unwrap_err();
+            AppKeymap::from_overrides([("TASK_VIEW_MENU".into(), "shift+k".into())]).unwrap_err();
 
         assert!(error.to_string().contains("task space context"));
+    }
+
+    #[test]
+    fn app_create_actions_reject_duplicate_bindings() {
+        let error =
+            AppKeymap::from_overrides([("NOTE_QUICK_CREATE".into(), "shift+k".into())]).unwrap_err();
+
+        assert!(error.to_string().contains("app create actions context"));
+    }
+
+    #[test]
+    fn notes_grid_rejects_note_quick_create_prefix_collision() {
+        let error = AppKeymap::from_overrides([("NOTE_QUICK_CREATE".into(), "d".into())])
+            .unwrap_err();
+
+        assert!(error.to_string().contains("notes grid context"));
     }
 
     #[test]

@@ -135,18 +135,117 @@ impl Storage {
     }
 
     pub async fn migrate(&self) -> Result<(), Box<dyn std::error::Error>> {
-        match migration_source(env::var("TUIDO_AUTO_MIGRATE"), || {
+        let source = migration_source(env::var("TUIDO_AUTO_MIGRATE"), || {
             crate::paths::optional_path_env("TUIDO_MIGRATIONS_DIR")
-        })? {
+        })?;
+        self.migrate_source(source).await
+    }
+
+    async fn migrate_source(
+        &self,
+        source: MigrationSource,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        match source {
             MigrationSource::Disabled => return Ok(()),
-            MigrationSource::Embedded => MIGRATOR.run(&self.pool).await?,
+            MigrationSource::Embedded => {
+                prepare_legacy_notes(&self.pool).await?;
+                MIGRATOR.run(&self.pool).await?;
+            }
             MigrationSource::Directory(dir) => {
+                prepare_legacy_notes(&self.pool).await?;
                 let migrator = Migrator::new(dir.as_path()).await?;
                 migrator.run(&self.pool).await?;
             }
         }
+        finish_legacy_notes(&self.pool, self.dialect).await?;
         Ok(())
     }
+}
+
+const LEGACY_NOTES_TABLE: &str = "notes_legacy_0021";
+
+async fn query_shape_exists(pool: &AnyPool, query: &str) -> bool {
+    sqlx::query(AssertSqlSafe(query))
+        .fetch_optional(pool)
+        .await
+        .is_ok()
+}
+
+async fn prepare_legacy_notes(pool: &AnyPool) -> Result<(), Box<dyn std::error::Error>> {
+    if query_shape_exists(pool, "SELECT position, content FROM notes LIMIT 0").await {
+        return Ok(());
+    }
+    let legacy_exists = query_shape_exists(
+        pool,
+        "SELECT title, description FROM notes_legacy_0021 LIMIT 0",
+    )
+    .await;
+    if !query_shape_exists(pool, "SELECT title, description FROM notes LIMIT 0").await {
+        return Ok(());
+    }
+    if legacy_exists {
+        return Err(format!(
+            "cannot migrate legacy notes: both notes and {LEGACY_NOTES_TABLE} exist"
+        )
+        .into());
+    }
+    sqlx::query("ALTER TABLE notes RENAME TO notes_legacy_0021")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+async fn finish_legacy_notes(
+    pool: &AnyPool,
+    dialect: SqlDialect,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !query_shape_exists(
+        pool,
+        "SELECT title, description FROM notes_legacy_0021 LIMIT 0",
+    )
+    .await
+    {
+        return Ok(());
+    }
+    let mut tx = pool.begin().await?;
+    let rows = sqlx::query(
+        "SELECT id, title, description, created_at, updated_at, revision FROM notes_legacy_0021 ORDER BY created_at, id",
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    let insert = format!(
+        "INSERT INTO notes (id, position, content, created_at, updated_at, revision) VALUES ({}, {}, {}, {}, {}, {})",
+        dialect.placeholder(1),
+        dialect.placeholder(2),
+        dialect.placeholder(3),
+        dialect.placeholder(4),
+        dialect.placeholder(5),
+        dialect.placeholder(6),
+    );
+    for (position, row) in rows.into_iter().enumerate() {
+        let title = row.try_get::<String, _>("title")?;
+        let description = row.try_get::<String, _>("description")?;
+        let content = match (title.is_empty(), description.is_empty()) {
+            (false, false) => format!("# {title}\n\n{description}"),
+            (false, true) => title,
+            (true, false) => description,
+            (true, true) => String::new(),
+        };
+        sqlx::query(AssertSqlSafe(insert.as_str()))
+            .bind(row.try_get::<String, _>("id")?)
+            .bind(position as i64)
+            .bind(content)
+            .bind(row.try_get::<String, _>("created_at")?)
+            .bind(row.try_get::<String, _>("updated_at")?)
+            .bind(row.try_get::<i64, _>("revision")?)
+            .execute(&mut *tx)
+            .await?;
+    }
+    sqlx::query("DROP TABLE notes_legacy_0021")
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 fn sqlite_pool_options() -> AnyPoolOptions {
@@ -429,8 +528,7 @@ async fn load_task_links(
         .bind(task_id)
         .fetch_all(pool)
         .await?;
-    rows
-        .into_iter()
+    rows.into_iter()
         .map(|row| {
             Ok(crate::domain::TaskLink {
                 url: row.try_get("url")?,
@@ -551,6 +649,178 @@ mod tests {
                     ),
                     (0, 0, 0, 0)
                 );
+            });
+    }
+
+    #[test]
+    fn embedded_migration_preserves_legacy_notes_table_data() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                sqlx::any::install_default_drivers();
+                let pool = AnyPoolOptions::new()
+                    .max_connections(1)
+                    .connect("sqlite::memory:")
+                    .await
+                    .unwrap();
+                MIGRATOR.run(&pool).await.unwrap();
+                sqlx::query("DROP TABLE notes")
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 21")
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                sqlx::query(
+                    "CREATE TABLE notes (
+                        id TEXT PRIMARY KEY,
+                        title TEXT NOT NULL,
+                        description TEXT NOT NULL DEFAULT '',
+                        workspace_id TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        revision BIGINT NOT NULL DEFAULT 1
+                    )",
+                )
+                .execute(&pool)
+                .await
+                .unwrap();
+                for (id, title, description, created_at, revision) in [
+                    ("later", "Later", "Second", "2026-01-02", 3_i64),
+                    ("earlier", "Earlier", "First", "2026-01-01", 2_i64),
+                ] {
+                    sqlx::query("INSERT INTO notes (id, title, description, created_at, updated_at, revision) VALUES (?, ?, ?, ?, ?, ?)")
+                        .bind(id)
+                        .bind(title)
+                        .bind(description)
+                        .bind(created_at)
+                        .bind(created_at)
+                        .bind(revision)
+                        .execute(&pool)
+                        .await
+                        .unwrap();
+                }
+                assert!(MIGRATOR.run(&pool).await.is_err());
+                let applied: i64 = sqlx::query(
+                    "SELECT COUNT(*) FROM _sqlx_migrations WHERE version = 21",
+                )
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+                .try_get(0)
+                .unwrap();
+                assert_eq!(applied, 0);
+                let storage = Storage {
+                    pool,
+                    dialect: SqlDialect::Sqlite,
+                    notification_url: None,
+                };
+
+                storage.migrate().await.unwrap();
+
+                let rows = sqlx::query(
+                    "SELECT id, position, content, revision FROM notes ORDER BY position",
+                )
+                .fetch_all(&storage.pool)
+                .await
+                .unwrap();
+                assert_eq!(rows.len(), 2);
+                assert_eq!(rows[0].try_get::<String, _>("id").unwrap(), "earlier");
+                assert_eq!(rows[0].try_get::<i64, _>("position").unwrap(), 0);
+                assert_eq!(
+                    rows[0].try_get::<String, _>("content").unwrap(),
+                    "# Earlier\n\nFirst"
+                );
+                assert_eq!(rows[0].try_get::<i64, _>("revision").unwrap(), 2);
+                assert!(!query_shape_exists(
+                    &storage.pool,
+                    "SELECT title FROM notes_legacy_0021 LIMIT 0"
+                )
+                .await);
+                assert_eq!(
+                    crate::service::TuidoService::from_storage(&storage)
+                        .list_notes()
+                        .await
+                        .unwrap()
+                        .len(),
+                    2
+                );
+            });
+    }
+
+    #[test]
+    fn directory_migration_preserves_legacy_notes_table_data() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                sqlx::any::install_default_drivers();
+                let pool = AnyPoolOptions::new()
+                    .max_connections(1)
+                    .connect("sqlite::memory:")
+                    .await
+                    .unwrap();
+                MIGRATOR.run(&pool).await.unwrap();
+                sqlx::query("DROP TABLE notes")
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 21")
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                sqlx::query(
+                    "CREATE TABLE notes (
+                        id TEXT PRIMARY KEY,
+                        title TEXT NOT NULL,
+                        description TEXT NOT NULL DEFAULT '',
+                        workspace_id TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        revision BIGINT NOT NULL DEFAULT 1
+                    )",
+                )
+                .execute(&pool)
+                .await
+                .unwrap();
+                sqlx::query("INSERT INTO notes (id, title, description, created_at, updated_at, revision) VALUES ('legacy', 'Legacy', 'Content', '2026-01-01', '2026-01-01', 2)")
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                let directory = std::env::temp_dir().join(format!("tuido-migrations-{}", Uuid::new_v4()));
+                fs::create_dir_all(&directory).unwrap();
+                for entry in fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/migrations")).unwrap() {
+                    let entry = entry.unwrap();
+                    fs::copy(entry.path(), directory.join(entry.file_name())).unwrap();
+                }
+                let storage = Storage {
+                    pool,
+                    dialect: SqlDialect::Sqlite,
+                    notification_url: None,
+                };
+
+                storage
+                    .migrate_source(MigrationSource::Directory(directory.clone()))
+                    .await
+                    .unwrap();
+
+                let row = sqlx::query("SELECT position, content, revision FROM notes WHERE id = 'legacy'")
+                    .fetch_one(&storage.pool)
+                    .await
+                    .unwrap();
+                assert_eq!(row.try_get::<i64, _>("position").unwrap(), 0);
+                assert_eq!(row.try_get::<String, _>("content").unwrap(), "# Legacy\n\nContent");
+                assert_eq!(row.try_get::<i64, _>("revision").unwrap(), 2);
+                assert!(!query_shape_exists(
+                    &storage.pool,
+                    "SELECT title FROM notes_legacy_0021 LIMIT 0"
+                )
+                .await);
+                fs::remove_dir_all(directory).unwrap();
             });
     }
 

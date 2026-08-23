@@ -8,6 +8,7 @@ pub(super) enum AppDialog {
     DeleteManagement(ConfirmationDialog<AppMsg>),
     CreateTask(DialogHost<CreateTaskDialog, AppMsg>),
     DeleteTask(ConfirmationDialog<AppMsg>),
+    DeleteNote(ConfirmationDialog<AppMsg>),
     Generic(Dialog<AppMsg>),
     TaskQuickMenu(Box<TaskQuickMenu>),
     Settings(DialogHost<SettingsDialog, AppMsg>),
@@ -40,6 +41,7 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::DeleteManagement(dialog) => dialog.measure(proposal),
             Self::CreateTask(dialog) => measure_dialog_host(dialog, proposal),
             Self::DeleteTask(dialog) => dialog.measure(proposal),
+            Self::DeleteNote(dialog) => dialog.measure(proposal),
             Self::Generic(dialog) => dialog.measure(proposal),
             Self::TaskQuickMenu(menu) => menu.measure(proposal),
             Self::Settings(dialog) => measure_dialog_host(dialog, proposal),
@@ -58,6 +60,7 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::DeleteManagement(dialog) => dialog.layout(area, ctx),
             Self::CreateTask(dialog) => dialog.layout(area, ctx),
             Self::DeleteTask(dialog) => dialog.layout(area, ctx),
+            Self::DeleteNote(dialog) => dialog.layout(area, ctx),
             Self::Generic(dialog) => dialog.layout(area, ctx),
             Self::TaskQuickMenu(dialog) => dialog.layout(area, ctx),
             Self::Settings(dialog) => dialog.layout(area, ctx),
@@ -76,6 +79,7 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::DeleteManagement(dialog) => dialog.render(frame, area),
             Self::CreateTask(dialog) => dialog.render(frame, area, ctx),
             Self::DeleteTask(dialog) => dialog.render(frame, area),
+            Self::DeleteNote(dialog) => dialog.render(frame, area),
             Self::Generic(dialog) => dialog.render(frame, area),
             Self::TaskQuickMenu(dialog) => dialog.render(frame, area, ctx),
             Self::Settings(dialog) => dialog.render(frame, area, ctx),
@@ -94,6 +98,7 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::DeleteManagement(dialog) => dialog.event(event, ctx),
             Self::CreateTask(dialog) => dialog.event(event, ctx),
             Self::DeleteTask(dialog) => dialog.event(event, ctx),
+            Self::DeleteNote(dialog) => dialog.event(event, ctx),
             Self::Generic(dialog) => dialog.event(event, ctx),
             Self::TaskQuickMenu(dialog) => dialog.event(event, ctx),
             Self::Settings(dialog) => dialog.event(event, ctx),
@@ -117,6 +122,7 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::DeleteManagement(dialog) => dialog.dispatch_event(route, event, ctx),
             Self::CreateTask(dialog) => dialog.dispatch_event(route, event, ctx),
             Self::DeleteTask(dialog) => dialog.dispatch_event(route, event, ctx),
+            Self::DeleteNote(dialog) => dialog.dispatch_event(route, event, ctx),
             Self::Generic(dialog) => dialog.dispatch_event(route, event, ctx),
             Self::TaskQuickMenu(dialog) => dialog.dispatch_event(route, event, ctx),
             Self::Settings(dialog) => dialog.dispatch_event(route, event, ctx),
@@ -135,6 +141,7 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::DeleteManagement(dialog) => dialog.dispatch_focus(target, focused, ctx),
             Self::CreateTask(dialog) => dialog.dispatch_focus(target, focused, ctx),
             Self::DeleteTask(dialog) => dialog.dispatch_focus(target, focused, ctx),
+            Self::DeleteNote(dialog) => dialog.dispatch_focus(target, focused, ctx),
             Self::Generic(dialog) => dialog.dispatch_focus(target, focused, ctx),
             Self::TaskQuickMenu(dialog) => dialog.dispatch_focus(target, focused, ctx),
             Self::Settings(dialog) => dialog.dispatch_focus(target, focused, ctx),
@@ -153,6 +160,7 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::DeleteManagement(dialog) => dialog.tick(dt, settings),
             Self::CreateTask(dialog) => dialog.tick(dt, settings),
             Self::DeleteTask(dialog) => dialog.tick(dt, settings),
+            Self::DeleteNote(dialog) => dialog.tick(dt, settings),
             Self::Generic(dialog) => dialog.tick(dt, settings),
             Self::TaskQuickMenu(dialog) => dialog.tick(dt, settings),
             Self::Settings(dialog) => dialog.tick(dt, settings),
@@ -171,6 +179,7 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::DeleteManagement(dialog) => dialog.init(ctx),
             Self::CreateTask(dialog) => dialog.init(ctx),
             Self::DeleteTask(dialog) => dialog.init(ctx),
+            Self::DeleteNote(dialog) => dialog.init(ctx),
             Self::Generic(dialog) => dialog.init(ctx),
             Self::TaskQuickMenu(dialog) => dialog.init(ctx),
             Self::Settings(dialog) => dialog.init(ctx),
@@ -189,6 +198,7 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::DeleteManagement(dialog) => dialog.mount(ctx),
             Self::CreateTask(dialog) => dialog.mount(ctx),
             Self::DeleteTask(dialog) => dialog.mount(ctx),
+            Self::DeleteNote(dialog) => dialog.mount(ctx),
             Self::Generic(dialog) => dialog.mount(ctx),
             Self::TaskQuickMenu(dialog) => dialog.mount(ctx),
             Self::Settings(dialog) => dialog.mount(ctx),
@@ -207,6 +217,7 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::DeleteManagement(dialog) => dialog.unmount(ctx),
             Self::CreateTask(dialog) => dialog.unmount(ctx),
             Self::DeleteTask(dialog) => dialog.unmount(ctx),
+            Self::DeleteNote(dialog) => dialog.unmount(ctx),
             Self::Generic(dialog) => dialog.unmount(ctx),
             Self::TaskQuickMenu(dialog) => dialog.unmount(ctx),
             Self::Settings(dialog) => dialog.unmount(ctx),
@@ -225,6 +236,7 @@ impl TuiNode<AppMsg> for AppDialog {
             Self::DeleteManagement(dialog) => dialog.destroy(ctx),
             Self::CreateTask(dialog) => dialog.destroy(ctx),
             Self::DeleteTask(dialog) => dialog.destroy(ctx),
+            Self::DeleteNote(dialog) => dialog.destroy(ctx),
             Self::Generic(dialog) => dialog.destroy(ctx),
             Self::TaskQuickMenu(dialog) => dialog.destroy(ctx),
             Self::Settings(dialog) => dialog.destroy(ctx),
@@ -322,6 +334,22 @@ pub(super) fn delete_task_dialog(task: &Task) -> AppDialog {
             }
         });
     AppDialog::DeleteTask(dialog)
+}
+
+pub(super) fn delete_note_dialog(note_id: String) -> AppDialog {
+    let dialog =
+        ConfirmationDialog::new("Delete note?", "Delete this note? This cannot be undone.")
+            .yes_text("Delete")
+            .yes_hotkey(keys::DELETE_CONFIRM.key_spec())
+            .on_outcome(move |outcome| match outcome {
+                ConfirmationDialogOutcome::Confirmed => {
+                    AppMsg::DeleteNoteConfirmed(note_id.clone())
+                }
+                ConfirmationDialogOutcome::Cancelled | ConfirmationDialogOutcome::Closed(_) => {
+                    AppMsg::CloseDialog
+                }
+            });
+    AppDialog::DeleteNote(dialog)
 }
 
 pub(super) fn complete_task_dialog(task: &Task) -> AppDialog {

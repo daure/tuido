@@ -269,7 +269,7 @@ fn task_table_with_copy_context_and_empty(
             },
         )
         .sortable(|row| row.title.clone())
-        .filter_key(|row| row.title.clone()),
+        .search_key(|row| row.title.clone()),
     ]);
     if allow_reordering {
         table = table.reorderable_by("rank");

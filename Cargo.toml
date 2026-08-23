@@ -43,6 +43,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "any", "sqlite", "postgres", "migrate", "macros"] }
 tokio = { version = "1", features = ["rt-multi-thread", "time", "signal", "net", "macros"] }
 time = { version = "0.3", features = ["formatting", "parsing", "macros", "local-offset", "serde"] }
+toml = "0.8"
 uuid = { version = "1", features = ["v4"] }
 webbrowser = "1"
 

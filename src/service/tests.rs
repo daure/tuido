@@ -33,6 +33,186 @@ fn task_create(title: &str) -> TaskCreate {
 }
 
 #[tokio::test]
+async fn notes_are_created_updated_and_deleted_with_revisions() {
+    let service = test_service().await;
+    let first = service
+        .create_note(NoteInput {
+            content: "first".into(),
+        })
+        .await
+        .unwrap();
+    let second = service
+        .create_note(NoteInput {
+            content: "second".into(),
+        })
+        .await
+        .unwrap();
+
+    let listed = service.list_notes().await.unwrap();
+    assert_eq!(listed[0].value.id, second.value.id);
+    assert_eq!(listed[1].value.id, first.value.id);
+
+    let updated = service
+        .update_note(
+            &second.value.id,
+            second.revision,
+            NoteInput {
+                content: "edited".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.revision, second.revision + 1);
+    assert_eq!(updated.value.content, "edited");
+    assert!(matches!(
+        service
+            .update_note(
+                &second.value.id,
+                second.revision,
+                NoteInput {
+                    content: "stale".into(),
+                },
+            )
+            .await,
+        Err(ServiceError::Conflict { .. })
+    ));
+
+    service
+        .delete_note(&second.value.id, updated.revision)
+        .await
+        .unwrap();
+    let listed = service.list_notes().await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].value.id, first.value.id);
+}
+
+#[tokio::test]
+async fn creating_a_note_removes_existing_blank_notes() {
+    let service = test_service().await;
+    let existing = service
+        .create_note(NoteInput {
+            content: "Keep this".into(),
+        })
+        .await
+        .unwrap();
+    for (id, position, content) in [("blank-one", 1, ""), ("blank-two", 2, " \n\t ")] {
+        sqlx::query(
+            "INSERT INTO notes (id, position, content, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(position)
+        .bind(content)
+        .bind("0")
+        .bind("0")
+        .execute(&service.pool)
+        .await
+        .unwrap();
+    }
+
+    let before_revision = service.workspace_revision().await.unwrap();
+    let created = service
+        .create_note(NoteInput {
+            content: "New note".into(),
+        })
+        .await
+        .unwrap();
+
+    let listed = service.list_notes().await.unwrap();
+    assert_eq!(created.value.content, "New note");
+    assert_eq!(
+        service.workspace_revision().await.unwrap(),
+        before_revision + 1
+    );
+    assert_eq!(listed.len(), 2);
+    assert_eq!(
+        listed
+            .iter()
+            .map(|note| note.value.id.as_str())
+            .collect::<Vec<_>>(),
+        [created.value.id.as_str(), existing.value.id.as_str()]
+    );
+    assert_eq!(listed[0].value.id, created.value.id);
+    assert_eq!(listed[0].value.position, -1);
+    assert_eq!(listed[1].value.id, existing.value.id);
+    assert_eq!(listed[1].value.position, 0);
+    assert_eq!(listed[1].value.content, "Keep this");
+}
+
+#[tokio::test]
+async fn creating_a_note_reports_candidates_retained_by_concurrent_updates() {
+    let service = test_service().await;
+    sqlx::query(
+        "INSERT INTO notes (id, position, content, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind("guarded")
+    .bind(0)
+    .bind("")
+    .bind("0")
+    .bind("0")
+    .execute(&service.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER retain_guarded_note BEFORE DELETE ON notes WHEN OLD.id = 'guarded' BEGIN UPDATE notes SET content = 'written elsewhere', revision = revision + 1 WHERE id = OLD.id; SELECT RAISE(IGNORE); END",
+    )
+    .execute(&service.pool)
+    .await
+    .unwrap();
+    let candidate = Versioned {
+        revision: 1,
+        value: NoteView {
+            id: "guarded".into(),
+            position: 0,
+            content: String::new(),
+            created_at: "0".into(),
+            updated_at: "0".into(),
+        },
+    };
+
+    let result = service
+        .create_note_reconciled(NoteInput {
+            content: "new note".into(),
+        }, &[candidate])
+        .await
+        .unwrap();
+
+    assert!(result.deleted_candidate_ids.is_empty());
+    assert_eq!(result.note.value.content, "new note");
+    assert!(matches!(
+        result.retained_candidates.as_slice(),
+        [retained] if retained.value.id == "guarded"
+            && retained.value.content == "written elsewhere"
+            && retained.revision == 2
+    ));
+}
+
+#[tokio::test]
+async fn newest_note_stays_first_after_multiple_creates_and_refresh() {
+    let service = test_service().await;
+    let mut created = Vec::new();
+    for content in ["first", "second", "third"] {
+        created.push(
+            service
+                .create_note(NoteInput {
+                    content: content.into(),
+                })
+                .await
+                .unwrap(),
+        );
+    }
+
+    let refreshed = service.list_notes().await.unwrap();
+    assert_eq!(
+        refreshed
+            .iter()
+            .map(|note| note.value.content.as_str())
+            .collect::<Vec<_>>(),
+        ["third", "second", "first"]
+    );
+    assert_eq!(refreshed[0].value.id, created[2].value.id);
+}
+
+#[tokio::test]
 async fn task_link_metadata_is_persisted_and_returned_by_service_views() {
     let service = test_service().await;
     let mut input = task_create("Link metadata");
@@ -55,7 +235,10 @@ async fn task_link_metadata_is_persisted_and_returned_by_service_views() {
         loaded.value.links[0].title.as_deref(),
         Some("Example documentation")
     );
-    assert_eq!(loaded.value.links[0].last_fetched.as_deref(), Some("123456789"));
+    assert_eq!(
+        loaded.value.links[0].last_fetched.as_deref(),
+        Some("123456789")
+    );
 }
 
 #[test]
@@ -120,7 +303,7 @@ fn task_ids_are_sequential_and_use_the_workspace_key_prefix() {
 }
 
 #[test]
-fn new_tasks_append_and_reordering_updates_ranks_atomically() {
+fn new_tasks_prepend_and_reordering_updates_ranks_atomically() {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -137,7 +320,7 @@ fn new_tasks_append_and_reordering_updates_ranks_atomically() {
                 .iter()
                 .map(|task| (task.title.as_str(), task.rank))
                 .collect::<Vec<_>>(),
-            [("First", 1), ("Second", 2)]
+            [("Second", -2), ("First", -1)]
         );
         let before_revision = service.workspace_revision().await.unwrap();
 
@@ -146,14 +329,14 @@ fn new_tasks_append_and_reordering_updates_ranks_atomically() {
                 TaskRankUpdate {
                     rank: TaskRank {
                         id: second.value.id.clone(),
-                        rank: 1,
+                        rank: -1,
                     },
                     expected_revision: second.revision,
                 },
                 TaskRankUpdate {
                     rank: TaskRank {
                         id: first.value.id.clone(),
-                        rank: 2,
+                        rank: -2,
                     },
                     expected_revision: first.revision,
                 },
@@ -177,7 +360,7 @@ fn new_tasks_append_and_reordering_updates_ranks_atomically() {
                 .iter()
                 .map(|task| task.title.as_str())
                 .collect::<Vec<_>>(),
-            ["Second", "First"]
+            ["First", "Second"]
         );
     });
 }

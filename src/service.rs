@@ -11,9 +11,9 @@ use uuid::Uuid;
 
 use crate::{
     domain::{
-        ChecklistItem, Person, PersonPatch, Tag, TagPatch, Task, TaskLink, TaskPatch, TaskRank, TaskRelation,
-        TaskRelationKind, Workspace, WorkspacePatch, WorkspaceSnapshot, task_identifier,
-        task_number,
+        ChecklistItem, Person, PersonPatch, Tag, TagPatch, Task, TaskLink, TaskPatch, TaskRank,
+        TaskRelation, TaskRelationKind, Workspace, WorkspacePatch, WorkspaceSnapshot,
+        task_identifier, task_number,
     },
     storage::{self, SqlDialect, Storage},
 };
@@ -353,6 +353,28 @@ pub struct TagInput {
     pub label: String,
 }
 
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct NoteInput {
+    #[serde(default)]
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct NoteView {
+    pub id: String,
+    pub position: i64,
+    pub content: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct NoteCreateResult {
+    pub(crate) note: Versioned<NoteView>,
+    pub(crate) deleted_candidate_ids: Vec<String>,
+    pub(crate) retained_candidates: Vec<Versioned<NoteView>>,
+}
+
 #[derive(Clone)]
 pub struct TuidoService {
     pool: AnyPool,
@@ -388,6 +410,14 @@ impl TuidoService {
         Self { pool, dialect }
     }
 
+    async fn lock_workspace(tx: &mut Transaction<'_, Any>) -> ServiceResult<()> {
+        sqlx::query("UPDATE workspace_revision SET revision = revision WHERE singleton = 1")
+            .execute(&mut **tx)
+            .await
+            .map_err(storage_error)?;
+        Ok(())
+    }
+
     pub async fn workspace_revision(&self) -> ServiceResult<u64> {
         let row = sqlx::query("SELECT revision FROM workspace_revision WHERE singleton = 1")
             .fetch_one(&self.pool)
@@ -396,6 +426,239 @@ impl TuidoService {
         row.try_get::<i64, _>("revision")
             .map(|v| v as u64)
             .map_err(storage_error)
+    }
+
+    pub async fn list_notes(&self) -> ServiceResult<Vec<Versioned<NoteView>>> {
+        sqlx::query("SELECT id, position, content, created_at, updated_at, revision FROM notes ORDER BY position ASC, id ASC")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(storage_error)?
+            .into_iter()
+            .map(note_from_row)
+            .collect()
+    }
+
+    pub async fn create_note(&self, input: NoteInput) -> ServiceResult<Versioned<NoteView>> {
+        self.create_note_reconciled(input, &[])
+            .await
+            .map(|result| result.note)
+    }
+
+    pub(crate) async fn create_note_reconciled(
+        &self,
+        input: NoteInput,
+        candidates: &[Versioned<NoteView>],
+    ) -> ServiceResult<NoteCreateResult> {
+        self.create_note_reconciled_with_id(Uuid::new_v4().to_string(), input, candidates)
+            .await
+    }
+
+    pub(crate) async fn create_note_reconciled_with_id(
+        &self,
+        id: String,
+        input: NoteInput,
+        candidates: &[Versioned<NoteView>],
+    ) -> ServiceResult<NoteCreateResult> {
+        let mut tx = self.pool.begin().await.map_err(storage_error)?;
+        Self::lock_workspace(&mut tx).await?;
+        let notes = sqlx::query(
+            "SELECT id, position, content, created_at, updated_at, revision FROM notes",
+        )
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(storage_error)?;
+        let delete_sql = format!(
+            "DELETE FROM notes WHERE id = {} AND content = {} AND revision = {}",
+            self.dialect.placeholder(1),
+            self.dialect.placeholder(2),
+            self.dialect.placeholder(3)
+        );
+        let retained_sql = format!(
+            "SELECT id, position, content, created_at, updated_at, revision FROM notes WHERE id = {}",
+            self.dialect.placeholder(1)
+        );
+        let mut deleted_candidate_ids = Vec::new();
+        let mut retained_candidates = Vec::new();
+        for note in notes
+            .into_iter()
+            .map(note_from_row)
+            .collect::<ServiceResult<Vec<_>>>()?
+        {
+            let candidate = candidates
+                .iter()
+                .find(|candidate| candidate.value.id == note.value.id);
+            if note.value.content.trim().is_empty() {
+                let guarded = candidate.unwrap_or(&note);
+                let deleted = sqlx::query(AssertSqlSafe(delete_sql.as_str()))
+                    .bind(&guarded.value.id)
+                    .bind(&guarded.value.content)
+                    .bind(guarded.revision as i64)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(storage_error)?
+                    .rows_affected()
+                    == 1;
+                if deleted {
+                    if candidate.is_some() {
+                        deleted_candidate_ids.push(note.value.id);
+                    }
+                } else if let Some(retained) = sqlx::query(AssertSqlSafe(retained_sql.as_str()))
+                    .bind(&note.value.id)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(storage_error)?
+                    .map(note_from_row)
+                    .transpose()?
+                    && candidate.is_some()
+                {
+                    retained_candidates.push(retained);
+                }
+            } else if candidate.is_some() {
+                retained_candidates.push(note);
+            }
+        }
+        let position = sqlx::query("SELECT COALESCE(MIN(position), 1) - 1 AS position FROM notes")
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(storage_error)?
+            .try_get::<i64, _>("position")
+            .map_err(storage_error)?;
+        let now = now_text();
+        let sql = format!(
+            "INSERT INTO notes (id, position, content, created_at, updated_at) VALUES ({}, {}, {}, {}, {})",
+            self.dialect.placeholder(1),
+            self.dialect.placeholder(2),
+            self.dialect.placeholder(3),
+            self.dialect.placeholder(4),
+            self.dialect.placeholder(5)
+        );
+        sqlx::query(AssertSqlSafe(sql.as_str()))
+            .bind(&id)
+            .bind(position)
+            .bind(input.content)
+            .bind(&now)
+            .bind(&now)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage_error)?;
+        bump_workspace(&mut tx, self.dialect).await?;
+        tx.commit().await.map_err(storage_error)?;
+        Ok(NoteCreateResult {
+            note: self.get_note(&id).await?,
+            deleted_candidate_ids,
+            retained_candidates,
+        })
+    }
+
+    pub async fn update_note(
+        &self,
+        id: &str,
+        expected_revision: u64,
+        input: NoteInput,
+    ) -> ServiceResult<Versioned<NoteView>> {
+        let mut tx = self.pool.begin().await.map_err(storage_error)?;
+        Self::lock_workspace(&mut tx).await?;
+        let sql = format!(
+            "UPDATE notes SET content = {}, updated_at = {}, revision = revision + 1 WHERE id = {} AND revision = {}",
+            self.dialect.placeholder(1),
+            self.dialect.placeholder(2),
+            self.dialect.placeholder(3),
+            self.dialect.placeholder(4)
+        );
+        let result = sqlx::query(AssertSqlSafe(sql.as_str()))
+            .bind(input.content)
+            .bind(now_text())
+            .bind(id)
+            .bind(expected_revision as i64)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage_error)?;
+        if result.rows_affected() == 0 {
+            tx.rollback().await.map_err(storage_error)?;
+            return self.note_conflict(id, expected_revision).await;
+        }
+        bump_workspace(&mut tx, self.dialect).await?;
+        tx.commit().await.map_err(storage_error)?;
+        self.get_note(id).await
+    }
+
+    pub async fn delete_note(&self, id: &str, expected_revision: u64) -> ServiceResult<()> {
+        let mut tx = self.pool.begin().await.map_err(storage_error)?;
+        Self::lock_workspace(&mut tx).await?;
+        let sql = format!(
+            "DELETE FROM notes WHERE id = {} AND revision = {}",
+            self.dialect.placeholder(1),
+            self.dialect.placeholder(2)
+        );
+        let result = sqlx::query(AssertSqlSafe(sql.as_str()))
+            .bind(id)
+            .bind(expected_revision as i64)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage_error)?;
+        if result.rows_affected() == 0 {
+            tx.rollback().await.map_err(storage_error)?;
+            return self.note_conflict(id, expected_revision).await;
+        }
+        let rows = sqlx::query("SELECT id FROM notes ORDER BY position, id")
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(storage_error)?;
+        for (position, row) in rows.into_iter().enumerate() {
+            let update = format!(
+                "UPDATE notes SET position = {} WHERE id = {}",
+                self.dialect.placeholder(1),
+                self.dialect.placeholder(2)
+            );
+            sqlx::query(AssertSqlSafe(update.as_str()))
+                .bind(position as i64)
+                .bind(row.try_get::<String, _>("id").map_err(storage_error)?)
+                .execute(&mut *tx)
+                .await
+                .map_err(storage_error)?;
+        }
+        bump_workspace(&mut tx, self.dialect).await?;
+        tx.commit().await.map_err(storage_error)?;
+        Ok(())
+    }
+
+    pub async fn get_note(&self, id: &str) -> ServiceResult<Versioned<NoteView>> {
+        let sql = format!(
+            "SELECT id, position, content, created_at, updated_at, revision FROM notes WHERE id = {}",
+            self.dialect.placeholder(1)
+        );
+        sqlx::query(AssertSqlSafe(sql.as_str()))
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(storage_error)?
+            .map(note_from_row)
+            .transpose()?
+            .ok_or_else(|| ServiceError::NotFound {
+                entity: "note",
+                id: id.into(),
+            })
+    }
+
+    async fn note_conflict<T>(&self, id: &str, expected: u64) -> ServiceResult<T> {
+        let sql = format!(
+            "SELECT revision FROM notes WHERE id = {}",
+            self.dialect.placeholder(1)
+        );
+        let actual = sqlx::query(AssertSqlSafe(sql.as_str()))
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(storage_error)?
+            .map(|row| row.try_get::<i64, _>("revision").map(|v| v as u64))
+            .transpose()
+            .map_err(storage_error)?;
+        Err(ServiceError::Conflict {
+            entity: "note",
+            id: id.into(),
+            expected,
+            actual,
+        })
     }
 
     pub async fn process_snooze_expirations(&self) -> ServiceResult<()> {
@@ -574,6 +837,33 @@ impl TuidoService {
         ))
     }
 
+    pub(crate) async fn consistent_workspace_with_notes(
+        &self,
+    ) -> ServiceResult<(ConsistentWorkspace, Vec<Versioned<NoteView>>)> {
+        const MAX_ATTEMPTS: usize = 8;
+        for _ in 0..MAX_ATTEMPTS {
+            let before = self.workspace_revision().await?;
+            let snapshot = self.domain_snapshot().await?;
+            let entity_revisions = self.revisions().await?;
+            let notes = self.list_notes().await?;
+            let revision = self.workspace_revision().await?;
+            if before == revision {
+                return Ok((
+                    ConsistentWorkspace {
+                        snapshot,
+                        revision,
+                        entity_revisions,
+                    },
+                    notes,
+                ));
+            }
+            tokio::task::yield_now().await;
+        }
+        Err(ServiceError::Storage(
+            "data kept changing while loading a consistent snapshot".into(),
+        ))
+    }
+
     async fn revisions(&self) -> ServiceResult<HashMap<String, u64>> {
         let mut result = HashMap::new();
         let task_rows = sqlx::query("SELECT id, revision, key_prefix FROM tasks")
@@ -658,7 +948,7 @@ impl TuidoService {
         let number = self.next_task_number(&mut tx).await?;
         task.id = task_identifier(number, workspace_key.as_deref());
         bump_workspace(&mut tx, self.dialect).await?;
-        let row = sqlx::query("SELECT COALESCE(MAX(rank), 0) + 1 AS rank FROM tasks")
+        let row = sqlx::query("SELECT COALESCE(MIN(rank), 0) - 1 AS rank FROM tasks")
             .fetch_one(&mut *tx)
             .await
             .map_err(storage_error)?;
@@ -940,7 +1230,9 @@ impl TuidoService {
             .map_err(storage_error)?
             .unwrap_or(0)
             .checked_sub(1)
-            .ok_or_else(|| ServiceError::Invalid("cannot promote task beyond minimum rank".into()))?;
+            .ok_or_else(|| {
+                ServiceError::Invalid("cannot promote task beyond minimum rank".into())
+            })?;
         let update = format!(
             "UPDATE tasks SET rank = {}, updated_at = {} WHERE id = {}",
             self.dialect.placeholder(1),
@@ -1731,7 +2023,10 @@ impl TuidoService {
         for link in links {
             delete_query = delete_query.bind(link);
         }
-        delete_query.execute(&mut **tx).await.map_err(storage_error)?;
+        delete_query
+            .execute(&mut **tx)
+            .await
+            .map_err(storage_error)?;
         let insert = format!(
             "INSERT INTO task_links (task_id, url) VALUES ({}, {}) ON CONFLICT(task_id, url) DO NOTHING",
             self.dialect.placeholder(1),
@@ -2249,6 +2544,19 @@ fn now_text() -> String {
         .as_nanos()
         .to_string()
 }
+fn note_from_row(row: sqlx::any::AnyRow) -> ServiceResult<Versioned<NoteView>> {
+    Ok(Versioned {
+        revision: row.try_get::<i64, _>("revision").map_err(storage_error)? as u64,
+        value: NoteView {
+            id: row.try_get("id").map_err(storage_error)?,
+            position: row.try_get("position").map_err(storage_error)?,
+            content: row.try_get("content").map_err(storage_error)?,
+            created_at: row.try_get("created_at").map_err(storage_error)?,
+            updated_at: row.try_get("updated_at").map_err(storage_error)?,
+        },
+    })
+}
+
 fn storage_error(error: impl fmt::Display) -> ServiceError {
     ServiceError::Storage(error.to_string())
 }

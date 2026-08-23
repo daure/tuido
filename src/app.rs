@@ -18,8 +18,11 @@ use crate::domain::{
     task_number,
 };
 use crate::persistence_coordinator::{AppStore, PersistenceCommand, PersistenceCoordinator};
-use crate::service::TuidoService;
+use crate::service::{NoteView, TuidoService, Versioned};
 use crate::settings_dialog::SettingsDialog;
+use crate::notes_config::{
+    DEFAULT_NOTE_EDITING_SETTING, NoteEditingMode, parse_note_editing_mode,
+};
 use crate::snooze::{
     DEFAULT_SNOOZE_TIME_SETTING, SnoozeDialog, format_datetime, format_default_snooze_time,
     local_now, parse_default_snooze_time,
@@ -34,6 +37,9 @@ use crate::storage::Storage;
 use crate::task_quick_menu::TaskQuickMenu;
 use crate::task_title::format_title;
 use crate::ui::management::{ManagementDialogKind, people, tags, workspaces};
+use crate::ui::notes_workspace::{
+    NewNoteEditRequest, NoteChange, NotesWorkspace, note_path, note_placeholder,
+};
 use crate::ui::responsive_split::ResponsiveSplit;
 use crate::ui::save_status::SaveStatusLine;
 use crate::ui::task_detail::{PatchSink, TaskDetailCatalogs, TaskDetailForm};
@@ -52,10 +58,10 @@ use tuicore::{
     EventRoute, Flex, FlexItem, FocusCtx, FocusId, FocusRequest, FocusTarget, HotkeyEvent,
     HotkeyLabelMode, Language, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint,
     LifecycleCtx, ListControl, ListControlEvent, ListControlField, ListControlKeyBindings,
-    MainAlign, MenuButton, MenuItem, Paragraph, Propagation, RenderCtx,
-    SeasonalEmptyState, SelectedTag, SelectionMode, SelectionTrigger, SpeedReader, StatusBar,
-    StatusBarMenuItem, Store, Tab, Tabs, TabsVariant, TagInput, TagInputEvent, TextareaInput,
-    TickResult, TreeApp, TreePath, TuiEvent, TuiNode, WeatherProviderConfig,
+    MainAlign, MenuButton, MenuItem, Paragraph, Propagation, RenderCtx, SeasonalEmptyState,
+    SelectedTag, SelectionMode, SelectionTrigger, SpeedReader, StatusBar, StatusBarMenuItem, Store,
+    Tab, Tabs, TabsVariant, TagInput, TagInputEvent, TextareaInput, TickResult, TreeApp, TreePath,
+    TuiEvent, TuiNode, WeatherProviderConfig,
 };
 use uuid::Uuid;
 
@@ -79,6 +85,7 @@ const TAGS_MENU_ID: &str = "tags";
 const SETTINGS_MENU_ID: &str = "settings";
 const TASKS_TAB_INDEX: usize = 0;
 const CALENDAR_TAB_INDEX: usize = 1;
+const NOTES_TAB_INDEX: usize = 2;
 static NEXT_PENDING_TASK_ID: AtomicU64 = AtomicU64::new(1);
 const LINK_TITLE_STALE_AFTER: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const STATUS_BAR_MENU_ITEMS: [StatusBarMenuItem; 6] = [
@@ -121,7 +128,9 @@ fn stale_link_urls(task: &Task) -> Vec<String> {
             link.last_fetched
                 .as_deref()
                 .and_then(|value| value.parse::<u128>().ok())
-                .is_none_or(|fetched| now.saturating_sub(fetched) >= LINK_TITLE_STALE_AFTER.as_nanos())
+                .is_none_or(|fetched| {
+                    now.saturating_sub(fetched) >= LINK_TITLE_STALE_AFTER.as_nanos()
+                })
         })
         .map(|link| link.url.clone())
         .collect()
@@ -167,8 +176,14 @@ pub(crate) enum AppMsg {
     SetShowCalendarWeekends(bool),
     SetDefaultSnoozeTime(Time),
     SetDefaultWorkspace(Option<String>),
+    SetDefaultNoteEditing(NoteEditingMode),
     SetSpeedReaderWpm(String),
     SetMarkdownBlockPause(String),
+    SetNotesZoom(crate::notes_config::NotesZoomLevels),
+    CreateNote,
+    PatchNote(NoteChange),
+    OpenDeleteNote(String),
+    DeleteNoteConfirmed(String),
     OpenManagementDialog(ManagementDialogKind),
     OpenCreateManagement(ManagementDialogKind),
     CreateManagementSubmitted(ManagementEntityDraft),
@@ -229,7 +244,12 @@ pub(crate) enum AppMsg {
         task_id: String,
         url: String,
     },
+    OpenTaskLink {
+        url: String,
+        background: bool,
+    },
     OpenDescriptionSpeedReader(String),
+    OpenNoteSpeedReader(String),
     SnoozeTask {
         task_id: String,
         until: PrimitiveDateTime,
@@ -298,8 +318,17 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     )
     .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?;
     let default_workspace_id = runtime.block_on(service.default_workspace_id())?;
+    let default_note_editing = parse_note_editing_mode(
+        runtime
+            .block_on(service.app_setting(DEFAULT_NOTE_EDITING_SETTING))?
+            .as_deref(),
+    )
+    .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?;
     let speed_reader_settings = runtime.block_on(load_speed_reader_settings(&service))?;
+    let notes_zoom = crate::notes_config::load_notes_zoom()?;
     let mut app_state = AppState::from_snapshot(workspace.snapshot);
+    app_state.notes = runtime.block_on(service.list_notes())?;
+    app_state.notes_version = 1;
     seed_app_setting(
         &mut app_state,
         SHOW_WEEKENDS_SETTING,
@@ -314,6 +343,11 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         &mut app_state,
         DEFAULT_WORKSPACE_SETTING,
         default_workspace_id.unwrap_or_default(),
+    );
+    seed_app_setting(
+        &mut app_state,
+        DEFAULT_NOTE_EDITING_SETTING,
+        default_note_editing.setting_value().to_string(),
     );
     seed_app_setting(
         &mut app_state,
@@ -343,6 +377,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         store,
         Rc::clone(&coordinator),
         show_calendar_weekends,
+        notes_zoom,
     ))
     .initial_focus(initial_task_table_focus_request())
     .on_message(|app, message, ctx| match message {
@@ -351,8 +386,14 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         AppMsg::SetShowCalendarWeekends(show) => app.set_show_calendar_weekends(show),
         AppMsg::SetDefaultSnoozeTime(time) => app.set_default_snooze_time(time),
         AppMsg::SetDefaultWorkspace(workspace_id) => app.set_default_workspace(workspace_id),
+        AppMsg::SetDefaultNoteEditing(mode) => app.set_default_note_editing(mode),
         AppMsg::SetSpeedReaderWpm(value) => app.set_speed_reader_wpm(value, ctx),
         AppMsg::SetMarkdownBlockPause(value) => app.set_markdown_block_pause(value, ctx),
+        AppMsg::SetNotesZoom(zoom) => app.set_notes_zoom(zoom, ctx),
+        AppMsg::CreateNote => app.create_note(ctx),
+        AppMsg::PatchNote(change) => app.patch_note(change),
+        AppMsg::OpenDeleteNote(id) => app.open_delete_note_dialog(id, ctx),
+        AppMsg::DeleteNoteConfirmed(id) => app.delete_note(id, ctx),
         AppMsg::OpenManagementDialog(kind) => app.open_management_dialog(kind, ctx),
         AppMsg::OpenCreateManagement(kind) => app.open_create_management_dialog(kind, ctx),
         AppMsg::CreateManagementSubmitted(draft) => app.submit_create_management(draft, ctx),
@@ -410,9 +451,15 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             .coordinator
             .borrow_mut()
             .fetch_task_link_title(task_id, url),
+        AppMsg::OpenTaskLink { url, background } => app
+            .context
+            .coordinator
+            .borrow_mut()
+            .submit(PersistenceCommand::OpenBrowserLink { url, background }),
         AppMsg::OpenDescriptionSpeedReader(description) => {
             app.open_description_speed_reader(description, ctx)
         }
+        AppMsg::OpenNoteSpeedReader(note) => app.open_note_speed_reader(note, ctx),
         AppMsg::CloseManagementOverlay => app.close_management_overlay(ctx),
         AppMsg::CloseSnoozeDialog => app.close_snooze_dialog(ctx),
         AppMsg::CloseDeleteTaskDialog => app.close_delete_task_dialog(ctx),
@@ -515,11 +562,16 @@ struct App {
     context: AppContext,
     calendar_create_context: CalendarCreateContext,
     create_task_calendar_date: Option<Date>,
+    task_creation_active: bool,
+    task_creation_return_focus: Option<TreePath>,
     pending_calendar_task: Option<CreateTaskDraft>,
     snooze_return_focus: Option<SnoozeReturnFocus>,
     delete_return_focus: Option<TreePath>,
     complete_return_focus: Option<CompleteReturnFocus>,
     active_tab: Rc<Cell<usize>>,
+    active_focus_path: Option<TreePath>,
+    note_focus_path: Rc<RefCell<TreePath>>,
+    new_note_edit_request: Rc<RefCell<Option<NewNoteEditRequest>>>,
     pending_task_view: TaskViewChange,
     pending_task_navigation: PendingTaskNavigation,
     pending_focus_request: Option<FocusRequest>,
@@ -580,16 +632,24 @@ pub(crate) fn task_copy_payload(state: &AppState, task_id: &str) -> Option<Strin
 impl App {
     #[cfg(test)]
     fn new(store: AppStore, coordinator: Rc<RefCell<PersistenceCoordinator>>) -> Self {
-        Self::new_with_calendar_weekends(store, coordinator, true)
+        Self::new_with_calendar_weekends(
+            store,
+            coordinator,
+            true,
+            crate::notes_config::NotesZoomLevels::default(),
+        )
     }
 
     fn new_with_calendar_weekends(
         store: AppStore,
         coordinator: Rc<RefCell<PersistenceCoordinator>>,
         show_calendar_weekends: bool,
+        notes_zoom: crate::notes_config::NotesZoomLevels,
     ) -> Self {
         let context = AppContext { store, coordinator };
         let active_tab = Rc::new(Cell::new(0));
+        let note_focus_path = Rc::new(RefCell::new(TreePath::new()));
+        let new_note_edit_request = Rc::new(RefCell::new(None));
         let pending_task_view = Rc::new(RefCell::new(None));
         let pending_task_navigation = Rc::new(RefCell::new(None));
         let active_workspace_filter = Rc::new(RefCell::new(None));
@@ -616,6 +676,19 @@ impl App {
                     Rc::clone(&active_label_filter),
                 ),
             ),
+            Tab::new(
+                "Notes",
+                NotesWorkspace::new()
+                    .note_store(Rc::clone(&context.store))
+                    .focus_path_sink(Rc::clone(&note_focus_path))
+                    .new_note_edit_request(Rc::clone(&new_note_edit_request))
+                    .zoom_levels(notes_zoom)
+                    .on_zoom_change(AppMsg::SetNotesZoom)
+                    .on_speed_read(AppMsg::OpenNoteSpeedReader)
+                    .on_create(|| AppMsg::CreateNote)
+                    .on_change(AppMsg::PatchNote)
+                    .on_delete(AppMsg::OpenDeleteNote),
+            ),
         ])
         .selected(0)
         .variant(TabsVariant::OneRow)
@@ -626,14 +699,13 @@ impl App {
             active_label_filter,
             Rc::clone(&active_tab),
         );
-        let actions = Flex::row()
-            .justify(MainAlign::SpaceBetween)
-            .align(CrossAlign::Center)
+        let new_actions = Flex::row()
             .gap(1)
             .child(
-                "new",
-                Button::new("New task")
+                "new-task",
+                Button::new("Task")
                     .hotkey(keys::TASK_QUICK_CREATE.hotkey())
+                    .hotkey_label_mode(HotkeyLabelMode::Inline)
                     .on_press({
                         let active_tab = Rc::clone(&active_tab);
                         let calendar_create_context = calendar_create_context.clone();
@@ -642,6 +714,23 @@ impl App {
                                 .then(|| calendar_create_context.selected_date()),
                         }
                     }),
+                FlexItem::content(),
+            )
+            .child(
+                "new-note",
+                Button::new("Note")
+                    .hotkey(keys::NOTE_QUICK_CREATE.hotkey())
+                    .hotkey_label_mode(HotkeyLabelMode::Inline)
+                    .on_press(|| AppMsg::CreateNote),
+                FlexItem::content(),
+            );
+        let actions = Flex::row()
+            .justify(MainAlign::SpaceBetween)
+            .align(CrossAlign::Center)
+            .gap(1)
+            .child(
+                "new-actions",
+                new_actions,
                 FlexItem::content(),
             )
             .child("filters", task_filters, FlexItem::content());
@@ -690,11 +779,16 @@ impl App {
             context,
             calendar_create_context,
             create_task_calendar_date: None,
+            task_creation_active: false,
+            task_creation_return_focus: None,
             pending_calendar_task: None,
             snooze_return_focus: None,
             delete_return_focus: None,
             complete_return_focus: None,
             active_tab,
+            active_focus_path: None,
+            note_focus_path,
+            new_note_edit_request,
             pending_task_view,
             pending_task_navigation,
             pending_focus_request: None,
@@ -774,6 +868,12 @@ impl App {
             .filter(|value| workspaces.iter().any(|workspace| workspace.id == **value))
             .cloned();
         let speed_reader_settings = speed_reader_settings(state.state());
+        let default_note_editing = state
+            .state()
+            .app_setting_values
+            .get(DEFAULT_NOTE_EDITING_SETTING)
+            .and_then(|value| parse_note_editing_mode(Some(value)).ok())
+            .unwrap_or_default();
         drop(state);
         let settings = SettingsDialog::new(
             Rc::clone(&self.context.store),
@@ -781,6 +881,7 @@ impl App {
             default_time,
             &workspaces,
             default_workspace_id.as_deref(),
+            default_note_editing,
             speed_reader_settings.wpm,
             speed_reader_settings.markdown_block_pause,
         );
@@ -799,9 +900,22 @@ impl App {
     }
 
     fn open_description_speed_reader(&mut self, description: String, ctx: &mut EventCtx<AppMsg>) {
+        self.open_markdown_speed_reader("Description", description, ctx);
+    }
+
+    fn open_note_speed_reader(&mut self, note: String, ctx: &mut EventCtx<AppMsg>) {
+        self.open_markdown_speed_reader("Note", note, ctx);
+    }
+
+    fn open_markdown_speed_reader(
+        &mut self,
+        title: &str,
+        markdown: String,
+        ctx: &mut EventCtx<AppMsg>,
+    ) {
         let settings = speed_reader_settings(self.context.store.borrow().state());
         let reader = settings
-            .apply(SpeedReader::markdown(description).title("Description"))
+            .apply(SpeedReader::markdown(markdown).title(title))
             .dialog(|_| AppMsg::CloseDialog);
         let primary = self.primary_dialog();
         primary.replace_layer(AppDialog::SpeedReader(reader), ctx);
@@ -822,6 +936,13 @@ impl App {
 
     fn set_default_workspace(&mut self, workspace_id: Option<String>) {
         self.persist_app_setting(DEFAULT_WORKSPACE_SETTING, workspace_id.unwrap_or_default());
+    }
+
+    fn set_default_note_editing(&mut self, mode: NoteEditingMode) {
+        self.persist_app_setting(
+            DEFAULT_NOTE_EDITING_SETTING,
+            mode.setting_value().to_string(),
+        );
     }
 
     fn set_speed_reader_wpm(&mut self, value: String, ctx: &mut EventCtx<AppMsg>) {
@@ -849,6 +970,188 @@ impl App {
             SPEED_READER_MARKDOWN_BLOCK_PAUSE_SETTING,
             format_markdown_block_pause(delay),
         );
+    }
+
+    fn set_notes_zoom(
+        &mut self,
+        zoom: crate::notes_config::NotesZoomLevels,
+        _ctx: &mut EventCtx<AppMsg>,
+    ) {
+        self.context
+            .coordinator
+            .borrow_mut()
+            .submit(PersistenceCommand::SaveNotesZoom(zoom));
+    }
+
+    fn create_note(&mut self, ctx: &mut EventCtx<AppMsg>) {
+        self.active_tab.set(NOTES_TAB_INDEX);
+        let temporary_id = Uuid::new_v4().to_string();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+            .to_string();
+        let notes = self.context.store.borrow().state().notes.clone();
+        let removed_notes = notes
+            .iter()
+            .filter(|note| note.value.content.trim().is_empty())
+            .cloned()
+            .collect::<Vec<_>>();
+        let focused_note_id = self.active_focus_path.as_ref().and_then(|path| {
+            path.keys()
+                .last()
+                .and_then(|key| key.as_str().strip_prefix("panel-"))
+        });
+        let inherited_placeholder = removed_notes
+            .iter()
+            .find(|note| Some(note.value.id.as_str()) == focused_note_id)
+            .or_else(|| removed_notes.first())
+            .map(|note| note_placeholder(&note.value.id).to_string());
+        let notes = notes
+            .into_iter()
+            .filter(|note| !note.value.content.trim().is_empty())
+            .collect::<Vec<_>>();
+        let position = notes.first().map_or(0, |note| note.value.position - 1);
+        let temporary_note = Versioned {
+            revision: 0,
+            value: NoteView {
+                id: temporary_id.clone(),
+                position,
+                content: String::new(),
+                created_at: now.clone(),
+                updated_at: now,
+            },
+        };
+        self.context
+            .store
+            .borrow_mut()
+            .dispatch(AppEvent::NoteCreateStarted {
+                temporary_note,
+                removed_notes: removed_notes.clone(),
+                inherited_placeholder,
+            });
+        let mode = self
+            .context
+            .store
+            .borrow()
+            .state()
+            .app_setting_values
+            .get(DEFAULT_NOTE_EDITING_SETTING)
+            .and_then(|value| parse_note_editing_mode(Some(value)).ok())
+            .unwrap_or_default();
+        *self.new_note_edit_request.borrow_mut() = Some(NewNoteEditRequest {
+            id: temporary_id.clone(),
+            mode,
+        });
+        ctx.focus(notes_first_child_focus_request());
+        self.context
+            .coordinator
+            .borrow_mut()
+            .submit(PersistenceCommand::CreateNote {
+                temporary_id,
+                content: String::new(),
+                removed_notes,
+            });
+        ctx.request_layout();
+        ctx.request_redraw();
+    }
+
+    fn patch_note(&mut self, change: NoteChange) {
+        let current = self
+            .context
+            .store
+            .borrow()
+            .state()
+            .notes
+            .iter()
+            .find(|note| note.value.id == change.id)
+            .cloned();
+        let Some(current) = current.filter(|note| note.value.content != change.content) else {
+            return;
+        };
+        let mut before = current.clone();
+        before.revision = change.revision;
+        before.value.content = change.base_content;
+        if current.revision != before.revision {
+            self.context.store.borrow_mut().dispatch(AppEvent::NotePatched {
+                before: before.clone(),
+                result: Err(format!(
+                    "conflict: note changed elsewhere (expected revision {}, found {})",
+                    before.revision, current.revision
+                )),
+            });
+        }
+        let mut optimistic = before.clone();
+        optimistic.value.content = change.content.clone();
+        if current.revision == before.revision {
+            self.context
+                .store
+                .borrow_mut()
+                .dispatch(AppEvent::NotePatched {
+                    before: before.clone(),
+                    result: Ok(optimistic),
+                });
+        }
+        self.context
+            .coordinator
+            .borrow_mut()
+            .submit(PersistenceCommand::PatchNote {
+                before,
+                content: change.content,
+            });
+    }
+
+    fn open_delete_note_dialog(&mut self, id: String, ctx: &mut EventCtx<AppMsg>) {
+        if !self
+            .context
+            .store
+            .borrow()
+            .state()
+            .notes
+            .iter()
+            .any(|note| note.value.id == id)
+        {
+            return;
+        }
+        let primary = self.primary_dialog();
+        primary.replace_layer(delete_note_dialog(id), ctx);
+        primary.set_fit_content(true);
+        primary.set_active_with_context(true, ctx);
+    }
+
+    fn delete_note(&mut self, id: String, ctx: &mut EventCtx<AppMsg>) {
+        let (note, index, return_focus) = {
+            let state = self.context.store.borrow();
+            let Some(index) = state.state().notes.iter().position(|note| note.value.id == id) else {
+                drop(state);
+                self.close_dialog(ctx);
+                return;
+            };
+            let note = state.state().notes[index].clone();
+            let return_focus = state
+                .state()
+                .notes
+                .get(index + 1)
+                .or_else(|| index.checked_sub(1).and_then(|index| state.state().notes.get(index)))
+                .map(|note| note.value.id.clone());
+            (note, index, return_focus)
+        };
+        self.context
+            .store
+            .borrow_mut()
+            .dispatch(AppEvent::NoteDeleted(id));
+        self.context
+            .coordinator
+            .borrow_mut()
+            .submit(PersistenceCommand::DeleteNote { note, index });
+        self.close_dialog(ctx);
+        if let Some(return_focus) = return_focus {
+            ctx.focus(FocusRequest::Path(note_path(
+                self.note_focus_path.borrow().clone(),
+                &return_focus,
+            )));
+        }
+        ctx.request_layout();
     }
 
     fn persist_app_setting(&mut self, key: &str, value: String) {
@@ -1093,6 +1396,7 @@ impl App {
     fn open_create_task_dialog(&mut self, calendar_date: Option<Date>, ctx: &mut EventCtx<AppMsg>) {
         self.pending_calendar_task = None;
         self.create_task_calendar_date = calendar_date;
+        self.task_creation_active = true;
         let primary = self.primary_dialog();
         primary.replace_layer(create_task_dialog_host(), ctx);
         primary.set_layer_percent(60);
@@ -1147,8 +1451,8 @@ impl App {
             return;
         }
 
-        self.create_task(CreateTaskDraft { title }, None, None, ctx);
-        focus_task_table(ctx);
+        let task_id = self.create_task(CreateTaskDraft { title }, None, None, ctx);
+        self.finish_task_creation(task_id, false, ctx);
     }
 
     fn schedule_created_task(
@@ -1194,7 +1498,8 @@ impl App {
             return;
         }
 
-        self.create_task(draft, Some(until), remember_custom, ctx);
+        let task_id = self.create_task(draft, Some(until), remember_custom, ctx);
+        self.finish_task_creation(task_id, true, ctx);
     }
 
     fn recover_calendar_scheduler(&mut self, ctx: &mut EventCtx<AppMsg>) {
@@ -1209,7 +1514,7 @@ impl App {
         snoozed_until: Option<PrimitiveDateTime>,
         remember_custom: Option<PrimitiveDateTime>,
         ctx: &mut EventCtx<AppMsg>,
-    ) {
+    ) -> String {
         let mut task = Task::quick_capture(
             format!(
                 "pending-{}",
@@ -1243,9 +1548,9 @@ impl App {
             .tasks
             .iter()
             .map(|task| task.rank)
-            .max()
+            .min()
             .unwrap_or(0)
-            + 1;
+            .saturating_sub(1);
         self.context
             .store
             .borrow_mut()
@@ -1267,6 +1572,7 @@ impl App {
                 });
         }
         let task_id = task.id.clone();
+        let created_task_id = task_id.clone();
         self.context
             .coordinator
             .borrow_mut()
@@ -1286,7 +1592,32 @@ impl App {
             format!("“{task_title}” was added to backlog.")
         };
         ctx.notify(tuicore::Notification::success("Task created", notification));
+        created_task_id
+    }
+
+    fn finish_task_creation(
+        &mut self,
+        task_id: String,
+        created_from_calendar: bool,
+        ctx: &mut EventCtx<AppMsg>,
+    ) {
+        self.task_creation_active = false;
+        self.task_creation_return_focus = None;
         self.close_dialog(ctx);
+        if created_from_calendar {
+            self.active_tab.set(CALENDAR_TAB_INDEX);
+            ctx.focus(initial_calendar_focus_request());
+        } else {
+            *self.pending_task_navigation.borrow_mut() = Some(TaskNavigation {
+                target_task_id: task_id,
+                source_task_id: None,
+                view: TaskView::Backlog,
+            });
+            self.active_tab.set(TASKS_TAB_INDEX);
+            focus_task_table(ctx);
+        }
+        ctx.request_layout();
+        ctx.request_redraw();
     }
 
     fn open_delete_task_dialog(
@@ -1720,17 +2051,35 @@ impl App {
     }
 
     fn close_dialog(&mut self, ctx: &mut EventCtx<AppMsg>) {
+        let task_creation_return_focus = std::mem::take(&mut self.task_creation_return_focus);
+        let returning_from_task_creation = std::mem::take(&mut self.task_creation_active);
         self.pending_calendar_task = None;
         self.create_task_calendar_date = None;
         self.root.set_active_with_context(false, ctx);
         self.primary_dialog().set_active_with_context(false, ctx);
+        if returning_from_task_creation {
+            if let Some(path) = task_creation_return_focus {
+                ctx.focus(FocusRequest::Path(path));
+                ctx.stop_propagation();
+            }
+            ctx.request_layout();
+            ctx.request_redraw();
+        }
+    }
+
+    fn task_creation_origin(&self, route: &EventRoute) -> TreePath {
+        self.active_focus_path
+            .clone()
+            .unwrap_or_else(|| route.path.clone())
     }
 
     fn close_snooze_dialog(&mut self, ctx: &mut EventCtx<AppMsg>) {
         if self.pending_calendar_task.is_some() {
             self.snooze_return_focus = None;
             self.close_dialog(ctx);
-            ctx.focus(initial_calendar_focus_request());
+            if self.active_tab.get() == CALENDAR_TAB_INDEX {
+                ctx.focus(initial_calendar_focus_request());
+            }
             return;
         }
         let return_focus = self.snooze_return_focus.take();
@@ -1836,7 +2185,7 @@ impl TuiNode<AppMsg> for App {
             .path
             .keys()
             .last()
-            .is_some_and(|key| key.as_str() == "new")
+            .is_some_and(|key| matches!(key.as_str(), "new-task" | "new-note"))
             && detail_escape(event)
         {
             ctx.focus(app_tabs_focus_request());
@@ -1844,10 +2193,40 @@ impl TuiNode<AppMsg> for App {
             ctx.request_redraw();
             return EventOutcome::Handled;
         }
-        self.root.dispatch_event(route, event, ctx)
+        let outcome = self.root.dispatch_event(route, event, ctx);
+        if ctx
+            .messages()
+            .iter()
+            .any(|message| matches!(message, AppMsg::OpenCreateTask { .. }))
+        {
+            self.task_creation_return_focus = Some(self.task_creation_origin(route));
+            return outcome;
+        }
+        if outcome.handled() {
+            return outcome;
+        }
+        let task_create_hotkey = keys::TASK_QUICK_CREATE.matches(event)
+            || matches!(
+                event,
+                TuiEvent::Hotkey(HotkeyEvent::Commit(sequence))
+                    if sequence == &keys::TASK_QUICK_CREATE.hotkey()
+            );
+        if task_create_hotkey {
+            self.task_creation_return_focus = Some(self.task_creation_origin(route));
+            ctx.emit(AppMsg::OpenCreateTask {
+                calendar_date: (self.active_tab.get() == CALENDAR_TAB_INDEX)
+                    .then(|| self.calendar_create_context.selected_date()),
+            });
+            ctx.stop_propagation();
+            return EventOutcome::Handled;
+        }
+        outcome
     }
 
     fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<AppMsg>) {
+        if focused {
+            self.active_focus_path = Some(target.path.clone());
+        }
         self.root.dispatch_focus(target, focused, ctx);
     }
 
@@ -2168,6 +2547,13 @@ fn app_tabs_focus_request() -> FocusRequest {
         ]),
         id: FocusId::new("tabs"),
     }
+}
+
+fn notes_first_child_focus_request() -> FocusRequest {
+    let FocusRequest::TargetAt { path, id } = app_tabs_focus_request() else {
+        unreachable!("app tabs focus request must target the tabs control");
+    };
+    FocusRequest::FirstChildOf { path, id }
 }
 
 fn initial_calendar_focus_request() -> FocusRequest {
@@ -2503,6 +2889,10 @@ impl TaskFilterControls {
         }
     }
 
+    fn is_visible(&self) -> bool {
+        self.active_tab.get() != NOTES_TAB_INDEX
+    }
+
     fn finish_event(
         &self,
         outcome: EventOutcome,
@@ -2537,19 +2927,31 @@ impl TaskFilterControls {
 
 impl TuiNode<AppMsg> for TaskFilterControls {
     fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
-        self.controls.measure(proposal)
+        if self.is_visible() {
+            self.controls.measure(proposal)
+        } else {
+            LayoutSizeHint::fixed(0, 0)
+        }
     }
 
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
+        if !self.is_visible() {
+            return LayoutResult::new(area);
+        }
         self.sync_options();
         self.controls.layout(area, ctx)
     }
 
     fn render<'a>(&'a self, frame: &mut Frame, area: Rect, ctx: &mut RenderCtx<'a>) {
-        self.controls.render(frame, area, ctx);
+        if self.is_visible() {
+            self.controls.render(frame, area, ctx);
+        }
     }
 
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<AppMsg>) -> EventOutcome {
+        if !self.is_visible() {
+            return EventOutcome::Ignored;
+        }
         let outcome = self.controls.event(event, ctx);
         self.finish_event(outcome, event, ctx)
     }
@@ -2560,12 +2962,17 @@ impl TuiNode<AppMsg> for TaskFilterControls {
         event: &TuiEvent,
         ctx: &mut EventCtx<AppMsg>,
     ) -> EventOutcome {
+        if !self.is_visible() {
+            return EventOutcome::Ignored;
+        }
         let outcome = self.controls.dispatch_event(route, event, ctx);
         self.finish_event(outcome, event, ctx)
     }
 
     fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<AppMsg>) {
-        self.controls.dispatch_focus(target, focused, ctx);
+        if self.is_visible() {
+            self.controls.dispatch_focus(target, focused, ctx);
+        }
     }
 
     fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
@@ -2773,8 +3180,7 @@ impl TaskWorkspace {
         self.label_filter.clear();
         self.active_label_filter.borrow_mut().clear();
         if let Some(source_task_id) = navigation.source_task_id {
-            self.detail_mut()
-                .queue_issue_link_highlight(source_task_id);
+            self.detail_mut().queue_issue_link_highlight(source_task_id);
         }
         self.context
             .store
@@ -3227,9 +3633,7 @@ impl TaskWorkspace {
             return None;
         }
         let task_id = self.visible_selection.borrow().clone()?;
-        if keys::TASK_TOGGLE_PROGRESS.matches(event)
-            && self.can_toggle_task_progress(&task_id)
-        {
+        if keys::TASK_TOGGLE_PROGRESS.matches(event) && self.can_toggle_task_progress(&task_id) {
             ctx.emit(AppMsg::ToggleTaskProgress(task_id));
             ctx.stop_propagation();
             return Some(EventOutcome::Handled);

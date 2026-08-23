@@ -8,6 +8,7 @@ mod domain;
 mod link_icons;
 mod link_title;
 mod mcp;
+mod notes_config;
 mod paths;
 mod persistence_coordinator;
 pub mod service;

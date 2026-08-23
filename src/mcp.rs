@@ -13,13 +13,13 @@ use serde::{Deserialize, Serialize};
 use crate::{
     domain::{TaskPatch, TaskState},
     service::{
-        ChecklistItemInput, PersonInput, PersonView, ServiceError, TagInput, TagView, TaskCreate,
-        TaskDetailsView, TaskRelationInput, TaskUpdate, TaskView, TuidoService, Versioned,
-        WorkspaceFilter, WorkspaceGraph, WorkspaceInput, WorkspaceView,
+        ChecklistItemInput, NoteInput, NoteView, PersonInput, PersonView, ServiceError, TagInput,
+        TagView, TaskCreate, TaskDetailsView, TaskRelationInput, TaskUpdate, TaskView,
+        TuidoService, Versioned, WorkspaceFilter, WorkspaceGraph, WorkspaceInput, WorkspaceView,
     },
 };
 
-const MCP_INSTRUCTIONS: &str = "Read and mutate Tuido tasks, task checklists, people, spaces, and tags. Task IDs use SPACE_KEY-number, or number when no space was set at creation. Replace checklists as complete ordered trees rather than issuing granular item actions. Treat task state as user-facing Status, not Type or Workflow. Task people are people involved besides the space owner; never describe them as assignees or owners. Revisions are internal optimistic-concurrency tokens: use the latest entity revision as expected_revision for mutations, but omit revisions from user-facing task tables and summaries unless the user asks for them.";
+const MCP_INSTRUCTIONS: &str = "Read and mutate Tuido tasks, task checklists, notes, people, spaces, and tags. Task IDs use SPACE_KEY-number, or number when no space was set at creation. Notes are ordered and new notes are inserted at the top. Replace checklists as complete ordered trees rather than issuing granular item actions. Treat task state as user-facing Status, not Type or Workflow. Task people are people involved besides the space owner; never describe them as assignees or owners. Revisions are internal optimistic-concurrency tokens: use the latest entity revision as expected_revision for mutations, but omit revisions from user-facing task tables and summaries unless the user asks for them.";
 
 #[derive(Clone)]
 struct McpServer {
@@ -39,6 +39,18 @@ impl McpServer {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct Id {
     id: String,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+struct NoteUpdate {
+    id: String,
+    #[schemars(schema_with = "crate::service::revision_schema")]
+    expected_revision: u64,
+    #[serde(default)]
+    content: String,
+}
+#[derive(Debug, Serialize, JsonSchema)]
+struct NoteList {
+    notes: Vec<Versioned<NoteView>>,
 }
 #[derive(Debug, Deserialize, JsonSchema)]
 struct SpaceKey {
@@ -183,6 +195,64 @@ impl McpServer {
             .get_task_details(&v.id)
             .await
             .map(Json)
+            .map_err(mcp_error)
+    }
+    #[tool(description = "List notes in their displayed order")]
+    async fn list_notes(&self) -> Result<Json<NoteList>, String> {
+        self.service
+            .list_notes()
+            .await
+            .map(|notes| Json(NoteList { notes }))
+            .map_err(mcp_error)
+    }
+    #[tool(description = "Get one note by id with its current revision")]
+    async fn get_note(
+        &self,
+        Parameters(v): Parameters<Id>,
+    ) -> Result<Json<Versioned<NoteView>>, String> {
+        self.service
+            .get_note(&v.id)
+            .await
+            .map(Json)
+            .map_err(mcp_error)
+    }
+    #[tool(description = "Create a new note at the top of the note list")]
+    async fn create_note(
+        &self,
+        Parameters(v): Parameters<NoteInput>,
+    ) -> Result<Json<Versioned<NoteView>>, String> {
+        self.service
+            .create_note(v)
+            .await
+            .map(Json)
+            .map_err(mcp_error)
+    }
+    #[tool(description = "Replace a note's content conditionally using its expected revision")]
+    async fn update_note(
+        &self,
+        Parameters(v): Parameters<NoteUpdate>,
+    ) -> Result<Json<Versioned<NoteView>>, String> {
+        self.service
+            .update_note(&v.id, v.expected_revision, NoteInput { content: v.content })
+            .await
+            .map(Json)
+            .map_err(mcp_error)
+    }
+    #[tool(description = "Delete a note conditionally by expected revision")]
+    async fn delete_note(
+        &self,
+        Parameters(v): Parameters<Expected>,
+    ) -> Result<Json<DeletionResult>, String> {
+        self.service
+            .delete_note(&v.id, v.expected_revision)
+            .await
+            .map(|_| {
+                Json(DeletionResult {
+                    deleted: true,
+                    entity: "note",
+                    id: v.id,
+                })
+            })
             .map_err(mcp_error)
     }
     #[tool(
@@ -753,6 +823,60 @@ mod tests {
         assert!(tools.contains("complete ordered checklist tree"));
         assert!(tools.contains("set_task_relations"));
         assert!(tools.contains("Links are bidirectional"));
+    }
+
+    #[test]
+    fn note_tools_cover_create_list_get_update_and_delete() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let service = TuidoService::connect_url("sqlite::memory:").await.unwrap();
+            let server = McpServer::new(service);
+
+            let created = server
+                .create_note(Parameters(NoteInput {
+                    content: "captured".into(),
+                }))
+                .await
+                .unwrap()
+                .0;
+            assert_eq!(server.list_notes().await.unwrap().0.notes.len(), 1);
+            assert_eq!(
+                server
+                    .get_note(Parameters(Id {
+                        id: created.value.id.clone(),
+                    }))
+                    .await
+                    .unwrap()
+                    .0
+                    .value
+                    .content,
+                "captured"
+            );
+
+            let updated = server
+                .update_note(Parameters(NoteUpdate {
+                    id: created.value.id.clone(),
+                    expected_revision: created.revision,
+                    content: "edited".into(),
+                }))
+                .await
+                .unwrap()
+                .0;
+            assert_eq!(updated.value.content, "edited");
+            let deleted = server
+                .delete_note(Parameters(Expected {
+                    id: created.value.id,
+                    expected_revision: updated.revision,
+                }))
+                .await
+                .unwrap()
+                .0;
+            assert!(deleted.deleted);
+            assert!(server.list_notes().await.unwrap().0.notes.is_empty());
+        });
     }
 
     #[test]
@@ -1399,7 +1523,13 @@ mod tests {
                 .await
                 .unwrap();
 
-            let tasks = server.service.consistent_workspace().await.unwrap().snapshot.tasks;
+            let tasks = server
+                .service
+                .consistent_workspace()
+                .await
+                .unwrap()
+                .snapshot
+                .tasks;
             let rank = |id: &str| {
                 tasks
                     .iter()

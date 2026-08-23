@@ -288,6 +288,24 @@ fn task_search_hides_detail_and_clearing_search_restores_it() {
 }
 
 #[test]
+fn task_search_matches_task_titles() {
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![task_with("task-1", "Support screenshots", TaskState::Todo)],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut workspace = TaskWorkspace::new(context);
+
+    workspace.table_mut().set_search_query("supp");
+
+    assert_eq!(
+        workspace.table().highlighted_id().as_deref(),
+        Some("task-1")
+    );
+}
+
+#[test]
 fn task_labels_with_no_matches_use_filtered_empty_message() {
     let mut task = task_with("task-1", "API task", TaskState::Todo);
     task.tag_ids = vec!["api".into()];
@@ -663,7 +681,10 @@ fn externally_started_task_opens_tasks_active_view_and_selects_it() {
     started.rank = 0;
     store.borrow_mut().dispatch(AppEvent::WorkspaceRefreshed {
         snapshot: WorkspaceSnapshot {
-            tasks: vec![task_with("active", "Existing active task", TaskState::Todo), started],
+            tasks: vec![
+                task_with("active", "Existing active task", TaskState::Todo),
+                started,
+            ],
             people: Vec::new(),
             workspaces: Vec::new(),
             tags: Vec::new(),
@@ -684,7 +705,10 @@ fn externally_started_task_opens_tasks_active_view_and_selects_it() {
     app.layout(area, &mut LayoutCtx::new());
 
     assert_eq!(app.active_tab.get(), TASKS_TAB_INDEX);
-    assert_eq!(store.borrow().state().selected_task_id.as_deref(), Some("started"));
+    assert_eq!(
+        store.borrow().state().selected_task_id.as_deref(),
+        Some("started")
+    );
     assert_eq!(
         app.take_pending_focus_request(),
         Some(initial_task_table_focus_request())
@@ -834,7 +858,10 @@ fn ctrl_x_from_task_detail_opens_delete_except_under_links() {
     );
     assert!(stopped_ctx.messages().is_empty());
 
-    for links in [Vec::new(), vec![crate::domain::TaskLink::new("https://example.com".into())]] {
+    for links in [
+        Vec::new(),
+        vec![crate::domain::TaskLink::new("https://example.com".into())],
+    ] {
         let populated = !links.is_empty();
         let mut task = test_task();
         task.links = links;
@@ -1546,6 +1573,54 @@ fn task_reordering_and_move_to_edge_actions_notify() {
             "Task moved",
             "“Second” moved to the top."
         )]
+    );
+}
+
+#[test]
+fn filtered_task_reorder_uses_adjacent_visible_task_as_anchor() {
+    let tasks = vec![
+        task_with_rank("one", "Match one", TaskState::Todo, 1),
+        task_with_rank("two", "Hidden two", TaskState::Todo, 2),
+        task_with_rank("three", "Match three", TaskState::Todo, 3),
+        task_with_rank("four", "Hidden four", TaskState::Todo, 4),
+        task_with_rank("five", "Match five", TaskState::Todo, 5),
+    ];
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks,
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut workspace = TaskWorkspace::new(context);
+    workspace.table_mut().set_search_query("match");
+    workspace.table_mut().highlight_id(&"five".to_string());
+    workspace.task_list_mut().take_events();
+    let mut ctx = EventCtx::default();
+
+    for key in [
+        KeyEvent {
+            code: Key::Char('m'),
+            modifiers: KeyModifiers::CONTROL,
+        },
+        KeyEvent::from(Key::Up),
+        KeyEvent::from(Key::Enter),
+    ] {
+        workspace
+            .task_list_mut()
+            .event(&TuiEvent::Key(key), &mut ctx);
+    }
+
+    assert_eq!(
+        workspace.task_list_mut().take_events(),
+        vec![ListControlEvent::Reordered {
+            row_ids: vec![
+                "one".to_string(),
+                "two".to_string(),
+                "five".to_string(),
+                "three".to_string(),
+                "four".to_string(),
+            ],
+        }]
     );
 }
 
@@ -2450,13 +2525,6 @@ fn calendar_title_submission_opens_scheduler_without_creating_task() {
         .expect("task table should be focusable")
         .path
         .clone();
-    let new_path = layout
-        .focus_targets()
-        .iter()
-        .find(|target| target.path.keys().iter().any(|part| part.as_str() == "new"))
-        .expect("new button should be focusable")
-        .path
-        .clone();
     app.dispatch_event(
         &EventRoute::new(task_path),
         &TuiEvent::Key(Key::Char(']').into()),
@@ -2472,17 +2540,18 @@ fn calendar_title_submission_opens_scheduler_without_creating_task() {
         .path
         .clone();
     app.dispatch_event(
-        &EventRoute::new(calendar_path),
+        &EventRoute::new(calendar_path.clone()),
         &TuiEvent::Key(Key::Right.into()),
         &mut EventCtx::default(),
     );
     let selected_date = app.calendar_create_context.selected_date();
     let mut open_ctx = EventCtx::default();
-    app.dispatch_event(
-        &EventRoute::new(new_path),
-        &TuiEvent::Key(Key::Enter.into()),
+    let outcome = app.dispatch_event(
+        &EventRoute::new(calendar_path),
+        &TuiEvent::Hotkey(HotkeyEvent::Commit(keys::TASK_QUICK_CREATE.hotkey())),
         &mut open_ctx,
     );
+    assert!(outcome.handled());
     let calendar_date = match open_ctx.messages() {
         [AppMsg::OpenCreateTask { calendar_date }] => *calendar_date,
         _ => panic!("new button should open task creation"),
@@ -2599,7 +2668,7 @@ fn calendar_schedule_rejects_non_future_times_then_creates_exact_task_once() {
     assert_eq!(task.state, TaskState::Snoozed);
     assert_eq!(task.snoozed_until, Some(future));
     assert_eq!(task.workspace_id.as_deref(), Some("workspace-1"));
-    assert_eq!(task.rank, 8);
+    assert_eq!(task.rank, 6);
     assert_eq!(state.state().last_custom_snooze, Some(future));
     drop(state);
     assert_eq!(
@@ -2612,6 +2681,11 @@ fn calendar_schedule_rejects_non_future_times_then_creates_exact_task_once() {
     assert!(!app.primary_dialog().is_active());
     assert!(app.pending_calendar_task.is_none());
     assert!(app.create_task_calendar_date.is_none());
+    assert_eq!(app.active_tab.get(), CALENDAR_TAB_INDEX);
+    assert_eq!(
+        success_ctx.focus_request(),
+        Some(&initial_calendar_focus_request())
+    );
     assert!(coordinator.borrow().has_pending());
 
     app.schedule_created_task_at(future, Some(future), now, &mut EventCtx::default());
@@ -2941,13 +3015,7 @@ fn ctrl_t_toggles_task_progress_when_focused_inside_detail_view() {
     let title_input = layout
         .focus_targets()
         .iter()
-        .find(|target| {
-            target
-                .path
-                .keys()
-                .iter()
-                .any(|key| key.as_str() == "title")
-        })
+        .find(|target| target.path.keys().iter().any(|key| key.as_str() == "title"))
         .expect("title input should be focusable");
 
     workspace.dispatch_focus(title_input, true, &mut FocusCtx::default());

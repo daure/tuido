@@ -30,6 +30,26 @@ fn test_task() -> Task {
     }
 }
 
+fn test_note(id: &str, position: i64) -> Versioned<NoteView> {
+    Versioned {
+        revision: 1,
+        value: NoteView {
+            id: id.into(),
+            position,
+            content: String::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        },
+    }
+}
+
+fn set_notes(app: &mut App, notes: Vec<Versioned<NoteView>>) {
+    app.context
+        .store
+        .borrow_mut()
+        .dispatch(AppEvent::NotesLoaded(notes));
+}
+
 #[test]
 fn status_bar_enables_weather_and_exposes_forecast_menu() {
     assert!(weather_provider_config().is_enabled());
@@ -125,6 +145,24 @@ fn settings_changes_update_app_state_before_persistence_completes() {
             .get(SPEED_READER_MARKDOWN_BLOCK_PAUSE_SETTING),
         Some(&"1250".to_string())
     );
+    assert!(ctx.notifications().is_empty());
+}
+
+#[test]
+fn notes_zoom_saves_in_background_without_notification() {
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: Vec::new(),
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let coordinator = Rc::clone(&context.coordinator);
+    let mut app = App::new(context.store, context.coordinator);
+    let mut ctx = EventCtx::default();
+
+    app.set_notes_zoom(crate::notes_config::NotesZoomLevels::default(), &mut ctx);
+
+    assert!(coordinator.borrow().has_pending());
     assert!(ctx.notifications().is_empty());
 }
 
@@ -256,6 +294,7 @@ fn latest_speed_reader_save_failures_are_visible_and_restore_confirmed_values() 
         default_snooze_time(),
         &[],
         None,
+        NoteEditingMode::Inline,
         500,
         Duration::from_millis(1_250),
     );
@@ -286,8 +325,8 @@ fn latest_speed_reader_save_failures_are_visible_and_restore_confirmed_values() 
             });
     }
 
-    dialog.layout(Rect::new(0, 0, 200, 12), &mut LayoutCtx::new());
-    let text = rendered_text(&dialog, Rect::new(0, 0, 200, 12));
+    dialog.layout(Rect::new(0, 0, 200, 16), &mut LayoutCtx::new());
+    let text = rendered_text(&dialog, Rect::new(0, 0, 200, 16));
     let state = store.borrow();
     assert_eq!(
         state.state().app_setting_values[SPEED_READER_WPM_SETTING],
@@ -632,6 +671,569 @@ fn tracked_tabs_apply_programmatic_selection_requests() {
 }
 
 #[test]
+fn empty_notes_tab_renders_seasonal_empty_state() {
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: Vec::new(),
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(context.store, context.coordinator);
+    app.active_tab.set(2);
+    let area = Rect::new(0, 0, 120, 30);
+
+    app.layout(area, &mut LayoutCtx::new());
+    let text = rendered_text(&app, area);
+
+    assert!(text.contains("Notes"));
+    assert!(!text.contains("Note 1"));
+    assert!(text.contains("Note |N|"));
+    assert!(text.contains("No notes captured yet"));
+    assert!(!text.contains("󰲋 Space"));
+    assert!(!text.contains(" Tags"));
+}
+
+#[test]
+fn notes_navigation_uses_the_full_app_focus_path() {
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: Vec::new(),
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(context.store, context.coordinator);
+    app.active_tab.set(2);
+    set_notes(&mut app, vec![test_note("note-0", 0), test_note("note-1", 1)]);
+    let mut layout = LayoutCtx::new();
+    app.layout(Rect::new(0, 0, 120, 30), &mut layout);
+    let panel = layout
+        .focus_targets()
+        .iter()
+        .find(|target| {
+            target
+                .path
+                .keys()
+                .last()
+                .is_some_and(|key| key.as_str() == "panel-note-0")
+        })
+        .expect("first note panel should be focusable")
+        .clone();
+    let expected = panel
+        .path
+        .parent()
+        .expect("note panel should have a parent path")
+        .child(ChildKey::new("panel-note-1"));
+    let mut focus = FocusManager::new();
+    let transition = focus
+        .apply_request(
+            &FocusRequest::TargetAt {
+                path: panel.path.clone(),
+                id: panel.id.clone(),
+            },
+            layout.focus_targets(),
+        )
+        .expect("first note panel should accept focus");
+    let mut dispatcher = TreeDispatcher::new();
+    dispatcher.dispatch_focus(&mut app, transition, AnimationSettings::default());
+
+    let effects = dispatcher.dispatch_event(
+        &mut app,
+        &EventRoute::new(focus.current_path()),
+        &TuiEvent::Key(KeyEvent::from(Key::Char('l'))),
+        AnimationSettings::default(),
+    );
+
+    assert_eq!(effects.focus_request, Some(FocusRequest::Path(expected)));
+}
+
+#[test]
+fn stale_note_draft_after_refresh_surfaces_conflict_without_overwriting_newer_note() {
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: Vec::new(),
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(context.store, context.coordinator);
+    let mut newer = test_note("note-0", 0);
+    newer.revision = 2;
+    newer.value.content = "newer remote content".into();
+    set_notes(&mut app, vec![newer]);
+
+    app.patch_note(NoteChange {
+        id: "note-0".into(),
+        revision: 1,
+        base_content: String::new(),
+        content: "draft before quit".into(),
+    });
+
+    let state = app.context.store.borrow();
+    assert_eq!(state.state().notes[0].value.content, "newer remote content");
+    assert!(state
+        .state()
+        .note_error
+        .as_deref()
+        .is_some_and(|error| error.contains("conflict")));
+}
+
+#[test]
+fn new_note_from_tasks_switches_to_notes_and_focuses_notes_tab_content() {
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: Vec::new(),
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(context.store, context.coordinator);
+    app.layout(Rect::new(0, 0, 120, 30), &mut LayoutCtx::new());
+    let mut ctx = EventCtx::default();
+
+    app.create_note(&mut ctx);
+
+    let state = app.context.store.borrow();
+    assert_eq!(app.active_tab.get(), NOTES_TAB_INDEX);
+    assert_eq!(state.state().notes.len(), 1);
+    assert_eq!(state.state().notes[0].value.position, 0);
+    assert!(Uuid::parse_str(&state.state().notes[0].value.id).is_ok());
+    let note_id = state.state().notes[0].value.id.clone();
+    assert_eq!(
+        ctx.focus_request(),
+        Some(&notes_first_child_focus_request())
+    );
+    drop(state);
+    let mut layout = LayoutCtx::new();
+    app.layout(Rect::new(0, 0, 120, 30), &mut layout);
+    let mut focus = FocusManager::new();
+    let transition = focus
+        .apply_request(ctx.focus_request().expect("new note should request focus"), layout.focus_targets())
+        .expect("notes tab should have a focusable note");
+    let panel = format!("panel-{note_id}");
+
+    assert_eq!(
+        transition
+            .current
+            .as_ref()
+            .and_then(|target| target.path.keys().last())
+            .map(ChildKey::as_str),
+        Some(panel.as_str())
+    );
+}
+
+#[test]
+fn creating_a_note_enters_inline_editing() {
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: Vec::new(),
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(context.store, context.coordinator);
+    let area = Rect::new(0, 0, 120, 30);
+    app.layout(area, &mut LayoutCtx::new());
+    let mut create = EventCtx::default();
+    app.create_note(&mut create);
+    let pending_id = app.context.store.borrow().state().notes[0].value.id.clone();
+    let mut layout = LayoutCtx::new();
+    app.layout(area, &mut layout);
+    let target = layout
+        .focus_targets()
+        .iter()
+        .find(|target| target.path.keys().last().is_some_and(|key| key.as_str() == format!("panel-{pending_id}")))
+        .expect("pending note should be focusable")
+        .clone();
+    assert!(target.focused_events_before_global_hotkeys);
+    let route = EventRoute::new(target.path.clone());
+    let mut focus = FocusManager::new();
+    let transition = focus
+        .apply_request(
+            &FocusRequest::TargetAt {
+                path: target.path.clone(),
+                id: target.id.clone(),
+            },
+            layout.focus_targets(),
+        )
+        .expect("pending note should accept focus");
+    let mut dispatcher = TreeDispatcher::new();
+
+    dispatcher.dispatch_focus(&mut app, transition, AnimationSettings::default());
+    dispatcher.dispatch_event(
+        &mut app,
+        &route,
+        &TuiEvent::Key(KeyEvent::from(Key::Char('x'))),
+        AnimationSettings::default(),
+    );
+    let effects = dispatcher.dispatch_event(
+        &mut app,
+        &route,
+        &TuiEvent::Key(KeyEvent::from(Key::Esc)),
+        AnimationSettings::default(),
+    );
+
+    assert!(matches!(
+        effects.messages.as_slice(),
+        [AppMsg::PatchNote(NoteChange { id, content, .. })] if id == &pending_id && content == "x"
+    ));
+}
+
+#[test]
+fn creating_a_note_opens_the_external_editor_when_configured() {
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: Vec::new(),
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(context.store, context.coordinator);
+    app.context
+        .store
+        .borrow_mut()
+        .dispatch(AppEvent::AppSettingChangeRequested {
+            key: DEFAULT_NOTE_EDITING_SETTING.into(),
+            value: NoteEditingMode::External.setting_value().into(),
+            generation: 1,
+        });
+    let area = Rect::new(0, 0, 120, 30);
+    app.layout(area, &mut LayoutCtx::new());
+    app.create_note(&mut EventCtx::default());
+    let pending_id = app.context.store.borrow().state().notes[0].value.id.clone();
+    let mut layout = LayoutCtx::new();
+    app.layout(area, &mut layout);
+    let target = layout
+        .focus_targets()
+        .iter()
+        .find(|target| target.path.keys().last().is_some_and(|key| key.as_str() == format!("panel-{pending_id}")))
+        .expect("pending note should be focusable")
+        .clone();
+    let mut focus = FocusManager::new();
+    let transition = focus
+        .apply_request(
+            &FocusRequest::TargetAt {
+                path: target.path.clone(),
+                id: target.id.clone(),
+            },
+            layout.focus_targets(),
+        )
+        .expect("pending note should accept focus");
+    let mut dispatcher = TreeDispatcher::new();
+
+    let effects = dispatcher.dispatch_focus(&mut app, transition, AnimationSettings::default());
+
+    assert_eq!(
+        effects
+            .external_editor
+            .as_ref()
+            .and_then(|request| request.file_extension.as_deref()),
+        Some("md")
+    );
+}
+
+#[test]
+fn note_editing_keeps_new_task_hotkey_as_text() {
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: Vec::new(),
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(context.store, context.coordinator);
+    app.active_tab.set(NOTES_TAB_INDEX);
+    set_notes(&mut app, vec![test_note("note-0", 0)]);
+    let area = Rect::new(0, 0, 120, 30);
+    let mut layout = LayoutCtx::new();
+    app.layout(area, &mut layout);
+    let target = layout
+        .focus_targets()
+        .iter()
+        .find(|target| target.path.keys().last().is_some_and(|key| key.as_str() == "panel-note-0"))
+        .expect("note should be focusable")
+        .clone();
+    let route = EventRoute::new(target.path.clone());
+    let mut focus = FocusManager::new();
+    let transition = focus
+        .apply_request(
+            &FocusRequest::TargetAt {
+                path: target.path,
+                id: target.id,
+            },
+            layout.focus_targets(),
+        )
+        .expect("note should accept focus");
+    let mut dispatcher = TreeDispatcher::new();
+    dispatcher.dispatch_focus(&mut app, transition, AnimationSettings::default());
+    dispatcher.dispatch_event(
+        &mut app,
+        &route,
+        &TuiEvent::Key(KeyEvent::from(Key::Enter)),
+        AnimationSettings::default(),
+    );
+
+    let effects = dispatcher.dispatch_event(
+        &mut app,
+        &route,
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('K'),
+            modifiers: KeyModifiers::SHIFT,
+        }),
+        AnimationSettings::default(),
+    );
+
+    assert!(!effects
+        .messages
+        .iter()
+        .any(|message| matches!(message, AppMsg::OpenCreateTask { .. })));
+}
+
+#[test]
+fn new_note_removes_empty_notes_before_background_create_completes() {
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: Vec::new(),
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(context.store, context.coordinator);
+    let mut empty = test_note("empty", 0);
+    empty.value.content = "\n\t ".into();
+    let mut populated = test_note("populated", 1);
+    populated.value.content = "Keep this".into();
+    set_notes(&mut app, vec![empty, populated]);
+
+    app.create_note(&mut EventCtx::default());
+
+    let state = app.context.store.borrow();
+    assert_eq!(state.state().notes.len(), 2);
+    assert_eq!(state.state().notes_version, 2);
+    assert!(Uuid::parse_str(&state.state().notes[0].value.id).is_ok());
+    assert_eq!(state.state().notes[1].value.id, "populated");
+    assert_eq!(state.state().notes[1].value.position, 1);
+    assert_eq!(
+        state
+            .state()
+            .note_placeholders
+            .get(&state.state().notes[0].value.id),
+        Some(&note_placeholder("empty").to_string())
+    );
+}
+
+#[test]
+fn new_note_inherits_the_selected_empty_note_placeholder() {
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: Vec::new(),
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(context.store, context.coordinator);
+    set_notes(
+        &mut app,
+        vec![test_note("first", 0), test_note("selected", 1)],
+    );
+    app.active_focus_path = Some(note_path(TreePath::new(), "selected"));
+
+    app.create_note(&mut EventCtx::default());
+
+    let state = app.context.store.borrow();
+    assert_eq!(
+        state
+            .state()
+            .note_placeholders
+            .get(&state.state().notes[0].value.id),
+        Some(&note_placeholder("selected").to_string())
+    );
+}
+
+#[test]
+fn task_creation_from_notes_restores_cancel_focus_and_submission_focuses_tasks() {
+    let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+        tasks: Vec::new(),
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(context.store, context.coordinator);
+    app.active_tab.set(NOTES_TAB_INDEX);
+    set_notes(&mut app, vec![test_note("note-0", 0)]);
+    let mut layout = LayoutCtx::new();
+    app.layout(Rect::new(0, 0, 120, 30), &mut layout);
+    let note = layout
+        .focus_targets()
+        .iter()
+        .find(|target| {
+            target
+                .path
+                .keys()
+                .last()
+                .is_some_and(|key| key.as_str() == "panel-note-0")
+        })
+        .expect("note panel should be focusable")
+        .clone();
+    let mut focus = FocusManager::new();
+    let transition = focus
+        .apply_request(
+            &FocusRequest::TargetAt {
+                path: note.path.clone(),
+                id: note.id.clone(),
+            },
+            layout.focus_targets(),
+        )
+        .expect("note panel should accept focus");
+    let mut dispatcher = TreeDispatcher::new();
+    dispatcher.dispatch_focus(&mut app, transition, AnimationSettings::default());
+    let route = EventRoute::new(focus.current_path());
+
+    let open = dispatcher.dispatch_event(
+        &mut app,
+        &route,
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('k'),
+            modifiers: KeyModifiers::SHIFT,
+        }),
+        AnimationSettings::default(),
+    );
+    assert!(open.outcome.handled());
+    assert!(matches!(
+        open.messages.as_slice(),
+        [AppMsg::OpenCreateTask {
+            calendar_date: None
+        }]
+    ));
+    app.open_create_task_dialog(None, &mut EventCtx::default());
+    let mut cancel = EventCtx::default();
+    app.close_dialog(&mut cancel);
+
+    assert_eq!(app.active_tab.get(), NOTES_TAB_INDEX);
+    assert_eq!(
+        cancel.focus_request(),
+        Some(&FocusRequest::Path(note.path.clone()))
+    );
+
+    let reopen = dispatcher.dispatch_event(
+        &mut app,
+        &route,
+        &TuiEvent::Hotkey(HotkeyEvent::Commit(keys::TASK_QUICK_CREATE.hotkey())),
+        AnimationSettings::default(),
+    );
+    assert!(reopen.outcome.handled());
+    app.open_create_task_dialog(None, &mut EventCtx::default());
+    let mut submit = EventCtx::default();
+    app.submit_create_task(
+        CreateTaskDraft {
+            title: "Task from notes".into(),
+        },
+        &mut submit,
+    );
+
+    assert_eq!(app.active_tab.get(), TASKS_TAB_INDEX);
+    let task = store
+        .borrow()
+        .state()
+        .tasks
+        .first()
+        .expect("task should be created")
+        .clone();
+    assert_eq!(task.title, "Task from notes");
+    assert_eq!(task.rank, -1);
+    assert_eq!(
+        app.pending_task_navigation.borrow().as_ref(),
+        Some(&TaskNavigation {
+            target_task_id: task.id.clone(),
+            source_task_id: None,
+            view: TaskView::Backlog,
+        })
+    );
+    assert_eq!(
+        submit.focus_request(),
+        Some(&initial_task_table_focus_request())
+    );
+
+    app.layout(Rect::new(0, 0, 120, 30), &mut LayoutCtx::new());
+
+    assert!(app.pending_task_navigation.borrow().is_none());
+    assert_eq!(
+        store.borrow().state().selected_task_id.as_deref(),
+        Some(task.id.as_str())
+    );
+    assert!(rendered_text(&app, Rect::new(0, 0, 120, 30)).contains("Backlog"));
+}
+
+#[test]
+fn deleting_a_note_opens_the_standard_confirmation_dialog() {
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: Vec::new(),
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(context.store, context.coordinator);
+    set_notes(&mut app, vec![test_note("note-0", 0)]);
+
+    app.open_delete_note_dialog("note-0".into(), &mut EventCtx::default());
+
+    assert!(app.primary_dialog().is_active());
+    assert!(matches!(
+        app.primary_dialog().layer(),
+        AppDialog::DeleteNote(_)
+    ));
+    let text = rendered_text(app.primary_dialog().layer(), Rect::new(0, 0, 80, 10));
+    assert!(text.contains("Delete note?"));
+    assert!(text.contains("Delete this note? This cannot be undone."));
+}
+
+#[test]
+fn deleting_a_note_focuses_next_or_falls_back_to_previous() {
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: Vec::new(),
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(context.store, context.coordinator);
+    app.active_tab.set(2);
+    set_notes(
+        &mut app,
+        vec![
+            test_note("note-0", 0),
+            test_note("note-1", 1),
+            test_note("note-2", 2),
+        ],
+    );
+    app.layout(Rect::new(0, 0, 120, 30), &mut LayoutCtx::new());
+    let mut next = EventCtx::default();
+
+    app.delete_note("note-1".into(), &mut next);
+
+    let state = app.context.store.borrow();
+    assert_eq!(
+        state
+            .state()
+            .notes
+            .iter()
+            .map(|note| note.value.id.as_str())
+            .collect::<Vec<_>>(),
+        ["note-0", "note-2"]
+    );
+    assert_eq!(
+        next.focus_request(),
+        Some(&FocusRequest::Path(note_path(
+            app.note_focus_path.borrow().clone(),
+            "note-2",
+        )))
+    );
+    drop(state);
+    let mut previous = EventCtx::default();
+
+    app.delete_note("note-2".into(), &mut previous);
+
+    assert_eq!(
+        previous.focus_request(),
+        Some(&FocusRequest::Path(note_path(
+            app.note_focus_path.borrow().clone(),
+            "note-0",
+        )))
+    );
+}
+
+#[test]
 fn external_refresh_repopulates_selected_task_detail_once_draft_is_safe() {
     let task = test_task();
     let (_runtime, context, store) = test_context(WorkspaceSnapshot {
@@ -792,7 +1394,8 @@ fn task_header_shows_new_to_the_left_of_filters() {
         &keys::TASK_LABEL_FILTER.label(),
         "󰲋 Space",
         " Tags",
-        "New task",
+        "Task |K|",
+        "Note |N|",
     ] {
         assert!(
             text.contains(expected),
@@ -803,10 +1406,13 @@ fn task_header_shows_new_to_the_left_of_filters() {
         .find("󰲋 Space")
         .expect("workspace filter should render");
     let labels = text.find(" Tags").expect("tag filter should render");
-    let new = text
-        .find("New task")
+    let new_task = text
+        .find("Task |K|")
         .expect("new task button should render");
-    assert!(new < workspace && workspace < labels);
+    let new_note = text
+        .find("Note |N|")
+        .expect("new note button should render");
+    assert!(new_task < new_note && new_note < workspace && workspace < labels);
     assert!(!text.contains("View:"));
     assert!(!text.contains("Resolve"));
     assert!(!text.contains("Permanently"));
@@ -1672,6 +2278,7 @@ fn space_reveals_highlighted_task_link_title_for_two_seconds() {
         AnimationSettings::default(),
     );
     assert!(effects.outcome.handled());
+    assert!(effects.tick);
     assert!(rendered_text(&input, area).contains("Example documentation"));
 
     input.tick(Duration::from_secs(2), AnimationSettings::default());
@@ -1721,7 +2328,7 @@ fn ctrl_x_removes_highlighted_task_link() {
 }
 
 #[test]
-fn app_header_new_button_emits_create_action() {
+fn app_header_exposes_separate_task_and_note_actions() {
     let (_runtime, context, store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
@@ -1737,11 +2344,28 @@ fn app_header_new_button_emits_create_action() {
         .iter()
         .find(|target| target.id.as_str() == "tabs")
         .expect("missing app tabs");
-    let button = layout
+    let task_button = layout
         .focus_targets()
         .iter()
-        .find(|target| target.path.keys().iter().any(|part| part.as_str() == "new"))
-        .expect("missing app header new button");
+        .find(|target| {
+            target
+                .path
+                .keys()
+                .iter()
+                .any(|part| part.as_str() == "new-task")
+        })
+        .expect("missing app header new task button");
+    let note_button = layout
+        .focus_targets()
+        .iter()
+        .find(|target| {
+            target
+                .path
+                .keys()
+                .iter()
+                .any(|part| part.as_str() == "new-note")
+        })
+        .expect("missing app header new note button");
     for component in ["workspace", "labels"] {
         let control = layout
             .focus_targets()
@@ -1755,7 +2379,7 @@ fn app_header_new_button_emits_create_action() {
             })
             .unwrap_or_else(|| panic!("missing app header {component} control"));
         assert_eq!(control.area.y, area.y);
-        assert!(control.area.x > button.area.x);
+        assert!(control.area.x > note_button.area.x);
     }
     let workspace = layout
         .focus_targets()
@@ -1768,15 +2392,17 @@ fn app_header_new_button_emits_create_action() {
                 .any(|part| part.as_str() == "workspace")
         })
         .expect("missing app header workspace control");
-    assert!(workspace.area.x > button.area.x);
+    assert!(workspace.area.x > note_button.area.x);
     assert_eq!(tabs.area.y, area.y.saturating_add(1));
-    assert_eq!(button.area.y, area.y);
-    assert_eq!(button.area.x, area.x);
-    let button_path = button.path.clone();
+    assert_eq!(task_button.area.y, area.y);
+    assert_eq!(task_button.area.x, area.x);
+    assert_eq!(note_button.area.y, area.y);
+    assert!(note_button.area.x > task_button.area.x);
+    let task_button_path = task_button.path.clone();
 
     let mut create_ctx = EventCtx::default();
     let create = app.dispatch_event(
-        &EventRoute::new(button_path.clone()),
+        &EventRoute::new(task_button_path.clone()),
         &TuiEvent::Key(Key::Enter.into()),
         &mut create_ctx,
     );
@@ -1790,7 +2416,7 @@ fn app_header_new_button_emits_create_action() {
 
     let mut hotkey_ctx = EventCtx::default();
     let hotkey = app.dispatch_event(
-        &EventRoute::new(button_path),
+        &EventRoute::new(task_button_path),
         &TuiEvent::Hotkey(HotkeyEvent::Commit(keys::TASK_QUICK_CREATE.hotkey())),
         &mut hotkey_ctx,
     );
@@ -1801,6 +2427,15 @@ fn app_header_new_button_emits_create_action() {
             calendar_date: None
         }]
     ));
+
+    let mut note_ctx = EventCtx::default();
+    let note = app.dispatch_event(
+        &EventRoute::new(note_button.path.clone()),
+        &TuiEvent::Hotkey(HotkeyEvent::Commit(keys::NOTE_QUICK_CREATE.hotkey())),
+        &mut note_ctx,
+    );
+    assert!(note.handled());
+    assert!(matches!(note_ctx.messages(), [AppMsg::CreateNote]));
 }
 
 #[test]
@@ -1817,8 +2452,14 @@ fn escape_from_app_header_new_button_focuses_tabs() {
     let button_path = layout
         .focus_targets()
         .iter()
-        .find(|target| target.path.keys().iter().any(|part| part.as_str() == "new"))
-        .expect("new button should be focusable")
+        .find(|target| {
+            target
+                .path
+                .keys()
+                .iter()
+                .any(|part| part.as_str() == "new-task")
+        })
+        .expect("new task button should be focusable")
         .path
         .clone();
 

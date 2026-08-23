@@ -16,7 +16,7 @@ use crate::{
         TagPatch, Task, TaskField, TaskPatch, TaskRank, Workspace, WorkspaceDeletion,
         WorkspacePatch,
     },
-    service::{TaskRankUpdate, TuidoService},
+    service::{NoteCreateResult, NoteInput, NoteView, TaskRankUpdate, TuidoService, Versioned},
     storage::SqlDialect,
 };
 
@@ -30,6 +30,8 @@ enum CommandKey {
     Workspace(String),
     Tag(String),
     AppSetting(String),
+    UiEffect(String),
+    Note(String),
 }
 
 #[derive(Debug, Clone)]
@@ -60,6 +62,24 @@ pub(crate) enum PersistenceCommand {
         value: String,
         generation: u64,
     },
+    CreateNote {
+        temporary_id: String,
+        content: String,
+        removed_notes: Vec<Versioned<NoteView>>,
+    },
+    PatchNote {
+        before: Versioned<NoteView>,
+        content: String,
+    },
+    DeleteNote {
+        note: Versioned<NoteView>,
+        index: usize,
+    },
+    SaveNotesZoom(crate::notes_config::NotesZoomLevels),
+    OpenBrowserLink {
+        url: String,
+        background: bool,
+    },
 }
 
 impl PersistenceCommand {
@@ -80,8 +100,51 @@ impl PersistenceCommand {
             Self::DeleteTag(deletion) => CommandKey::Tag(deletion.tag.id.clone()),
             Self::PatchTag(id, _) => CommandKey::Tag(id.clone()),
             Self::SetAppSetting { key, .. } => CommandKey::AppSetting(key.clone()),
+            Self::CreateNote { temporary_id, .. } => CommandKey::Note(temporary_id.clone()),
+            Self::PatchNote { before, .. } => CommandKey::Note(before.value.id.clone()),
+            Self::DeleteNote { note, .. } => {
+                CommandKey::Note(note.value.id.clone())
+            }
+            Self::SaveNotesZoom(_) => CommandKey::UiEffect("notes-zoom".into()),
+            Self::OpenBrowserLink { url, .. } => CommandKey::UiEffect(format!("browser:{url}")),
         }
     }
+}
+
+fn remap_note_command(
+    command: &mut PersistenceCommand,
+    previous_id: &str,
+    replacement: &Versioned<NoteView>,
+) {
+    match command {
+        PersistenceCommand::PatchNote { before, .. } if before.value.id == previous_id =>
+        {
+            *before = replacement.clone();
+        }
+        PersistenceCommand::DeleteNote { note, .. } if note.value.id == previous_id => {
+            *note = replacement.clone();
+        }
+        _ => {}
+    }
+}
+
+fn remap_note_queue(
+    queued: &mut HashMap<CommandKey, VecDeque<PersistenceCommand>>,
+    previous_key: &CommandKey,
+    replacement_key: CommandKey,
+    previous_id: &str,
+    replacement: &Versioned<NoteView>,
+) {
+    let Some(mut commands) = queued.remove(previous_key) else {
+        return;
+    };
+    for command in &mut commands {
+        remap_note_command(command, previous_id, replacement);
+    }
+    queued
+        .entry(replacement_key)
+        .or_default()
+        .append(&mut commands);
 }
 
 struct Completion {
@@ -92,12 +155,16 @@ struct Completion {
     related_revisions: HashMap<String, u64>,
     created_task: Option<Task>,
     link_title: Option<LinkTitleCompletion>,
+    created_note: Option<NoteCreateResult>,
+    note: Option<Versioned<NoteView>>,
 }
 
 struct ExecutionResult {
     related_revisions: HashMap<String, u64>,
     created_task: Option<Task>,
     link_title: Option<LinkTitleCompletion>,
+    created_note: Option<NoteCreateResult>,
+    note: Option<Versioned<NoteView>>,
 }
 
 struct LinkTitleCompletion {
@@ -112,6 +179,7 @@ struct RefreshCompletion {
     snapshot: Option<crate::domain::WorkspaceSnapshot>,
     revisions: HashMap<String, u64>,
     expiry_error: Option<String>,
+    notes: Option<Vec<Versioned<NoteView>>>,
 }
 
 pub(crate) struct PersistenceCoordinator {
@@ -256,19 +324,24 @@ impl PersistenceCoordinator {
             match result {
                 Ok(refresh) if !self.has_pending() => {
                     let current = self.store.borrow().state().workspace_revision;
+                    if refresh.revision < current {
+                        self.reconcile_required = true;
+                        continue;
+                    }
+                    if let Some(refreshed) = refresh.notes {
+                        changed |= self
+                            .store
+                            .borrow_mut()
+                            .dispatch(AppEvent::NotesLoaded(refreshed))
+                            .changed;
+                    }
                     match refresh.snapshot {
-                        None if refresh.revision < current => {
-                            self.reconcile_required = true;
-                        }
                         None => {
                             changed |= self
                                 .store
                                 .borrow_mut()
                                 .dispatch(AppEvent::RefreshSucceeded)
                                 .changed;
-                        }
-                        Some(_) if refresh.revision < current => {
-                            self.reconcile_required = true;
                         }
                         Some(snapshot) => {
                             self.reconcile_required = false;
@@ -338,14 +411,16 @@ impl PersistenceCoordinator {
                         snapshot: None,
                         revisions: HashMap::new(),
                         expiry_error: None,
+                        notes: None,
                     });
                 }
-                let workspace = service.consistent_workspace().await?;
+                let (workspace, notes) = service.consistent_workspace_with_notes().await?;
                 Ok(RefreshCompletion {
                     revision: workspace.revision,
                     snapshot: Some(workspace.snapshot),
                     revisions: workspace.entity_revisions,
                     expiry_error,
+                    notes: Some(notes),
                 })
             }
             .await
@@ -410,14 +485,16 @@ impl PersistenceCoordinator {
         let tx = self.completion_tx.clone();
         self.runtime.spawn(async move {
             let result = execute(service, command.clone(), expected_revision).await;
-            let (error, related_revisions, created_task, link_title) = match result {
+            let (error, related_revisions, created_task, link_title, created_note, note) = match result {
                 Ok(result) => (
                     None,
                     result.related_revisions,
                     result.created_task,
                     result.link_title,
+                    result.created_note,
+                    result.note,
                 ),
-                Err(error) => (Some(error.to_string()), HashMap::new(), None, None),
+                Err(error) => (Some(error.to_string()), HashMap::new(), None, None, None, None),
             };
             let _ = tx.send(Completion {
                 key,
@@ -427,6 +504,8 @@ impl PersistenceCoordinator {
                 related_revisions,
                 created_task,
                 link_title,
+                created_note,
+                note,
             });
         });
     }
@@ -468,7 +547,12 @@ impl PersistenceCoordinator {
                 ));
         }
         if completion.error.is_some()
-            && !matches!(completion.command, PersistenceCommand::FetchTaskLinkTitle { .. })
+            && !matches!(
+                completion.command,
+                PersistenceCommand::FetchTaskLinkTitle { .. }
+                    | PersistenceCommand::SaveNotesZoom(_)
+                    | PersistenceCommand::OpenBrowserLink { .. }
+            )
         {
             self.reconcile_required = true;
             preserve_failed_active_custom(
@@ -499,6 +583,7 @@ impl PersistenceCoordinator {
             _ => false,
         };
         let mut changed = false;
+        let mut next_key = completion.key.clone();
         if let PersistenceCommand::FetchTaskLinkTitle { task_id, url } = &completion.command {
             let event = completion.link_title.map_or_else(
                 || AppEvent::TaskLinkTitleFetchFailed {
@@ -703,18 +788,114 @@ impl PersistenceCoordinator {
                     })
                     .changed;
             }
+            PersistenceCommand::CreateNote {
+                temporary_id,
+                removed_notes,
+                ..
+            } => {
+                if let Some(created) = completion.created_note {
+                    let deleted_candidate_ids = created.deleted_candidate_ids;
+                    let retained_notes = created
+                        .retained_candidates
+                        .into_iter()
+                        .filter(|retained| {
+                            removed_notes
+                                .iter()
+                                .any(|removed| removed.value.id == retained.value.id)
+                                && !deleted_candidate_ids.contains(&retained.value.id)
+                        })
+                        .collect();
+                    let created_key = CommandKey::Note(created.note.value.id.clone());
+                    remap_note_queue(
+                        &mut self.queued,
+                        &completion.key,
+                        created_key.clone(),
+                        &temporary_id,
+                        &created.note,
+                    );
+                    next_key = created_key;
+                    changed |= self
+                        .store
+                        .borrow_mut()
+                        .dispatch(AppEvent::NoteCreated {
+                            temporary_id,
+                            note: created.note,
+                            retained_notes,
+                        })
+                        .changed;
+                } else {
+                    let error = completion.error.unwrap_or_else(|| "note create failed".into());
+                    changed |= self
+                        .store
+                        .borrow_mut()
+                        .dispatch(AppEvent::NoteCreateFailed {
+                            temporary_id,
+                            error,
+                            restored_notes: removed_notes,
+                        })
+                        .changed;
+                    self.queued.remove(&completion.key);
+                }
+            }
+            PersistenceCommand::PatchNote { before, .. } => {
+                if let Some(note) = completion.note.as_ref()
+                    && let Some(queue) = self.queued.get_mut(&completion.key)
+                {
+                    for command in queue {
+                        remap_note_command(command, &before.value.id, note);
+                    }
+                }
+                let result = completion.note.ok_or_else(|| {
+                    completion.error.unwrap_or_else(|| "note update failed".into())
+                });
+                changed |= self
+                    .store
+                    .borrow_mut()
+                    .dispatch(AppEvent::NotePatched { before, result })
+                    .changed;
+            }
+            PersistenceCommand::DeleteNote { note, index } => {
+                if let Some(error) = completion.error {
+                    changed |= self
+                        .store
+                        .borrow_mut()
+                        .dispatch(AppEvent::NoteDeleteFailed { note, index, error })
+                        .changed;
+                } else {
+                    changed |= self
+                        .store
+                        .borrow_mut()
+                        .dispatch(AppEvent::NoteDeleteSucceeded)
+                        .changed;
+                }
+            }
+            PersistenceCommand::SaveNotesZoom(_) => {
+                if let Some(error) = completion.error {
+                    changed |= self
+                        .store
+                        .borrow_mut()
+                        .dispatch(AppEvent::RefreshFailed(format!(
+                            "Could not save notes zoom: {error}"
+                        )))
+                        .changed;
+                }
+            }
+            PersistenceCommand::OpenBrowserLink { url, .. } => {
+                if let Some(error) = completion.error {
+                    changed |= self
+                        .store
+                        .borrow_mut()
+                        .dispatch(AppEvent::RefreshFailed(format!(
+                            "Could not open link {url}: {error}"
+                        )))
+                        .changed;
+                }
+            }
         }
 
-        let next = self
-            .queued
-            .get_mut(&completion.key)
-            .and_then(VecDeque::pop_front);
-        if self
-            .queued
-            .get(&completion.key)
-            .is_some_and(VecDeque::is_empty)
-        {
-            self.queued.remove(&completion.key);
+        let next = self.queued.get_mut(&next_key).and_then(VecDeque::pop_front);
+        if self.queued.get(&next_key).is_some_and(VecDeque::is_empty) {
+            self.queued.remove(&next_key);
         }
         if let Some(command) = next {
             self.start(command);
@@ -759,6 +940,8 @@ async fn execute(
     };
     let mut created_task = None;
     let mut link_title = None;
+    let mut created_note = None;
+    let mut note = None;
     let related_revisions = match command {
         PersistenceCommand::CreateTask(task) => {
             let created = service
@@ -871,11 +1054,54 @@ async fn execute(
             .await
             .map(|_| HashMap::new())
             .map_err(boxed_service_error),
+        PersistenceCommand::CreateNote {
+            temporary_id,
+            content,
+            removed_notes,
+            ..
+        } => {
+            created_note = Some(
+                service
+                    .create_note_reconciled_with_id(
+                        temporary_id,
+                        NoteInput { content },
+                        &removed_notes,
+                    )
+                    .await
+                    .map_err(boxed_service_error)?,
+            );
+            Ok(HashMap::new())
+        }
+        PersistenceCommand::PatchNote { before, content } => {
+            note = Some(
+                service
+                    .update_note(&before.value.id, before.revision, NoteInput { content })
+                    .await
+                    .map_err(boxed_service_error)?,
+            );
+            Ok(HashMap::new())
+        }
+        PersistenceCommand::DeleteNote { note, .. } => service
+            .delete_note(&note.value.id, note.revision)
+            .await
+            .map(|_| HashMap::new())
+            .map_err(boxed_service_error),
+        PersistenceCommand::SaveNotesZoom(zoom) => {
+            crate::notes_config::save_notes_zoom(zoom)
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            Ok(HashMap::new())
+        }
+        PersistenceCommand::OpenBrowserLink { url, background } => {
+            open_browser_link(&url, background)?;
+            Ok(HashMap::new())
+        }
     }?;
     Ok(ExecutionResult {
         related_revisions,
         created_task,
         link_title,
+        created_note,
+        note,
     })
 }
 
@@ -910,7 +1136,27 @@ fn command_entity(command: &PersistenceCommand) -> Option<(&'static str, &str)> 
         PersistenceCommand::DeleteTag(v) => Some(("tag", &v.tag.id)),
         PersistenceCommand::PatchTag(id, _) => Some(("tag", id)),
         PersistenceCommand::SetAppSetting { .. } => None,
+        PersistenceCommand::CreateNote { .. }
+        | PersistenceCommand::PatchNote { .. }
+        | PersistenceCommand::DeleteNote { .. }
+        | PersistenceCommand::SaveNotesZoom(_)
+        | PersistenceCommand::OpenBrowserLink { .. } => None,
     }
+}
+
+fn open_browser_link(url: &str, background: bool) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    #[cfg(target_os = "macos")]
+    if background {
+        let mut options = webbrowser::BrowserOptions::new();
+        options.with_dont_switch(true);
+        return webbrowser::open_browser_with_options(webbrowser::Browser::Default, url, &options)
+            .map_err(|error| error.into());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    let _ = background;
+
+    webbrowser::open(url).map_err(|error| error.into())
 }
 
 fn revision_update(

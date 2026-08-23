@@ -34,20 +34,29 @@ pub(super) struct TaskLinksInput {
     input: ListControl<TaskLinkRow, String, AppMsg>,
     committed: Vec<TaskLinkRow>,
     patch_sink: PatchSink,
-    open_link: OpenLink,
+    open_link: Option<OpenLink>,
     task_id: String,
     title_reveal: Option<(String, Duration)>,
 }
 
 impl TaskLinksInput {
     pub(super) fn new(task: &Task, patch_sink: PatchSink) -> Self {
-        Self::with_opener(task, patch_sink, open_browser_link)
+        Self::with_optional_opener(task, patch_sink, None)
     }
 
+    #[cfg(test)]
     pub(super) fn with_opener(
         task: &Task,
         patch_sink: PatchSink,
         open_link: impl Fn(&str, LinkOpenMode) -> Result<(), String> + 'static,
+    ) -> Self {
+        Self::with_optional_opener(task, patch_sink, Some(Rc::new(open_link)))
+    }
+
+    fn with_optional_opener(
+        task: &Task,
+        patch_sink: PatchSink,
+        open_link: Option<OpenLink>,
     ) -> Self {
         let mut rows = task
             .links
@@ -108,7 +117,7 @@ impl TaskLinksInput {
             input,
             committed: rows,
             patch_sink,
-            open_link: Rc::new(open_link),
+            open_link,
             task_id: task.id.clone(),
             title_reveal: None,
         }
@@ -224,6 +233,7 @@ impl TaskLinksInput {
             row.show_title = true;
         });
         self.title_reveal = Some((row_id, Duration::ZERO));
+        ctx.request_tick();
         ctx.request_redraw();
         true
     }
@@ -233,28 +243,20 @@ impl TaskLinksInput {
             return;
         };
         let target = task_link::browser_target(&row.url);
-        if let Err(error) = (self.open_link)(&target, mode) {
+        if let Some(open_link) = &self.open_link
+            && let Err(error) = open_link(&target, mode)
+        {
             ctx.notify(Notification::error(
                 "Could not open link",
                 format!("{}: {error}", row.url),
             ));
+        } else if self.open_link.is_none() {
+            ctx.emit(AppMsg::OpenTaskLink {
+                url: target,
+                background: mode == LinkOpenMode::Background,
+            });
         }
     }
-}
-
-fn open_browser_link(url: &str, mode: LinkOpenMode) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    if mode == LinkOpenMode::Background {
-        let mut options = webbrowser::BrowserOptions::new();
-        options.with_dont_switch(true);
-        return webbrowser::open_browser_with_options(webbrowser::Browser::Default, url, &options)
-            .map_err(|error| error.to_string());
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    let _ = mode;
-
-    webbrowser::open(url).map_err(|error| error.to_string())
 }
 
 impl TuiNode<AppMsg> for TaskLinksInput {
@@ -327,11 +329,9 @@ impl TuiNode<AppMsg> for TaskLinksInput {
         }
         let row_id = row_id.clone();
         self.title_reveal = None;
-        self.input
-            .data_view_mut()
-            .update_row(&row_id, |row| {
-                row.show_title = false;
-            });
+        self.input.data_view_mut().update_row(&row_id, |row| {
+            row.show_title = false;
+        });
         input_tick.merge(TickResult {
             changed: true,
             layout: false,

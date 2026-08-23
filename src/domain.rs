@@ -3,6 +3,8 @@ use std::collections::{HashMap, HashSet};
 use time::PrimitiveDateTime;
 use tuicore::{ChipColorRole, DispatchOutcome};
 
+use crate::service::{NoteView, Versioned};
+
 pub(crate) const DEFAULT_WORKSPACE_SETTING: &str = "tasks.default_workspace";
 
 #[derive(Debug, Clone)]
@@ -19,6 +21,10 @@ pub struct AppState {
     pub people: Vec<Person>,
     pub workspaces: Vec<Workspace>,
     pub tags: Vec<Tag>,
+    pub notes: Vec<Versioned<NoteView>>,
+    pub note_placeholders: HashMap<String, String>,
+    pub notes_version: u64,
+    pub note_error: Option<String>,
     pub selected_task_id: Option<String>,
     pub selected_person_id: Option<String>,
     pub selected_workspace_id: Option<String>,
@@ -60,6 +66,10 @@ impl AppState {
             people: snapshot.people,
             workspaces: snapshot.workspaces,
             tags: snapshot.tags,
+            notes: Vec::new(),
+            note_placeholders: HashMap::new(),
+            notes_version: 0,
+            note_error: None,
             last_custom_snooze,
             save_errors: HashMap::new(),
             app_setting_errors: HashMap::new(),
@@ -172,6 +182,33 @@ impl AppState {
 
 #[derive(Debug, Clone)]
 pub enum AppEvent {
+    NotesLoaded(Vec<Versioned<NoteView>>),
+    NoteCreateStarted {
+        temporary_note: Versioned<NoteView>,
+        removed_notes: Vec<Versioned<NoteView>>,
+        inherited_placeholder: Option<String>,
+    },
+    NoteCreated {
+        temporary_id: String,
+        note: Versioned<NoteView>,
+        retained_notes: Vec<Versioned<NoteView>>,
+    },
+    NoteCreateFailed {
+        temporary_id: String,
+        error: String,
+        restored_notes: Vec<Versioned<NoteView>>,
+    },
+    NotePatched {
+        before: Versioned<NoteView>,
+        result: Result<Versioned<NoteView>, String>,
+    },
+    NoteDeleted(String),
+    NoteDeleteSucceeded,
+    NoteDeleteFailed {
+        note: Versioned<NoteView>,
+        index: usize,
+        error: String,
+    },
     TaskCreated(Task),
     TaskDeleted(String),
     TaskRanksChanged(Vec<TaskRank>),
@@ -295,6 +332,165 @@ impl SaveTarget {
 
 pub fn reduce_app_state(state: &mut AppState, event: AppEvent) -> DispatchOutcome {
     match event {
+        AppEvent::NotesLoaded(notes) => {
+            state
+                .note_placeholders
+                .retain(|id, _| notes.iter().any(|note| note.value.id == *id));
+            state.notes = notes;
+            state.note_error = None;
+            state.notes_version += 1;
+            DispatchOutcome::layout()
+        }
+        AppEvent::NoteCreateStarted {
+            temporary_note,
+            removed_notes,
+            inherited_placeholder,
+        } => {
+            state.notes.retain(|note| {
+                !removed_notes
+                    .iter()
+                    .any(|removed| removed.value.id == note.value.id)
+            });
+            state.notes.insert(0, temporary_note);
+            if let Some(placeholder) = inherited_placeholder {
+                let id = state.notes[0].value.id.clone();
+                state.note_placeholders.insert(id, placeholder);
+            }
+            state.note_error = None;
+            state.notes_version += 1;
+            DispatchOutcome::layout()
+        }
+        AppEvent::NoteCreated {
+            temporary_id,
+            note,
+            retained_notes,
+        } => {
+            if let Some(existing) = state
+                .notes
+                .iter_mut()
+                .find(|existing| existing.value.id == temporary_id)
+            {
+                if let Some(placeholder) = state.note_placeholders.remove(&temporary_id) {
+                    state
+                        .note_placeholders
+                        .insert(note.value.id.clone(), placeholder);
+                }
+                *existing = note;
+                let existing_ids = state
+                    .notes
+                    .iter()
+                    .map(|existing| existing.value.id.clone())
+                    .collect::<HashSet<_>>();
+                let additions =
+                    retained_notes
+                        .into_iter()
+                        .filter(|retained| !existing_ids.contains(&retained.value.id))
+                        .collect::<Vec<_>>();
+                state.notes.extend(additions);
+                state.notes.sort_by(|left, right| {
+                    left.value
+                        .position
+                        .cmp(&right.value.position)
+                        .then_with(|| left.value.id.cmp(&right.value.id))
+                });
+                state.note_error = None;
+                state.notes_version += 1;
+                DispatchOutcome::layout()
+            } else {
+                DispatchOutcome::unchanged()
+            }
+        }
+        AppEvent::NoteCreateFailed {
+            temporary_id,
+            error,
+            restored_notes,
+        } => {
+            let Some(index) = state
+                .notes
+                .iter()
+                .position(|note| note.value.id == temporary_id)
+            else {
+                return DispatchOutcome::unchanged();
+            };
+            state.notes.remove(index);
+            state.note_placeholders.remove(&temporary_id);
+            let existing_ids = state
+                .notes
+                .iter()
+                .map(|existing| existing.value.id.clone())
+                .collect::<HashSet<_>>();
+            let additions =
+                restored_notes
+                    .into_iter()
+                    .filter(|restored| !existing_ids.contains(&restored.value.id))
+                    .collect::<Vec<_>>();
+            state.notes.extend(additions);
+            state.notes.sort_by(|left, right| {
+                left.value
+                    .position
+                    .cmp(&right.value.position)
+                    .then_with(|| left.value.id.cmp(&right.value.id))
+            });
+            state.note_error = Some(format!("Note create failed: {error}"));
+            state.notes_version += 1;
+            DispatchOutcome::layout()
+        }
+        AppEvent::NotePatched { before, result } => {
+            let succeeded = result.is_ok();
+            let replacement = match result {
+                Ok(note) => {
+                    state.note_error = None;
+                    Some(note)
+                }
+                Err(error) => {
+                    state.note_error = Some(format!("Note update failed: {error}"));
+                    Some(before.clone())
+                }
+            };
+            if let Some(existing) = state
+                .notes
+                .iter_mut()
+                .find(|existing| existing.value.id == before.value.id)
+            {
+                if succeeded || existing.revision <= before.revision {
+                    *existing = replacement.expect("note replacement exists");
+                }
+                state.notes_version += 1;
+                DispatchOutcome::layout()
+            } else {
+                DispatchOutcome::unchanged()
+            }
+        }
+        AppEvent::NoteDeleted(id) => {
+            let Some(index) = state.notes.iter().position(|note| note.value.id == id) else {
+                return DispatchOutcome::unchanged();
+            };
+            state.notes.remove(index);
+            state.note_placeholders.remove(&id);
+            state.notes_version += 1;
+            DispatchOutcome::layout()
+        }
+        AppEvent::NoteDeleteSucceeded => {
+            if state.note_error.take().is_some() {
+                state.notes_version += 1;
+                DispatchOutcome::layout()
+            } else {
+                DispatchOutcome::unchanged()
+            }
+        }
+        AppEvent::NoteDeleteFailed { note, index, error } => {
+            let index = index.min(state.notes.len());
+            state.notes.insert(index, note);
+            state.notes.sort_by(|left, right| {
+                left.value
+                    .position
+                    .cmp(&right.value.position)
+                    .then_with(|| left.value.id.cmp(&right.value.id))
+            });
+            state.note_error = Some(format!("Note delete failed: {error}"));
+            state.notes_version += 1;
+            DispatchOutcome::layout()
+        }
         AppEvent::TaskCreated(task) => {
             state.selected_task_id = Some(task.id.clone());
             state.tasks.push(task);
