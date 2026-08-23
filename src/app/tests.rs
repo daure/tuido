@@ -1208,6 +1208,24 @@ fn deleting_a_note_opens_the_standard_confirmation_dialog() {
 }
 
 #[test]
+fn missing_note_delete_target_closes_the_quick_menu() {
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: Vec::new(),
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(context.store, context.coordinator);
+    set_notes(&mut app, vec![test_note("note-0", 0)]);
+    app.open_note_quick_menu("note-0".into(), &mut EventCtx::default());
+    let mut ctx = EventCtx::default();
+
+    app.open_delete_note_dialog("missing".into(), &mut ctx);
+
+    assert!(!app.primary_dialog().is_active());
+}
+
+#[test]
 fn deleting_a_note_focuses_next_or_falls_back_to_previous() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: Vec::new(),

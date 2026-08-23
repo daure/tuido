@@ -1628,6 +1628,16 @@ fn missing_task_dialog_targets_clear_origin_and_focus_task_table() {
         complete_ctx.focus_request(),
         Some(&initial_task_table_focus_request())
     );
+
+    app.open_task_quick_menu("task-1", &mut EventCtx::default());
+    let mut move_ctx = EventCtx::default();
+    app.move_task_to_edge("missing", true, &mut move_ctx);
+
+    assert!(!app.primary_dialog().is_active());
+    assert_eq!(
+        move_ctx.focus_request(),
+        Some(&initial_task_table_focus_request())
+    );
 }
 
 #[test]
@@ -2539,6 +2549,24 @@ fn complete_outcomes_patch_optimistically_persist_and_focus_task_table() {
         assert_eq!(workspace.table().highlighted_id(), None);
         assert_eq!(workspace.detail().task_id, None);
     }
+}
+
+#[test]
+fn calendar_quick_menu_completion_returns_calendar_focus() {
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![test_task()],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(context.store, context.coordinator);
+    app.active_tab.set(CALENDAR_TAB_INDEX);
+    app.open_calendar_quick_complete_task("task-1", &mut EventCtx::default());
+    let mut ctx = EventCtx::default();
+
+    app.complete_task("task-1".into(), TaskState::Done, &mut ctx);
+
+    assert_eq!(ctx.focus_request(), Some(&initial_calendar_focus_request()));
 }
 
 #[test]

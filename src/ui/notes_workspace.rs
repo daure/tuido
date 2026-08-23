@@ -80,11 +80,13 @@ pub(crate) struct NotesWorkspace<M = ()> {
     note_error: Option<String>,
     change_sink: Option<Rc<dyn Fn(NoteChange) -> M>>,
     delete_sink: Option<Rc<dyn Fn(String) -> M>>,
+    quick_menu_sink: Option<Rc<dyn Fn(String) -> M>>,
     editing: Vec<Rc<Cell<bool>>>,
     focus_path: TreePath,
     focus_path_sink: Option<Rc<RefCell<TreePath>>>,
     focused_note_id: Option<String>,
     selected_target: Option<FocusTarget>,
+    preserve_selected_until_focus_returns: bool,
     new_note_edit_request: Option<Rc<RefCell<Option<NewNoteEditRequest>>>>,
     focus_note_request: Option<Rc<RefCell<Option<String>>>>,
     pending_scroll_offset: Option<ScrollOffset>,
@@ -99,6 +101,7 @@ pub(crate) struct NotesWorkspace<M = ()> {
 pub(crate) struct NewNoteEditRequest {
     pub(crate) id: String,
     pub(crate) mode: NoteEditingMode,
+    pub(crate) content: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -159,11 +162,13 @@ impl<M: 'static> NotesWorkspace<M> {
             note_error: None,
             change_sink: None,
             delete_sink: None,
+            quick_menu_sink: None,
             editing,
             focus_path: TreePath::new(),
             focus_path_sink: None,
             focused_note_id: None,
             selected_target: None,
+            preserve_selected_until_focus_returns: false,
             new_note_edit_request: None,
             focus_note_request: None,
             pending_scroll_offset: None,
@@ -200,6 +205,11 @@ impl<M: 'static> NotesWorkspace<M> {
 
     pub(crate) fn on_delete(mut self, sink: impl Fn(String) -> M + 'static) -> Self {
         self.delete_sink = Some(Rc::new(sink));
+        self
+    }
+
+    pub(crate) fn on_quick_menu(mut self, sink: impl Fn(String) -> M + 'static) -> Self {
+        self.quick_menu_sink = Some(Rc::new(sink));
         self
     }
 
@@ -530,27 +540,27 @@ impl<M: 'static> NotesWorkspace<M> {
     }
 
     fn handle_note_yank(&self, event: &TuiEvent, ctx: &mut EventCtx<M>) -> Option<EventOutcome> {
-        let command = match event {
-            TuiEvent::Yank => "Tuido note",
+        let note_id = self.focused_note_id.as_deref()?;
+        let payload = match event {
+            TuiEvent::Yank => note_reference(note_id),
             TuiEvent::Hotkey(HotkeyEvent::Commit(sequence))
                 if sequence == &keys::NOTES_YANK.hotkey() =>
             {
-                "Tuido note"
+                note_reference(note_id)
             }
             TuiEvent::Hotkey(HotkeyEvent::Commit(sequence))
                 if sequence == &keys::NOTES_YANK_PROCESS.hotkey() =>
             {
-                "Tuido note process"
+                note_command(note_id, "process")
             }
             TuiEvent::Hotkey(HotkeyEvent::Commit(sequence))
                 if sequence == &keys::NOTES_YANK_CLARIFY.hotkey() =>
             {
-                "Tuido note clarify"
+                note_command(note_id, "clarify")
             }
             _ => return None,
         };
-        let note_id = self.focused_note_id.as_deref()?;
-        ctx.copy_to_clipboard(format!("{command} {note_id}"));
+        ctx.copy_to_clipboard(payload);
         ctx.stop_propagation();
         Some(EventOutcome::Handled)
     }
@@ -706,6 +716,14 @@ pub(crate) fn note_placeholder(note_id: &str) -> &'static str {
     let mut hasher = std::hash::DefaultHasher::new();
     note_id.hash(&mut hasher);
     NOTE_PLACEHOLDERS[hasher.finish() as usize % NOTE_PLACEHOLDERS.len()]
+}
+
+pub(crate) fn note_reference(note_id: &str) -> String {
+    format!("Tuido note {note_id}")
+}
+
+pub(crate) fn note_command(note_id: &str, action: &str) -> String {
+    format!("Tuido note {action} {note_id}")
 }
 
 fn note_cancel_key(event: &TuiEvent) -> bool {
@@ -999,6 +1017,15 @@ impl<M: 'static> TuiNode<M> for NotesWorkspace<M> {
                 return EventOutcome::Handled;
             }
         }
+        if keys::NOTES_QUICK_MENU.matches(event)
+            && let Some(index) = self.focused_index()
+            && let (Some(sink), Some(note_id)) = (&self.quick_menu_sink, self.note_ids.get(index))
+        {
+            self.preserve_selected_until_focus_returns = true;
+            ctx.emit(sink(note_id.clone()));
+            ctx.stop_propagation();
+            return EventOutcome::Handled;
+        }
         if keys::NOTES_DELETE.matches(event)
             && let Some(index) = self.focused_index()
             && let (Some(sink), Some(id)) = (&self.delete_sink, self.note_ids.get(index))
@@ -1022,11 +1049,17 @@ impl<M: 'static> TuiNode<M> for NotesWorkspace<M> {
     }
 
     fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<M>) {
+        if focused {
+            self.preserve_selected_until_focus_returns = false;
+        }
         let Some(note_id) = target.path.keys().last().map(panel_id) else {
             self.scroll.dispatch_focus(target, focused, ctx);
             return;
         };
         if !focused {
+            if self.preserve_selected_until_focus_returns {
+                return;
+            }
             if let Some(selected_target) = self.selected_target.as_ref() {
                 self.scroll.dispatch_focus(selected_target, false, ctx);
             }
@@ -1040,14 +1073,14 @@ impl<M: 'static> TuiNode<M> for NotesWorkspace<M> {
         }
         self.focused_note_id = Some(note_id.to_string());
         self.selected_target = Some(target.clone());
-        let edit_mode = self.new_note_edit_request.as_ref().and_then(|request| {
+        let edit_request = self.new_note_edit_request.as_ref().and_then(|request| {
             request
                 .borrow()
                 .as_ref()
                 .filter(|request| request.id == note_id)
-                .map(|request| request.mode)
+                .cloned()
         });
-        if edit_mode.is_some() {
+        if edit_request.is_some() {
             if let Some(index) = self.note_index(note_id) {
                 self.editing[index].set(true);
             }
@@ -1058,8 +1091,18 @@ impl<M: 'static> TuiNode<M> for NotesWorkspace<M> {
                 .take();
         }
         self.scroll.dispatch_focus(target, true, ctx);
-        if edit_mode == Some(NoteEditingMode::External) {
-            ctx.request_external_editor_with_extension(String::new(), 0, 0, "md");
+        if let Some(NewNoteEditRequest {
+            mode: NoteEditingMode::External,
+            content,
+            ..
+        }) = edit_request
+        {
+            let content = content.unwrap_or_else(|| {
+                self.note_index(note_id)
+                    .map(|index| self.notes[index].borrow().clone())
+                    .unwrap_or_default()
+            });
+            ctx.request_external_editor_with_extension(content, 0, 0, "md");
         }
         if self.focused_note_id != previous || self.reveal_after_rebuild {
             ctx.request_layout();
@@ -1468,6 +1511,80 @@ mod tests {
     }
 
     #[test]
+    fn quick_menu_opens_only_for_a_focused_non_editing_note() {
+        let mut workspace = NotesWorkspace::<String>::new()
+            .note_source(note_source(1))
+            .on_quick_menu(|note_id| note_id);
+        let area = Rect::new(0, 0, 120, 15);
+        let mut layout = LayoutCtx::new();
+        workspace.layout(area, &mut layout);
+        let target = layout.focus_targets()[0].clone();
+        workspace.dispatch_focus(&target, true, &mut FocusCtx::default());
+        let route = EventRoute::new(target.path);
+
+        let mut quick_menu = EventCtx::default();
+        assert!(
+            workspace
+                .dispatch_event(
+                    &route,
+                    &TuiEvent::Key(KeyEvent::from(Key::Char('.'))),
+                    &mut quick_menu,
+                )
+                .handled()
+        );
+        assert_eq!(quick_menu.messages(), ["note-0"]);
+
+        workspace.dispatch_event(
+            &route,
+            &TuiEvent::Key(KeyEvent::from(Key::Enter)),
+            &mut EventCtx::default(),
+        );
+        let mut editing = EventCtx::default();
+        workspace.dispatch_event(
+            &route,
+            &TuiEvent::Key(KeyEvent::from(Key::Char('.'))),
+            &mut editing,
+        );
+
+        assert!(editing.messages().is_empty());
+        assert_eq!(workspace.notes[0].borrow().as_str(), ".");
+    }
+
+    #[test]
+    fn note_quick_menu_blur_keeps_selected_note_visually_focused() {
+        let mut workspace = NotesWorkspace::<String>::new()
+            .note_source(note_source(1))
+            .on_quick_menu(|note_id| note_id);
+        let area = Rect::new(0, 0, 120, 15);
+        let mut layout = LayoutCtx::new();
+        workspace.layout(area, &mut layout);
+        let target = layout.focus_targets()[0].clone();
+        workspace.dispatch_focus(&target, true, &mut FocusCtx::default());
+        let route = EventRoute::new(target.path.clone());
+
+        workspace.dispatch_event(
+            &route,
+            &TuiEvent::Key(KeyEvent::from(Key::Char('.'))),
+            &mut EventCtx::default(),
+        );
+        workspace.dispatch_focus(&target, false, &mut FocusCtx::default());
+        workspace.layout(area, &mut LayoutCtx::new());
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| workspace.render(frame, area, &mut tuicore::RenderCtx::new()))
+            .unwrap();
+
+        assert!(workspace.scroll.is_focused());
+        assert_eq!(
+            terminal.backend().buffer().cell((0, 0)).unwrap().fg,
+            tuicore::theme().accent_fg()
+        );
+
+        workspace.dispatch_focus(&target, true, &mut FocusCtx::default());
+        assert!(!workspace.preserve_selected_until_focus_returns);
+    }
+
+    #[test]
     fn editing_note_ctrl_page_keys_do_not_navigate_between_notes() {
         let mut workspace = NotesWorkspace::<()>::new().note_source(note_source(12));
         *workspace.notes[4].borrow_mut() = (0..20)
@@ -1723,10 +1840,12 @@ mod tests {
         let request = Rc::new(RefCell::new(Some(NewNoteEditRequest {
             id: "note-0".into(),
             mode: NoteEditingMode::External,
+            content: None,
         })));
         let mut workspace = NotesWorkspace::<()>::new()
             .note_source(source)
             .new_note_edit_request(request);
+        *workspace.notes[0].borrow_mut() = "Existing note content".into();
         let area = Rect::new(0, 0, 120, 15);
         let mut layout = LayoutCtx::new();
         workspace.layout(area, &mut layout);
@@ -1741,6 +1860,12 @@ mod tests {
                 .external_editor_request()
                 .and_then(|request| request.file_extension.as_deref()),
             Some("md")
+        );
+        assert_eq!(
+            focus
+                .external_editor_request()
+                .map(|request| request.value.as_str()),
+            Some("Existing note content")
         );
     }
 

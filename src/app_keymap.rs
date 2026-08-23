@@ -364,13 +364,14 @@ pub mod keys {
     pub const NOTES_YANK_PROCESS: AppBinding = AppBinding::new_sequence("NOTES_YANK_PROCESS", "yp");
     pub const NOTES_YANK_CLARIFY: AppBinding = AppBinding::new_sequence("NOTES_YANK_CLARIFY", "yc");
     pub const NOTES_DELETE: AppBinding = AppBinding::new("NOTES_DELETE", "ctrl+x");
+    pub const NOTES_QUICK_MENU: AppBinding = AppBinding::new("NOTES_QUICK_MENU", ".");
     pub const APP_WORKSPACES_TAB: AppBinding = AppBinding::new_sequence("APP_WORKSPACES_TAB", "wo");
     pub const APP_PEOPLE_TAB: AppBinding = AppBinding::new_sequence("APP_PEOPLE_TAB", "pe");
-    pub const TASK_QUICK_CREATE: AppBinding = AppBinding::new("TASK_QUICK_CREATE", "shift+k");
+    pub const TASK_QUICK_CREATE: AppBinding = AppBinding::new("TASK_QUICK_CREATE", "shift+s");
     pub const NOTE_QUICK_CREATE: AppBinding = AppBinding::new("NOTE_QUICK_CREATE", "shift+n");
     pub const TASK_VIEW_MENU: AppBinding = AppBinding::new("TASK_VIEW_MENU", "shift+f");
     pub const TASK_WORKSPACE_FILTER: AppBinding =
-        AppBinding::new("TASK_WORKSPACE_FILTER", "shift+s");
+        AppBinding::new("TASK_WORKSPACE_FILTER", "shift+p");
     pub const TASK_LABEL_FILTER: AppBinding = AppBinding::new("TASK_LABEL_FILTER", "shift+a");
     pub const TASK_DELETE: AppBinding = AppBinding::new("TASK_DELETE", "delete");
     pub const TASK_DELETE_BACKSPACE: AppBinding = AppBinding::new("TASK_DELETE_X", "backspace");
@@ -531,6 +532,7 @@ pub mod keys {
         NOTES_YANK_PROCESS,
         NOTES_YANK_CLARIFY,
         NOTES_DELETE,
+        NOTES_QUICK_MENU,
         APP_WORKSPACES_TAB,
         APP_PEOPLE_TAB,
         TASK_QUICK_CREATE,
@@ -679,6 +681,7 @@ pub mod keys {
                 NOTES_YANK_PROCESS,
                 NOTES_YANK_CLARIFY,
                 NOTES_DELETE,
+                NOTES_QUICK_MENU,
                 NOTE_QUICK_CREATE,
             ],
         },
@@ -920,9 +923,9 @@ mod tests {
         let keymap = AppKeymap::from_overrides(std::iter::empty::<(String, String)>()).unwrap();
         for (name, expected) in [
             ("TASK_VIEW_MENU", "shift+f"),
-            ("TASK_WORKSPACE_FILTER", "shift+s"),
+            ("TASK_WORKSPACE_FILTER", "shift+p"),
             ("TASK_LABEL_FILTER", "shift+a"),
-            ("TASK_QUICK_CREATE", "shift+k"),
+            ("TASK_QUICK_CREATE", "shift+s"),
             ("NOTE_QUICK_CREATE", "shift+n"),
             ("NOTES_YANK", "yy"),
             ("NOTES_YANK_PROCESS", "yp"),
@@ -973,14 +976,14 @@ mod tests {
     #[test]
     fn active_context_rejects_duplicate_bindings() {
         let error =
-            AppKeymap::from_overrides([("TASK_VIEW_MENU".into(), "shift+k".into())]).unwrap_err();
+            AppKeymap::from_overrides([("TASK_VIEW_MENU".into(), "shift+s".into())]).unwrap_err();
 
         assert!(error.to_string().contains("task space context"));
     }
 
     #[test]
     fn app_create_actions_reject_duplicate_bindings() {
-        let error = AppKeymap::from_overrides([("NOTE_QUICK_CREATE".into(), "shift+k".into())])
+        let error = AppKeymap::from_overrides([("NOTE_QUICK_CREATE".into(), "shift+s".into())])
             .unwrap_err();
 
         assert!(error.to_string().contains("app create actions context"));

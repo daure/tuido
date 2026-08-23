@@ -17,6 +17,7 @@ use crate::domain::{
     TaskRank, TaskSize, TaskState, Workspace, reduce_app_state, task_display_id, task_identifier,
     task_number,
 };
+use crate::note_quick_menu::NoteQuickMenu;
 use crate::notes_config::{DEFAULT_NOTE_EDITING_SETTING, NoteEditingMode, parse_note_editing_mode};
 use crate::persistence_coordinator::{AppStore, PersistenceCommand, PersistenceCoordinator};
 use crate::service::{NoteView, TuidoService, Versioned};
@@ -32,7 +33,7 @@ use crate::speed_reader_settings::{
     parse_speed_reader_wpm,
 };
 use crate::storage::Storage;
-use crate::task_quick_menu::TaskQuickMenu;
+use crate::task_quick_menu::{TaskQuickClipboard, TaskQuickMenu};
 use crate::task_title::format_title;
 use crate::ui::management::{ManagementDialogKind, people, tags, workspaces};
 use crate::ui::notes_workspace::{
@@ -180,6 +181,7 @@ pub(crate) enum AppMsg {
     SetNotesZoom(crate::notes_config::NotesZoomLevels),
     CreateNote,
     PatchNote(NoteChange),
+    OpenNoteQuickMenu(String),
     OpenDeleteNote(String),
     DeleteNoteConfirmed(String),
     OpenManagementDialog(ManagementDialogKind),
@@ -229,6 +231,7 @@ pub(crate) enum AppMsg {
         task_id: String,
         return_focus: Option<TreePath>,
     },
+    OpenCalendarQuickCompleteTask(String),
     CompleteTask {
         task_id: String,
         state: TaskState,
@@ -390,6 +393,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         AppMsg::SetNotesZoom(zoom) => app.set_notes_zoom(zoom, ctx),
         AppMsg::CreateNote => app.create_note(ctx),
         AppMsg::PatchNote(change) => app.patch_note(change),
+        AppMsg::OpenNoteQuickMenu(note_id) => app.open_note_quick_menu(note_id, ctx),
         AppMsg::OpenDeleteNote(id) => app.open_delete_note_dialog(id, ctx),
         AppMsg::DeleteNoteConfirmed(id) => app.delete_note(id, ctx),
         AppMsg::OpenManagementDialog(kind) => app.open_management_dialog(kind, ctx),
@@ -438,6 +442,9 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             task_id,
             return_focus,
         } => app.open_complete_task_dialog(&task_id, return_focus, ctx),
+        AppMsg::OpenCalendarQuickCompleteTask(task_id) => {
+            app.open_calendar_quick_complete_task(&task_id, ctx)
+        }
         AppMsg::CompleteTask { task_id, state } => app.complete_task(task_id, state, ctx),
         AppMsg::ToggleTaskProgress(task_id) => app.toggle_task_progress(task_id, ctx),
         AppMsg::NavigateToTask {
@@ -566,6 +573,7 @@ struct App {
     snooze_return_focus: Option<SnoozeReturnFocus>,
     delete_return_focus: Option<TreePath>,
     complete_return_focus: Option<CompleteReturnFocus>,
+    complete_return_to_calendar: bool,
     active_tab: Rc<Cell<usize>>,
     active_focus_path: Option<TreePath>,
     note_focus_path: Rc<RefCell<TreePath>>,
@@ -688,7 +696,8 @@ impl App {
                     .on_speed_read(AppMsg::OpenNoteSpeedReader)
                     .on_create(|| AppMsg::CreateNote)
                     .on_change(AppMsg::PatchNote)
-                    .on_delete(AppMsg::OpenDeleteNote),
+                    .on_delete(AppMsg::OpenDeleteNote)
+                    .on_quick_menu(AppMsg::OpenNoteQuickMenu),
             ),
         ])
         .selected(0)
@@ -782,6 +791,7 @@ impl App {
             snooze_return_focus: None,
             delete_return_focus: None,
             complete_return_focus: None,
+            complete_return_to_calendar: false,
             active_tab,
             active_focus_path: None,
             note_focus_path,
@@ -1100,6 +1110,7 @@ impl App {
         *self.new_note_edit_request.borrow_mut() = Some(NewNoteEditRequest {
             id: temporary_id.clone(),
             mode,
+            content: None,
         });
         ctx.focus(notes_first_child_focus_request());
         self.context
@@ -1172,10 +1183,34 @@ impl App {
             .iter()
             .any(|note| note.value.id == id)
         {
+            self.close_dialog(ctx);
             return;
         }
         let primary = self.primary_dialog();
         primary.replace_layer(delete_note_dialog(id), ctx);
+        primary.set_fit_content(true);
+        primary.set_active_with_context(true, ctx);
+    }
+
+    fn open_note_quick_menu(&mut self, note_id: String, ctx: &mut EventCtx<AppMsg>) {
+        if !self
+            .context
+            .store
+            .borrow()
+            .state()
+            .notes
+            .iter()
+            .any(|note| note.value.id == note_id)
+        {
+            return;
+        }
+        let primary = self.primary_dialog();
+        primary.replace_layer(
+            AppDialog::NoteQuickMenu(Box::new(NoteQuickMenu::new(note_id))),
+            ctx,
+        );
+        primary.set_layer_percent(40);
+        primary.set_layer_cross_percent(35);
         primary.set_fit_content(true);
         primary.set_active_with_context(true, ctx);
     }
@@ -1710,14 +1745,32 @@ impl App {
     }
 
     fn open_task_quick_menu(&mut self, task_id: &str, ctx: &mut EventCtx<AppMsg>) {
-        if self.task(task_id).is_none() {
+        let store = self.context.store.borrow();
+        let state = store.state();
+        let Some(task) = state.tasks.iter().find(|task| task.id == task_id) else {
             return;
-        }
-        let primary = self.primary_dialog();
-        primary.replace_layer(
-            AppDialog::TaskQuickMenu(Box::new(TaskQuickMenu::new(task_id.to_string()))),
-            ctx,
+        };
+        let ordered_task_ids = state
+            .tasks
+            .iter()
+            .map(|task| task.id.clone())
+            .collect::<Vec<_>>();
+        let (can_move_to_top, can_move_to_bottom) =
+            task_edge_availability(&ordered_task_ids, task_id);
+        let menu = TaskQuickMenu::new(
+            task_id.to_string(),
+            task.state,
+            TaskQuickClipboard {
+                execute: task_agent_command(state, task_id),
+                clarify: task_agent_clarify_command(state, task_id),
+                reference: task_reference(state, task_id),
+            },
+            can_move_to_top,
+            can_move_to_bottom,
         );
+        drop(store);
+        let primary = self.primary_dialog();
+        primary.replace_layer(AppDialog::TaskQuickMenu(Box::new(menu)), ctx);
         primary.set_layer_percent(40);
         primary.set_layer_cross_percent(35);
         primary.set_fit_content(true);
@@ -1730,17 +1783,29 @@ impl App {
         time: PrimitiveDateTime,
         ctx: &mut EventCtx<AppMsg>,
     ) {
-        if self.task(task_id).is_none() {
+        let store = self.context.store.borrow();
+        let state = store.state();
+        let Some(task) = state.tasks.iter().find(|task| task.id == task_id) else {
             return;
-        }
-        let primary = self.primary_dialog();
-        primary.replace_layer(
-            AppDialog::TaskQuickMenu(Box::new(TaskQuickMenu::new_at_time(
-                task_id.to_string(),
-                time,
-            ))),
-            ctx,
+        };
+        let ordered_at_time = task_ids_at_snooze_time(state, time);
+        let (can_move_to_top, can_move_to_bottom) =
+            task_edge_availability(&ordered_at_time, task_id);
+        let menu = TaskQuickMenu::new_at_time(
+            task_id.to_string(),
+            task.state,
+            TaskQuickClipboard {
+                execute: task_agent_command(state, task_id),
+                clarify: task_agent_clarify_command(state, task_id),
+                reference: task_reference(state, task_id),
+            },
+            time,
+            can_move_to_top,
+            can_move_to_bottom,
         );
+        drop(store);
+        let primary = self.primary_dialog();
+        primary.replace_layer(AppDialog::TaskQuickMenu(Box::new(menu)), ctx);
         primary.set_layer_percent(40);
         primary.set_layer_cross_percent(35);
         primary.set_fit_content(true);
@@ -1755,6 +1820,8 @@ impl App {
             .map(|task| task.id.clone())
             .collect::<Vec<_>>();
         let Some(index) = ordered.iter().position(|id| id == task_id) else {
+            self.close_dialog(ctx);
+            focus_task_table(ctx);
             return;
         };
         let task_title = state.tasks[index].title.clone();
@@ -1895,6 +1962,7 @@ impl App {
         ctx: &mut EventCtx<AppMsg>,
     ) {
         self.complete_return_focus = None;
+        self.complete_return_to_calendar = false;
         let Some(task) = self.task(task_id) else {
             self.close_dialog(ctx);
             focus_task_table(ctx);
@@ -1920,7 +1988,13 @@ impl App {
         });
     }
 
+    fn open_calendar_quick_complete_task(&mut self, task_id: &str, ctx: &mut EventCtx<AppMsg>) {
+        self.open_complete_task_dialog(task_id, None, ctx);
+        self.complete_return_to_calendar = self.primary_dialog().is_active();
+    }
+
     fn complete_task(&mut self, task_id: String, state: TaskState, ctx: &mut EventCtx<AppMsg>) {
+        let return_to_calendar = std::mem::take(&mut self.complete_return_to_calendar);
         let task_title = self.task(&task_id).map(|task| task.title);
         let patch = TaskPatch::State(state);
         let outcome = self
@@ -1953,7 +2027,13 @@ impl App {
         }
         self.complete_return_focus = None;
         self.close_dialog(ctx);
-        focus_task_table(ctx);
+        if return_to_calendar {
+            ctx.focus(initial_calendar_focus_request());
+            ctx.stop_propagation();
+            ctx.request_redraw();
+        } else {
+            focus_task_table(ctx);
+        }
     }
 
     fn toggle_task_progress(&mut self, task_id: String, ctx: &mut EventCtx<AppMsg>) {
@@ -2184,6 +2264,7 @@ impl App {
     }
 
     fn close_complete_task_dialog(&mut self, ctx: &mut EventCtx<AppMsg>) {
+        self.complete_return_to_calendar = false;
         let return_focus = self.complete_return_focus.take();
         self.close_dialog(ctx);
         let valid_return_path = return_focus.and_then(|origin| {
@@ -2498,6 +2579,13 @@ pub(crate) fn task_ids_at_snooze_time(state: &AppState, time: PrimitiveDateTime)
         .collect::<Vec<_>>();
     tasks.sort_by_key(|task| task.rank);
     tasks.into_iter().map(|task| task.id.clone()).collect()
+}
+
+fn task_edge_availability(ordered_task_ids: &[String], task_id: &str) -> (bool, bool) {
+    let Some(index) = ordered_task_ids.iter().position(|id| id == task_id) else {
+        return (false, false);
+    };
+    (index > 0, index + 1 < ordered_task_ids.len())
 }
 
 pub(crate) fn persist_task_order(
@@ -3482,6 +3570,8 @@ impl TaskWorkspace {
                 | ListControlEvent::AddCancelled
                 | ListControlEvent::EditCancelled { .. }
                 | ListControlEvent::TreeMoved { .. }
+                | ListControlEvent::TreeBlockMoved { .. }
+                | ListControlEvent::TreeBlockMoveCancelled { .. }
                 | ListControlEvent::CheckedChanged { .. }
                 | ListControlEvent::ReorderCancelled { .. } => {}
             }
