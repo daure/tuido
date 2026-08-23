@@ -170,7 +170,7 @@ fn mcp_error(error: ServiceError) -> String {
 #[tool_router]
 impl McpServer {
     #[tool(
-        description = "Get a normalized task graph. Excludes done and rejected tasks by default; set include_resolved=true to include them. Filters apply to tasks using OR within each property and AND across properties. People, spaces, and tags always contain the complete catalogs so their IDs can be used when creating or updating tasks. Task state is user-facing status. Task people are involved people besides the space owner, never assignees. Revisions are internal concurrency tokens and should normally be omitted from user-facing summaries."
+        description = "Get a normalized task graph with all notes in displayed order. Excludes done and rejected tasks by default; set include_resolved=true to include them. Filters apply to tasks using OR within each property and AND across properties. People, spaces, and tags always contain the complete catalogs so their IDs can be used when creating or updating tasks. Task state is user-facing status. Task people are involved people besides the space owner, never assignees. Revisions are internal concurrency tokens and should normally be omitted from user-facing summaries."
     )]
     async fn get_overview(
         &self,
@@ -256,7 +256,7 @@ impl McpServer {
             .map_err(mcp_error)
     }
     #[tool(
-        description = "Create a task, optionally with a links array. Links are deduplicated and returned sorted by URL. URLs require an explicit scheme such as https:// or file://, or must start with www."
+        description = "Create a task, optionally with checklist, links, relations, and tag labels. All supplied collections persist atomically. Links are deduplicated and returned sorted by URL. URLs require an explicit scheme such as https:// or file://, or must start with www. Issue links are bidirectional and use blocks, is_blocked_by, relates_to, duplicates, or is_duplicated_by. Existing tag labels are reused and missing labels are created atomically."
     )]
     async fn create_task(
         &self,
@@ -926,6 +926,15 @@ mod tests {
     }
 
     #[test]
+    fn task_creation_schema_includes_optional_collections() {
+        let schema = serde_json::to_value(schemars::schema_for!(TaskCreate)).unwrap();
+        let properties = schema["properties"].as_object().unwrap();
+        for property in ["checklist", "links", "relations", "tags"] {
+            assert!(properties.contains_key(property), "{property}");
+        }
+    }
+
+    #[test]
     fn workspace_and_list_tools_return_object_shaped_structured_content() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -959,6 +968,18 @@ mod tests {
                 .await
                 .unwrap();
             let server = McpServer::new(service);
+            server
+                .create_note(Parameters(NoteInput {
+                    content: "Earlier overview note".into(),
+                }))
+                .await
+                .unwrap();
+            server
+                .create_note(Parameters(NoteInput {
+                    content: "Newest overview note".into(),
+                }))
+                .await
+                .unwrap();
 
             let workspace = server
                 .get_space_by_key(Parameters(SpaceKey { key: "core".into() }))
@@ -966,15 +987,26 @@ mod tests {
                 .unwrap();
             assert_eq!(workspace.0.value.workspace.key, "CORE");
 
+            let overview = serde_json::to_value(
+                server
+                    .get_overview(Parameters(WorkspaceFilter::default()))
+                    .await
+                    .unwrap()
+                    .0,
+            )
+            .unwrap();
+            assert_eq!(
+                overview["notes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|note| note["value"]["content"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                ["Newest overview note", "Earlier overview note"]
+            );
+
             let responses = [
-                serde_json::to_value(
-                    server
-                        .get_overview(Parameters(WorkspaceFilter::default()))
-                        .await
-                        .unwrap()
-                        .0,
-                )
-                .unwrap(),
+                overview,
                 serde_json::to_value(server.list_people().await.unwrap().0).unwrap(),
                 serde_json::to_value(server.get_all_spaces().await.unwrap().0).unwrap(),
                 serde_json::to_value(server.list_tags().await.unwrap().0).unwrap(),
@@ -1014,6 +1046,9 @@ mod tests {
                 workspace_id: Some(workspace.value.id.clone()),
                 tag_ids: Vec::new(),
                 links: Vec::new(),
+                checklist: Vec::new(),
+                relations: Vec::new(),
+                tags: Vec::new(),
             };
             let first = service.create_task(create("First", "")).await.unwrap();
             let second = service
@@ -1166,6 +1201,9 @@ mod tests {
                 workspace_id: None,
                 tag_ids: Vec::new(),
                 links: Vec::new(),
+                checklist: Vec::new(),
+                relations: Vec::new(),
+                tags: Vec::new(),
             };
 
             let first = server
@@ -1226,6 +1264,9 @@ mod tests {
                     workspace_id: None,
                     tag_ids: Vec::new(),
                     links: Vec::new(),
+                    checklist: Vec::new(),
+                    relations: Vec::new(),
+                    tags: Vec::new(),
                 }))
                 .await
                 .unwrap()
@@ -1286,6 +1327,9 @@ mod tests {
                     workspace_id: None,
                     tag_ids: Vec::new(),
                     links: Vec::new(),
+                    checklist: Vec::new(),
+                    relations: Vec::new(),
+                    tags: Vec::new(),
                 }))
                 .await
                 .unwrap()
@@ -1329,6 +1373,9 @@ mod tests {
                         "https://z.example/item".into(),
                         "https://a.example/item".into(),
                     ],
+                    checklist: Vec::new(),
+                    relations: Vec::new(),
+                    tags: Vec::new(),
                 }))
                 .await
                 .unwrap()
@@ -1407,6 +1454,9 @@ mod tests {
                     workspace_id: None,
                     tag_ids: Vec::new(),
                     links: Vec::new(),
+                    checklist: Vec::new(),
+                    relations: Vec::new(),
+                    tags: Vec::new(),
                 }))
                 .await
                 .unwrap()
@@ -1493,6 +1543,9 @@ mod tests {
                     workspace_id: None,
                     tag_ids: Vec::new(),
                     links: Vec::new(),
+                    checklist: Vec::new(),
+                    relations: Vec::new(),
+                    tags: Vec::new(),
                 }))
                 .await
                 .unwrap()
@@ -1509,6 +1562,9 @@ mod tests {
                     workspace_id: None,
                     tag_ids: Vec::new(),
                     links: Vec::new(),
+                    checklist: Vec::new(),
+                    relations: Vec::new(),
+                    tags: Vec::new(),
                 }))
                 .await
                 .unwrap()

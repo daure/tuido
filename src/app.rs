@@ -17,12 +17,10 @@ use crate::domain::{
     TaskRank, TaskSize, TaskState, Workspace, reduce_app_state, task_display_id, task_identifier,
     task_number,
 };
+use crate::notes_config::{DEFAULT_NOTE_EDITING_SETTING, NoteEditingMode, parse_note_editing_mode};
 use crate::persistence_coordinator::{AppStore, PersistenceCommand, PersistenceCoordinator};
 use crate::service::{NoteView, TuidoService, Versioned};
 use crate::settings_dialog::SettingsDialog;
-use crate::notes_config::{
-    DEFAULT_NOTE_EDITING_SETTING, NoteEditingMode, parse_note_editing_mode,
-};
 use crate::snooze::{
     DEFAULT_SNOOZE_TIME_SETTING, SnoozeDialog, format_datetime, format_default_snooze_time,
     local_now, parse_default_snooze_time,
@@ -571,6 +569,7 @@ struct App {
     active_tab: Rc<Cell<usize>>,
     active_focus_path: Option<TreePath>,
     note_focus_path: Rc<RefCell<TreePath>>,
+    focus_note_request: Rc<RefCell<Option<String>>>,
     new_note_edit_request: Rc<RefCell<Option<NewNoteEditRequest>>>,
     pending_task_view: TaskViewChange,
     pending_task_navigation: PendingTaskNavigation,
@@ -624,9 +623,9 @@ pub(crate) fn task_agent_clarify_command(state: &AppState, task_id: &str) -> Opt
     task_agent_command_for(state, task_id, "clarify")
 }
 
-pub(crate) fn task_copy_payload(state: &AppState, task_id: &str) -> Option<String> {
+pub(crate) fn task_reference(state: &AppState, task_id: &str) -> Option<String> {
     let task = state.tasks.iter().find(|task| task.id == task_id)?;
-    Some(TaskCopyContext::new(&state.people, &state.workspaces, &state.tags).export(task))
+    Some(TaskCopyContext::new(&state.workspaces).reference(task))
 }
 
 impl App {
@@ -649,6 +648,7 @@ impl App {
         let context = AppContext { store, coordinator };
         let active_tab = Rc::new(Cell::new(0));
         let note_focus_path = Rc::new(RefCell::new(TreePath::new()));
+        let focus_note_request = Rc::new(RefCell::new(None));
         let new_note_edit_request = Rc::new(RefCell::new(None));
         let pending_task_view = Rc::new(RefCell::new(None));
         let pending_task_navigation = Rc::new(RefCell::new(None));
@@ -681,6 +681,7 @@ impl App {
                 NotesWorkspace::new()
                     .note_store(Rc::clone(&context.store))
                     .focus_path_sink(Rc::clone(&note_focus_path))
+                    .focus_note_request(Rc::clone(&focus_note_request))
                     .new_note_edit_request(Rc::clone(&new_note_edit_request))
                     .zoom_levels(notes_zoom)
                     .on_zoom_change(AppMsg::SetNotesZoom)
@@ -728,11 +729,7 @@ impl App {
             .justify(MainAlign::SpaceBetween)
             .align(CrossAlign::Center)
             .gap(1)
-            .child(
-                "new-actions",
-                new_actions,
-                FlexItem::content(),
-            )
+            .child("new-actions", new_actions, FlexItem::content())
             .child("filters", task_filters, FlexItem::content());
         let content = Flex::column()
             .child("actions", actions, FlexItem::fixed(1))
@@ -788,6 +785,7 @@ impl App {
             active_tab,
             active_focus_path: None,
             note_focus_path,
+            focus_note_request,
             new_note_edit_request,
             pending_task_view,
             pending_task_navigation,
@@ -844,6 +842,66 @@ impl App {
         });
         self.active_tab.set(TASKS_TAB_INDEX);
         self.pending_focus_request = Some(initial_task_table_focus_request());
+    }
+
+    fn show_externally_created_backlog_task(&mut self, task_id: String) {
+        *self.pending_task_navigation.borrow_mut() = Some(TaskNavigation {
+            target_task_id: task_id,
+            source_task_id: None,
+            view: TaskView::Backlog,
+        });
+        self.active_tab.set(TASKS_TAB_INDEX);
+        self.pending_focus_request = Some(initial_task_table_focus_request());
+    }
+
+    fn show_externally_changed_note(&mut self, note_id: String) {
+        self.active_tab.set(NOTES_TAB_INDEX);
+        *self.focus_note_request.borrow_mut() = Some(note_id.clone());
+        self.pending_focus_request = Some(FocusRequest::Path(note_path(
+            notes_workspace_focus_path(),
+            &note_id,
+        )));
+    }
+
+    fn route_external_navigation(&mut self) -> bool {
+        let (note_id, started_task_id, created_backlog_task_id) = {
+            let store = self.context.store.borrow();
+            let state = store.state();
+            (
+                state.external_note_focus_id.clone(),
+                state.external_started_task_id.clone(),
+                state.external_created_backlog_task_id.clone(),
+            )
+        };
+        let Some(route) = created_backlog_task_id
+            .clone()
+            .map(ExternalNavigation::CreatedBacklogTask)
+            .or_else(|| started_task_id.clone().map(ExternalNavigation::StartedTask))
+            .or_else(|| note_id.clone().map(ExternalNavigation::Note))
+        else {
+            return false;
+        };
+
+        let mut store = self.context.store.borrow_mut();
+        if let Some(task_id) = created_backlog_task_id {
+            store.dispatch(AppEvent::ExternalCreatedBacklogTaskHandled(task_id));
+        }
+        if let Some(task_id) = started_task_id {
+            store.dispatch(AppEvent::ExternalStartedTaskHandled(task_id));
+        }
+        if let Some(note_id) = note_id {
+            store.dispatch(AppEvent::ExternalNoteFocusHandled(note_id));
+        }
+        drop(store);
+
+        match route {
+            ExternalNavigation::CreatedBacklogTask(task_id) => {
+                self.show_externally_created_backlog_task(task_id)
+            }
+            ExternalNavigation::StartedTask(task_id) => self.show_externally_started_task(task_id),
+            ExternalNavigation::Note(note_id) => self.show_externally_changed_note(note_id),
+        }
+        true
     }
 
     fn open_settings_dialog(&mut self, ctx: &mut EventCtx<AppMsg>) {
@@ -1073,13 +1131,16 @@ impl App {
         before.revision = change.revision;
         before.value.content = change.base_content;
         if current.revision != before.revision {
-            self.context.store.borrow_mut().dispatch(AppEvent::NotePatched {
-                before: before.clone(),
-                result: Err(format!(
-                    "conflict: note changed elsewhere (expected revision {}, found {})",
-                    before.revision, current.revision
-                )),
-            });
+            self.context
+                .store
+                .borrow_mut()
+                .dispatch(AppEvent::NotePatched {
+                    before: before.clone(),
+                    result: Err(format!(
+                        "conflict: note changed elsewhere (expected revision {}, found {})",
+                        before.revision, current.revision
+                    )),
+                });
         }
         let mut optimistic = before.clone();
         optimistic.value.content = change.content.clone();
@@ -1122,7 +1183,12 @@ impl App {
     fn delete_note(&mut self, id: String, ctx: &mut EventCtx<AppMsg>) {
         let (note, index, return_focus) = {
             let state = self.context.store.borrow();
-            let Some(index) = state.state().notes.iter().position(|note| note.value.id == id) else {
+            let Some(index) = state
+                .state()
+                .notes
+                .iter()
+                .position(|note| note.value.id == id)
+            else {
                 drop(state);
                 self.close_dialog(ctx);
                 return;
@@ -1132,7 +1198,11 @@ impl App {
                 .state()
                 .notes
                 .get(index + 1)
-                .or_else(|| index.checked_sub(1).and_then(|index| state.state().notes.get(index)))
+                .or_else(|| {
+                    index
+                        .checked_sub(1)
+                        .and_then(|index| state.state().notes.get(index))
+                })
                 .map(|note| note.value.id.clone());
             (note, index, return_focus)
         };
@@ -2232,21 +2302,9 @@ impl TuiNode<AppMsg> for App {
 
     fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
         let mut result = self.root.tick(dt, settings);
-        if self.context.coordinator.borrow_mut().poll() {
-            let started_task_id = self
-                .context
-                .store
-                .borrow()
-                .state()
-                .external_started_task_id
-                .clone();
-            if let Some(task_id) = started_task_id {
-                self.context
-                    .store
-                    .borrow_mut()
-                    .dispatch(AppEvent::ExternalStartedTaskHandled(task_id.clone()));
-                self.show_externally_started_task(task_id);
-            }
+        let persistence_changed = self.context.coordinator.borrow_mut().poll();
+        let navigation_changed = self.route_external_navigation();
+        if persistence_changed || navigation_changed {
             result = result.merge(TickResult {
                 changed: true,
                 layout: true,
@@ -2529,6 +2587,7 @@ fn issue_links_focus_request() -> FocusRequest {
             ChildKey::new("tabs"),
             ChildKey::new("tab-0"),
             ChildKey::second(),
+            ChildKey::body(),
             ChildKey::new("form"),
             ChildKey::new("relations"),
             ChildKey::new("data"),
@@ -2554,6 +2613,13 @@ fn notes_first_child_focus_request() -> FocusRequest {
         unreachable!("app tabs focus request must target the tabs control");
     };
     FocusRequest::FirstChildOf { path, id }
+}
+
+fn notes_workspace_focus_path() -> TreePath {
+    let FocusRequest::TargetAt { path, .. } = app_tabs_focus_request() else {
+        unreachable!("app tabs focus request must target the tabs control");
+    };
+    path.child(ChildKey::new("tab-2"))
 }
 
 fn initial_calendar_focus_request() -> FocusRequest {
@@ -2590,6 +2656,12 @@ struct TaskNavigation {
     target_task_id: String,
     source_task_id: Option<String>,
     view: TaskView,
+}
+
+enum ExternalNavigation {
+    CreatedBacklogTask(String),
+    StartedTask(String),
+    Note(String),
 }
 
 impl TaskView {
@@ -3739,6 +3811,26 @@ impl TaskWorkspace {
         ctx.stop_propagation();
         Some(EventOutcome::Handled)
     }
+
+    fn handle_task_reference_yank(
+        &self,
+        event: &TuiEvent,
+        ctx: &mut EventCtx<AppMsg>,
+    ) -> Option<EventOutcome> {
+        if !matches!(event, TuiEvent::Yank) {
+            return None;
+        }
+        let reference = self
+            .visible_selection
+            .borrow()
+            .as_ref()
+            .and_then(|task_id| task_reference(self.context.store.borrow().state(), task_id));
+        if let Some(reference) = reference {
+            ctx.copy_to_clipboard(reference);
+        }
+        ctx.stop_propagation();
+        Some(EventOutcome::Handled)
+    }
 }
 
 impl TuiNode<AppMsg> for TaskWorkspace {
@@ -3748,6 +3840,10 @@ impl TuiNode<AppMsg> for TaskWorkspace {
         self.sync_store_version();
         self.sync_workspace_filter_change();
         self.sync_label_filter_change();
+        self.detail_mut().set_layout_limits(
+            area.width < crate::ui::responsive_split::MASTER_DETAIL_NARROW_BREAKPOINT,
+            area.height,
+        );
         self.layout.layout(area, ctx)
     }
 
@@ -3758,6 +3854,9 @@ impl TuiNode<AppMsg> for TaskWorkspace {
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<AppMsg>) -> EventOutcome {
         self.sync_store_version();
         if let Some(outcome) = self.handle_task_agent_yank(event, ctx) {
+            return outcome;
+        }
+        if let Some(outcome) = self.handle_task_reference_yank(event, ctx) {
             return outcome;
         }
         let outcome = self.layout.event(event, ctx);
@@ -3793,6 +3892,9 @@ impl TuiNode<AppMsg> for TaskWorkspace {
     ) -> EventOutcome {
         self.sync_store_version();
         if let Some(outcome) = self.handle_task_agent_yank(event, ctx) {
+            return outcome;
+        }
+        if let Some(outcome) = self.handle_task_reference_yank(event, ctx) {
             return outcome;
         }
         let outcome = self.layout.dispatch_event(route, event, ctx);

@@ -104,6 +104,8 @@ pub struct WorkspaceGraph {
     #[schemars(schema_with = "revision_schema")]
     pub revision: u64,
     pub tasks: Vec<Versioned<TaskView>>,
+    /// Notes in their displayed order.
+    pub notes: Vec<Versioned<NoteView>>,
     pub people: Vec<Versioned<PersonView>>,
     #[serde(rename = "spaces")]
     pub workspaces: Vec<Versioned<WorkspaceView>>,
@@ -281,6 +283,15 @@ pub struct TaskCreate {
     #[serde(default)]
     /// Task URLs. Values require an explicit scheme or a www. prefix.
     pub links: Vec<String>,
+    #[serde(default)]
+    /// Ordered checklist tree. Omit to create a task without checklist items.
+    pub checklist: Vec<ChecklistItemInput>,
+    #[serde(default)]
+    /// Issue links from this task's perspective.
+    pub relations: Vec<TaskRelationInput>,
+    #[serde(default)]
+    /// Tag labels. Existing labels are reused and missing labels are created atomically.
+    pub tags: Vec<String>,
 }
 fn default_size() -> String {
     "medium".into()
@@ -464,9 +475,9 @@ impl TuidoService {
         let notes = sqlx::query(
             "SELECT id, position, content, created_at, updated_at, revision FROM notes",
         )
-            .fetch_all(&mut *tx)
-            .await
-            .map_err(storage_error)?;
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(storage_error)?;
         let delete_sql = format!(
             "DELETE FROM notes WHERE id = {} AND content = {} AND revision = {}",
             self.dialect.placeholder(1),
@@ -707,7 +718,7 @@ impl TuidoService {
     }
 
     pub async fn workspace(&self) -> ServiceResult<WorkspaceGraph> {
-        let consistent = self.consistent_workspace().await?;
+        let (consistent, notes) = self.consistent_workspace_with_notes().await?;
         let snapshot = consistent.snapshot;
         let revisions = consistent.entity_revisions;
         let linked_tasks = snapshot
@@ -738,6 +749,7 @@ impl TuidoService {
                     )
                 })
                 .collect::<ServiceResult<_>>()?,
+            notes,
             people: snapshot
                 .people
                 .into_iter()
@@ -905,7 +917,15 @@ impl TuidoService {
 
     pub(crate) async fn create_task_entity(
         &self,
+        task: Task,
+    ) -> ServiceResult<Versioned<TaskView>> {
+        self.create_task_entity_with_tags(task, Vec::new()).await
+    }
+
+    async fn create_task_entity_with_tags(
+        &self,
         mut task: Task,
+        tags: Vec<Tag>,
     ) -> ServiceResult<Versioned<TaskView>> {
         if task.title.trim().is_empty() {
             return Err(ServiceError::Invalid("task title is required".into()));
@@ -947,6 +967,7 @@ impl TuidoService {
         let mut tx = self.pool.begin().await.map_err(storage_error)?;
         let number = self.next_task_number(&mut tx).await?;
         task.id = task_identifier(number, workspace_key.as_deref());
+        validate_task_relations(&task.id, &task.relations)?;
         bump_workspace(&mut tx, self.dialect).await?;
         let row = sqlx::query("SELECT COALESCE(MIN(rank), 0) - 1 AS rank FROM tasks")
             .fetch_one(&mut *tx)
@@ -980,6 +1001,14 @@ impl TuidoService {
         .await?;
         self.replace_task_workspace(&mut tx, &task.id, task.workspace_id.as_deref())
             .await?;
+        task.tag_ids.extend(
+            self.find_or_create_tags(&mut tx, tags)
+                .await?
+                .into_iter()
+                .map(|(id, _)| id),
+        );
+        let mut seen_tag_ids = HashSet::new();
+        task.tag_ids.retain(|id| seen_tag_ids.insert(id.clone()));
         self.replace_links(&mut tx, "task_tags", "tag_id", &task.id, &task.tag_ids)
             .await?;
         self.replace_task_links(&mut tx, &task.id, &task_link_urls)
@@ -1008,24 +1037,31 @@ impl TuidoService {
             .map(crate::snooze::parse_datetime)
             .transpose()
             .map_err(|e| ServiceError::Invalid(e.to_string()))?;
-        self.create_task_entity(Task {
-            id: String::new(),
-            rank: 0,
-            created_at: String::new(),
-            updated_at: String::new(),
-            title: input.title.trim().into(),
-            state,
-            size,
-            priority,
-            snoozed_until,
-            people_ids: input.people_ids,
-            workspace_id: input.workspace_id,
-            tag_ids: input.tag_ids,
-            checklist: Vec::new(),
-            links: input.links.into_iter().map(TaskLink::new).collect(),
-            relations: Vec::new(),
-            description: input.description,
-        })
+        let mut checklist = Vec::new();
+        flatten_checklist_inputs(input.checklist, None, &mut checklist);
+        let relations = task_relation_inputs(input.relations)?;
+        let tags = tags_from_labels(input.tags)?;
+        self.create_task_entity_with_tags(
+            Task {
+                id: String::new(),
+                rank: 0,
+                created_at: String::new(),
+                updated_at: String::new(),
+                title: input.title.trim().into(),
+                state,
+                size,
+                priority,
+                snoozed_until,
+                people_ids: input.people_ids,
+                workspace_id: input.workspace_id,
+                tag_ids: input.tag_ids,
+                checklist,
+                links: input.links.into_iter().map(TaskLink::new).collect(),
+                relations,
+                description: input.description,
+            },
+            tags,
+        )
         .await
     }
 
@@ -1129,33 +1165,8 @@ impl TuidoService {
             }
             TaskPatch::Tags(tags) => {
                 let mut ids = Vec::new();
-                for tag in tags {
-                    validate_required("tag label", &tag.label)?;
-                    let insert = format!(
-                        "INSERT INTO tags (id, label) VALUES ({}, {}) ON CONFLICT(label) DO NOTHING",
-                        self.dialect.placeholder(1),
-                        self.dialect.placeholder(2)
-                    );
-                    sqlx::query(AssertSqlSafe(insert.as_str()))
-                        .bind(&tag.id)
-                        .bind(tag.label.trim())
-                        .execute(&mut *tx)
-                        .await
-                        .map_err(storage_error)?;
-                    let select = format!(
-                        "SELECT id, revision FROM tags WHERE label = {}",
-                        self.dialect.placeholder(1)
-                    );
-                    let row = sqlx::query(AssertSqlSafe(select.as_str()))
-                        .bind(tag.label.trim())
-                        .fetch_one(&mut *tx)
-                        .await
-                        .map_err(storage_error)?;
-                    let tag_id = row.try_get::<String, _>("id").map_err(storage_error)?;
-                    related_revisions.insert(
-                        format!("tag:{tag_id}"),
-                        row.try_get::<i64, _>("revision").map_err(storage_error)? as u64,
-                    );
+                for (tag_id, revision) in self.find_or_create_tags(&mut tx, tags).await? {
+                    related_revisions.insert(format!("tag:{tag_id}"), revision);
                     ids.push(tag_id);
                 }
                 self.replace_links(&mut tx, "task_tags", "tag_id", &id, &ids)
@@ -1394,18 +1405,45 @@ impl TuidoService {
         expected_revision: u64,
         labels: Vec<String>,
     ) -> ServiceResult<Versioned<TaskView>> {
-        let mut seen = HashSet::new();
-        let mut tags = Vec::new();
-        for label in labels {
-            validate_required("tag label", &label)?;
-            let label = label.trim().to_string();
-            if seen.insert(label.clone()) {
-                tags.push(Tag::new(Uuid::new_v4().to_string(), label));
-            }
-        }
+        let tags = tags_from_labels(labels)?;
         self.patch_task(id.clone(), expected_revision, TaskPatch::Tags(tags))
             .await?;
         self.get_task(&id).await
+    }
+
+    async fn find_or_create_tags(
+        &self,
+        tx: &mut Transaction<'_, Any>,
+        tags: Vec<Tag>,
+    ) -> ServiceResult<Vec<(String, u64)>> {
+        let mut resolved = Vec::new();
+        for tag in tags {
+            let insert = format!(
+                "INSERT INTO tags (id, label) VALUES ({}, {}) ON CONFLICT(label) DO NOTHING",
+                self.dialect.placeholder(1),
+                self.dialect.placeholder(2)
+            );
+            sqlx::query(AssertSqlSafe(insert.as_str()))
+                .bind(&tag.id)
+                .bind(&tag.label)
+                .execute(&mut **tx)
+                .await
+                .map_err(storage_error)?;
+            let select = format!(
+                "SELECT id, revision FROM tags WHERE label = {}",
+                self.dialect.placeholder(1)
+            );
+            let row = sqlx::query(AssertSqlSafe(select.as_str()))
+                .bind(&tag.label)
+                .fetch_one(&mut **tx)
+                .await
+                .map_err(storage_error)?;
+            resolved.push((
+                row.try_get("id").map_err(storage_error)?,
+                row.try_get::<i64, _>("revision").map_err(storage_error)? as u64,
+            ));
+        }
+        Ok(resolved)
     }
 
     pub async fn delete_task(
@@ -2511,6 +2549,19 @@ fn task_relation_inputs(inputs: Vec<TaskRelationInput>) -> ServiceResult<Vec<Tas
             })
         })
         .collect()
+}
+
+fn tags_from_labels(labels: Vec<String>) -> ServiceResult<Vec<Tag>> {
+    let mut seen = HashSet::new();
+    let mut tags = Vec::new();
+    for label in labels {
+        validate_required("tag label", &label)?;
+        let label = label.trim().to_string();
+        if seen.insert(label.clone()) {
+            tags.push(Tag::new(Uuid::new_v4().to_string(), label));
+        }
+    }
+    Ok(tags)
 }
 
 fn storage_workflow_state(v: &str) -> &str {

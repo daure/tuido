@@ -15,6 +15,7 @@ pub(super) struct TaskTitleInput {
     saved_title: Rc<RefCell<String>>,
     display_id: Rc<RefCell<String>>,
     rendered_display_id: String,
+    area: Rect,
 }
 
 impl TaskTitleInput {
@@ -41,6 +42,7 @@ impl TaskTitleInput {
             saved_title,
             display_id,
             rendered_display_id,
+            area: Rect::default(),
         }
     }
 
@@ -70,6 +72,7 @@ impl TuiNode<AppMsg> for TaskTitleInput {
     }
 
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
+        self.area = area;
         let display_id = self.display_id.borrow().clone();
         if display_id != self.rendered_display_id {
             self.input
@@ -104,6 +107,10 @@ impl TuiNode<AppMsg> for TaskTitleInput {
 
     fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<AppMsg>) {
         self.input.dispatch_focus(target, focused, ctx);
+    }
+
+    fn focus_reveal_area(&self, _target: &FocusTarget) -> Option<Rect> {
+        (!self.area.is_empty()).then_some(self.area)
     }
 
     fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
@@ -170,6 +177,25 @@ mod tests {
             .collect::<String>();
         assert!(!updated_border.contains("APP-42"));
         assert!(updated_border.contains("42"));
+    }
+
+    #[test]
+    fn focus_reveal_includes_title_panel_chrome() {
+        let patches = Rc::new(RefCell::new(Vec::new()));
+        let mut input = TaskTitleInput::new(
+            "Saved title",
+            Rc::new(RefCell::new("APP-42".into())),
+            patches,
+        );
+        let area = Rect::new(0, 0, 30, 3);
+        let mut layout = LayoutCtx::new();
+        input.layout(area, &mut layout);
+        let target = layout
+            .focus_targets()
+            .first()
+            .expect("title should be focusable");
+
+        assert_eq!(input.focus_reveal_area(target), Some(area));
     }
 
     #[test]

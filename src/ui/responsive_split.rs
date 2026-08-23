@@ -10,6 +10,7 @@ use tuicore::{
     LayoutSizeHint, LifecycleCtx, TickResult, TuiEvent, TuiNode,
 };
 
+pub(crate) const MASTER_DETAIL_NARROW_BREAKPOINT: u16 = 100;
 const NARROW_MASTER_MIN_HEIGHT: u16 = 3;
 
 pub(crate) struct ResponsiveSplit<F, S> {
@@ -19,6 +20,8 @@ pub(crate) struct ResponsiveSplit<F, S> {
     wide_ratio: (u16, u16),
     narrow_second_content: bool,
     narrow_second_max_above_min: Option<u16>,
+    narrow_second_max_percent: Option<u16>,
+    narrow_first_percent_space_between: Option<u16>,
     second_visible: bool,
     first_area: Rect,
     second_area: Rect,
@@ -26,7 +29,7 @@ pub(crate) struct ResponsiveSplit<F, S> {
 
 impl<F, S> ResponsiveSplit<F, S> {
     pub(crate) fn master_detail(first: F, second: S) -> Self {
-        Self::new(first, second, 100)
+        Self::new(first, second, MASTER_DETAIL_NARROW_BREAKPOINT)
             .wide_ratio(60, 40)
             .narrow_second_content()
     }
@@ -39,6 +42,8 @@ impl<F, S> ResponsiveSplit<F, S> {
             wide_ratio: (50, 50),
             narrow_second_content: false,
             narrow_second_max_above_min: None,
+            narrow_second_max_percent: None,
+            narrow_first_percent_space_between: None,
             second_visible: true,
             first_area: Rect::default(),
             second_area: Rect::default(),
@@ -55,8 +60,19 @@ impl<F, S> ResponsiveSplit<F, S> {
         self
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn narrow_second_max_above_min(mut self, extra_rows: u16) -> Self {
         self.narrow_second_max_above_min = Some(extra_rows);
+        self
+    }
+
+    pub(crate) fn narrow_second_max_percent(mut self, percent: u16) -> Self {
+        self.narrow_second_max_percent = Some(percent.min(100));
+        self
+    }
+
+    pub(crate) fn narrow_first_percent_space_between(mut self, percent: u16) -> Self {
+        self.narrow_first_percent_space_between = Some(percent.min(100));
         self
     }
 
@@ -111,13 +127,20 @@ impl<F, S> ResponsiveSplit<F, S> {
         ]
     }
 
-    fn narrow_second_height(&self, hint: LayoutSizeHint) -> u16 {
-        self.narrow_second_max_above_min
+    fn narrow_second_height(&self, hint: LayoutSizeHint, available_height: Option<u16>) -> u16 {
+        let height = self
+            .narrow_second_max_above_min
             .map_or(hint.preferred.height, |extra_rows| {
                 hint.preferred
                     .height
                     .min(hint.min.height.saturating_add(extra_rows))
-            })
+            });
+        match (self.narrow_second_max_percent, available_height) {
+            (Some(percent), Some(available_height)) => {
+                height.min(available_height.saturating_mul(percent) / 100)
+            }
+            _ => height,
+        }
     }
 }
 
@@ -138,7 +161,13 @@ where
         };
         let (min, preferred) = if stacked {
             let second_height = if self.narrow_second_content {
-                self.narrow_second_height(second)
+                self.narrow_second_height(
+                    second,
+                    match proposal.height {
+                        AxisProposal::Exact(height) | AxisProposal::AtMost(height) => Some(height),
+                        AxisProposal::Unbounded => None,
+                    },
+                )
             } else {
                 second.preferred.height
             };
@@ -200,9 +229,33 @@ where
             let second_hint = self
                 .second
                 .measure(LayoutProposal::at_most(area.width, area.height));
-            let second_height = self
-                .narrow_second_height(second_hint)
-                .min(area.height.saturating_sub(NARROW_MASTER_MIN_HEIGHT));
+            let mut second_height = self
+                .narrow_second_height(second_hint, Some(area.height))
+                .min(self.narrow_first_percent_space_between.map_or_else(
+                    || area.height.saturating_sub(NARROW_MASTER_MIN_HEIGHT),
+                    |percent| area.height.saturating_sub(area.height * percent / 100),
+                ));
+            if let Some(percent) = self.narrow_first_percent_space_between {
+                let first_height = area.height * percent / 100;
+                let remaining_height = area.height.saturating_sub(first_height);
+                if remaining_height.saturating_sub(second_height) <= 1 {
+                    second_height = remaining_height;
+                }
+                self.first_area = Rect::new(area.x, area.y, area.width, first_height);
+                self.second_area = Rect::new(
+                    area.x,
+                    area.bottom().saturating_sub(second_height),
+                    area.width,
+                    second_height,
+                );
+                ctx.push_slot(ChildKey::first(), self.first_area, |ctx| {
+                    self.first.layout(self.first_area, ctx);
+                });
+                ctx.push_slot(ChildKey::second(), self.second_area, |ctx| {
+                    self.second.layout(self.second_area, ctx);
+                });
+                return LayoutResult::new(area);
+            }
             [Constraint::Fill(1), Constraint::Length(second_height)]
         } else if stacked {
             Self::ratio_constraints((50, 50))
@@ -485,6 +538,56 @@ mod tests {
 
         assert_eq!(hint.preferred.height, 9);
         assert_eq!(split.child_areas().1.height, 6);
+    }
+
+    #[test]
+    fn configured_narrow_percentage_caps_second_height_and_gives_first_the_remainder() {
+        let mut split =
+            ResponsiveSplit::master_detail(MeasuredNode::new(1, 3), MeasuredNode::new(4, 80))
+                .narrow_second_max_percent(70);
+
+        <ResponsiveSplit<_, _> as TuiNode<()>>::layout(
+            &mut split,
+            Rect::new(0, 0, 80, 50),
+            &mut LayoutCtx::new(),
+        );
+
+        assert_eq!(split.child_areas().0.height, 15);
+        assert_eq!(split.child_areas().1.height, 35);
+    }
+
+    #[test]
+    fn configured_narrow_first_percentage_keeps_content_detail_at_the_bottom() {
+        let mut split =
+            ResponsiveSplit::master_detail(MeasuredNode::new(1, 3), MeasuredNode::new(4, 80))
+                .narrow_second_max_percent(70)
+                .narrow_first_percent_space_between(25);
+
+        <ResponsiveSplit<_, _> as TuiNode<()>>::layout(
+            &mut split,
+            Rect::new(0, 0, 80, 50),
+            &mut LayoutCtx::new(),
+        );
+
+        assert_eq!(split.child_areas().0, Rect::new(0, 0, 80, 12));
+        assert_eq!(split.child_areas().1, Rect::new(0, 15, 80, 35));
+    }
+
+    #[test]
+    fn complementary_narrow_percentages_do_not_leave_a_rounding_gap() {
+        let mut split =
+            ResponsiveSplit::master_detail(MeasuredNode::new(1, 3), MeasuredNode::new(4, 80))
+                .narrow_second_max_percent(75)
+                .narrow_first_percent_space_between(25);
+
+        <ResponsiveSplit<_, _> as TuiNode<()>>::layout(
+            &mut split,
+            Rect::new(0, 0, 80, 50),
+            &mut LayoutCtx::new(),
+        );
+
+        assert_eq!(split.child_areas().0, Rect::new(0, 0, 80, 12));
+        assert_eq!(split.child_areas().1, Rect::new(0, 12, 80, 38));
     }
 
     #[test]

@@ -360,6 +360,9 @@ pub mod keys {
     pub const NOTES_EDIT: AppBinding = AppBinding::new_sequence("NOTES_EDIT", "dd");
     pub const NOTES_OPEN_EDITOR: AppBinding = AppBinding::new_sequence("NOTES_OPEN_EDITOR", "do");
     pub const NOTES_SPEED_READ: AppBinding = AppBinding::new_sequence("NOTES_SPEED_READ", "ds");
+    pub const NOTES_YANK: AppBinding = AppBinding::new_sequence("NOTES_YANK", "yy");
+    pub const NOTES_YANK_PROCESS: AppBinding = AppBinding::new_sequence("NOTES_YANK_PROCESS", "yp");
+    pub const NOTES_YANK_CLARIFY: AppBinding = AppBinding::new_sequence("NOTES_YANK_CLARIFY", "yc");
     pub const NOTES_DELETE: AppBinding = AppBinding::new("NOTES_DELETE", "ctrl+x");
     pub const APP_WORKSPACES_TAB: AppBinding = AppBinding::new_sequence("APP_WORKSPACES_TAB", "wo");
     pub const APP_PEOPLE_TAB: AppBinding = AppBinding::new_sequence("APP_PEOPLE_TAB", "pe");
@@ -377,7 +380,7 @@ pub mod keys {
     pub const TASK_SNOOZE: AppBinding = AppBinding::new("TASK_SNOOZE", "ctrl+z");
     pub const TASK_COMPLETE: AppBinding = AppBinding::new("TASK_COMPLETE", "ctrl+c");
     pub const TASK_TOGGLE_PROGRESS: AppBinding = AppBinding::new("TASK_TOGGLE_PROGRESS", "ctrl+t");
-    pub const TASK_AGENT_YANK: AppBinding = AppBinding::new_sequence("TASK_AGENT_YANK", "ya");
+    pub const TASK_AGENT_YANK: AppBinding = AppBinding::new_sequence("TASK_AGENT_YANK", "ye");
     pub const TASK_AGENT_YANK_CLARIFY: AppBinding =
         AppBinding::new_sequence("TASK_AGENT_YANK_CLARIFY", "yc");
     pub const TASK_LINK_OPEN_BACKGROUND: AppBinding =
@@ -524,6 +527,9 @@ pub mod keys {
         NOTES_EDIT,
         NOTES_OPEN_EDITOR,
         NOTES_SPEED_READ,
+        NOTES_YANK,
+        NOTES_YANK_PROCESS,
+        NOTES_YANK_CLARIFY,
         NOTES_DELETE,
         APP_WORKSPACES_TAB,
         APP_PEOPLE_TAB,
@@ -669,6 +675,9 @@ pub mod keys {
                 NOTES_EDIT,
                 NOTES_OPEN_EDITOR,
                 NOTES_SPEED_READ,
+                NOTES_YANK,
+                NOTES_YANK_PROCESS,
+                NOTES_YANK_CLARIFY,
                 NOTES_DELETE,
                 NOTE_QUICK_CREATE,
             ],
@@ -915,10 +924,13 @@ mod tests {
             ("TASK_LABEL_FILTER", "shift+a"),
             ("TASK_QUICK_CREATE", "shift+k"),
             ("NOTE_QUICK_CREATE", "shift+n"),
+            ("NOTES_YANK", "yy"),
+            ("NOTES_YANK_PROCESS", "yp"),
+            ("NOTES_YANK_CLARIFY", "yc"),
             ("TASK_SNOOZE", "ctrl+z"),
             ("TASK_COMPLETE", "ctrl+c"),
             ("TASK_TOGGLE_PROGRESS", "ctrl+t"),
-            ("TASK_AGENT_YANK", "ya"),
+            ("TASK_AGENT_YANK", "ye"),
             ("TASK_AGENT_YANK_CLARIFY", "yc"),
             ("TASK_LINK_OPEN_BACKGROUND", "ctrl+enter"),
             ("TASK_LINK_TOGGLE_TITLE", "space"),
@@ -968,16 +980,16 @@ mod tests {
 
     #[test]
     fn app_create_actions_reject_duplicate_bindings() {
-        let error =
-            AppKeymap::from_overrides([("NOTE_QUICK_CREATE".into(), "shift+k".into())]).unwrap_err();
+        let error = AppKeymap::from_overrides([("NOTE_QUICK_CREATE".into(), "shift+k".into())])
+            .unwrap_err();
 
         assert!(error.to_string().contains("app create actions context"));
     }
 
     #[test]
     fn notes_grid_rejects_note_quick_create_prefix_collision() {
-        let error = AppKeymap::from_overrides([("NOTE_QUICK_CREATE".into(), "d".into())])
-            .unwrap_err();
+        let error =
+            AppKeymap::from_overrides([("NOTE_QUICK_CREATE".into(), "d".into())]).unwrap_err();
 
         assert!(error.to_string().contains("notes grid context"));
     }

@@ -121,7 +121,11 @@ impl SettingsDialog {
             .child("calendar-view", calendar_view, FlexItem::content())
             .child("snooze-time", snooze_time, FlexItem::fixed(3))
             .child("default-workspace", default_workspace, FlexItem::content())
-            .child("default-note-editing", default_note_editing, FlexItem::content())
+            .child(
+                "default-note-editing",
+                default_note_editing,
+                FlexItem::content(),
+            )
             .child("speed-reader", speed_reader, FlexItem::content());
         Self {
             root,

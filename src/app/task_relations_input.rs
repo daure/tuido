@@ -23,6 +23,7 @@ pub(super) struct TaskRelationsInput {
     committed: Vec<TaskRelationRow>,
     patch_sink: PatchSink,
     source_task_id: String,
+    area: Rect,
 }
 
 impl TaskRelationsInput {
@@ -159,6 +160,7 @@ impl TaskRelationsInput {
             committed,
             patch_sink,
             source_task_id: task.id.clone(),
+            area: Rect::default(),
         }
     }
 
@@ -303,6 +305,7 @@ impl TuiNode<AppMsg> for TaskRelationsInput {
         self.input.measure(proposal)
     }
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
+        self.area = area;
         self.input.layout(area, ctx)
     }
     fn render<'a>(&'a self, frame: &mut Frame, area: Rect, ctx: &mut RenderCtx<'a>) {
@@ -325,6 +328,9 @@ impl TuiNode<AppMsg> for TaskRelationsInput {
     }
     fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<AppMsg>) {
         self.input.dispatch_focus(target, focused, ctx);
+    }
+    fn focus_reveal_area(&self, _target: &FocusTarget) -> Option<Rect> {
+        (!self.area.is_empty()).then_some(self.area)
     }
     fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
         self.input.tick(dt, settings)
@@ -465,6 +471,32 @@ mod tests {
             .expect("requested issue link should be highlighted");
         assert_eq!(highlighted.relation.task_id, "second");
         assert_eq!(highlighted.id, "second");
+    }
+
+    #[test]
+    fn focus_reveal_includes_issue_links_panel_chrome() {
+        let first = Task::quick_capture(
+            "first".into(),
+            "First".into(),
+            String::new(),
+            TaskSize::Small,
+        );
+        let mut input = TaskRelationsInput::new(
+            &first,
+            std::slice::from_ref(&first),
+            &[],
+            std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+            None,
+        );
+        let area = Rect::new(0, 0, 40, 3);
+        let mut layout = LayoutCtx::new();
+        input.layout(area, &mut layout);
+        let target = layout
+            .focus_targets()
+            .first()
+            .expect("issue links should be focusable");
+
+        assert_eq!(input.focus_reveal_area(target), Some(area));
     }
 
     #[test]

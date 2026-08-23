@@ -703,7 +703,10 @@ fn notes_navigation_uses_the_full_app_focus_path() {
     });
     let mut app = App::new(context.store, context.coordinator);
     app.active_tab.set(2);
-    set_notes(&mut app, vec![test_note("note-0", 0), test_note("note-1", 1)]);
+    set_notes(
+        &mut app,
+        vec![test_note("note-0", 0), test_note("note-1", 1)],
+    );
     let mut layout = LayoutCtx::new();
     app.layout(Rect::new(0, 0, 120, 30), &mut layout);
     let panel = layout
@@ -769,11 +772,13 @@ fn stale_note_draft_after_refresh_surfaces_conflict_without_overwriting_newer_no
 
     let state = app.context.store.borrow();
     assert_eq!(state.state().notes[0].value.content, "newer remote content");
-    assert!(state
-        .state()
-        .note_error
-        .as_deref()
-        .is_some_and(|error| error.contains("conflict")));
+    assert!(
+        state
+            .state()
+            .note_error
+            .as_deref()
+            .is_some_and(|error| error.contains("conflict"))
+    );
 }
 
 #[test]
@@ -805,7 +810,10 @@ fn new_note_from_tasks_switches_to_notes_and_focuses_notes_tab_content() {
     app.layout(Rect::new(0, 0, 120, 30), &mut layout);
     let mut focus = FocusManager::new();
     let transition = focus
-        .apply_request(ctx.focus_request().expect("new note should request focus"), layout.focus_targets())
+        .apply_request(
+            ctx.focus_request().expect("new note should request focus"),
+            layout.focus_targets(),
+        )
         .expect("notes tab should have a focusable note");
     let panel = format!("panel-{note_id}");
 
@@ -838,7 +846,13 @@ fn creating_a_note_enters_inline_editing() {
     let target = layout
         .focus_targets()
         .iter()
-        .find(|target| target.path.keys().last().is_some_and(|key| key.as_str() == format!("panel-{pending_id}")))
+        .find(|target| {
+            target
+                .path
+                .keys()
+                .last()
+                .is_some_and(|key| key.as_str() == format!("panel-{pending_id}"))
+        })
         .expect("pending note should be focusable")
         .clone();
     assert!(target.focused_events_before_global_hotkeys);
@@ -901,7 +915,13 @@ fn creating_a_note_opens_the_external_editor_when_configured() {
     let target = layout
         .focus_targets()
         .iter()
-        .find(|target| target.path.keys().last().is_some_and(|key| key.as_str() == format!("panel-{pending_id}")))
+        .find(|target| {
+            target
+                .path
+                .keys()
+                .last()
+                .is_some_and(|key| key.as_str() == format!("panel-{pending_id}"))
+        })
         .expect("pending note should be focusable")
         .clone();
     let mut focus = FocusManager::new();
@@ -944,7 +964,13 @@ fn note_editing_keeps_new_task_hotkey_as_text() {
     let target = layout
         .focus_targets()
         .iter()
-        .find(|target| target.path.keys().last().is_some_and(|key| key.as_str() == "panel-note-0"))
+        .find(|target| {
+            target
+                .path
+                .keys()
+                .last()
+                .is_some_and(|key| key.as_str() == "panel-note-0")
+        })
         .expect("note should be focusable")
         .clone();
     let route = EventRoute::new(target.path.clone());
@@ -977,10 +1003,12 @@ fn note_editing_keeps_new_task_hotkey_as_text() {
         AnimationSettings::default(),
     );
 
-    assert!(!effects
-        .messages
-        .iter()
-        .any(|message| matches!(message, AppMsg::OpenCreateTask { .. })));
+    assert!(
+        !effects
+            .messages
+            .iter()
+            .any(|message| matches!(message, AppMsg::OpenCreateTask { .. }))
+    );
 }
 
 #[test]
@@ -1571,11 +1599,8 @@ fn task_table_shows_current_workspace_key_task_number_and_title() {
     );
     let mut task = task_with("OLD-42", "Ship it", TaskState::Todo);
     task.workspace_id = Some(workspace.id.clone());
-    let mut table = task_table_with_copy_context(
-        vec![task],
-        None,
-        TaskCopyContext::new(&[], &[workspace], &[]),
-    );
+    let mut table =
+        task_table_with_copy_context(vec![task], None, TaskCopyContext::new(&[workspace]));
     let area = Rect::new(0, 0, 80, 5);
     <TaskTable as TuiNode<AppMsg>>::layout(&mut table, area, &mut LayoutCtx::new());
 
@@ -1730,123 +1755,25 @@ fn task_table_uses_persisted_rank_order() {
 }
 
 #[test]
-fn yanking_highlighted_task_copies_pretty_resolved_agent_json() {
-    let ada = Person {
-        id: "person-ada".into(),
-        name: "Ada Lovelace".into(),
-        email: "ada@example.com".into(),
-        about: "Computing pioneer".into(),
-        active: true,
-    };
-    let grace = Person {
-        id: "person-grace".into(),
-        name: "Grace Hopper".into(),
-        email: "grace@example.com".into(),
-        about: "Compiler expert".into(),
-        active: false,
-    };
-    let workspace_alpha = Workspace {
-        id: "workspace-alpha".into(),
-        key: "ALPHA".into(),
-        name: "Alpha".into(),
-        description: "First workspace".into(),
-        lead_person_id: Some(grace.id.clone()),
-    };
-    let workspace_beta = Workspace {
-        id: "workspace-beta".into(),
-        key: "BETA".into(),
-        name: "Beta".into(),
-        description: String::new(),
-        lead_person_id: None,
-    };
-    let urgent = Tag {
-        id: "tag-urgent".into(),
-        label: "urgent".into(),
-    };
-    let backend = Tag {
-        id: "tag-backend".into(),
-        label: "backend".into(),
-    };
-    let first = task_with("task-first", "Wrong highlighted task", TaskState::Todo);
-    let mut highlighted = task_with("task-highlighted", "Ship agent export", TaskState::Snoozed);
-    highlighted.description = "Full detail\nwith context".into();
-    highlighted.size = TaskSize::Big;
-    highlighted.priority = TaskPriority::High;
-    highlighted.snoozed_until = Some(PrimitiveDateTime::new(
-        Date::from_calendar_date(2026, time::Month::August, 3).unwrap(),
-        time::Time::from_hms(9, 8, 7).unwrap(),
-    ));
-    highlighted.people_ids = vec![grace.id.clone(), ada.id.clone()];
-    highlighted.workspace_id = Some(workspace_alpha.id.clone());
-    highlighted.tag_ids = vec![backend.id.clone(), urgent.id.clone()];
-    highlighted.links = vec![
-        "www.example.com/work".into(),
-        "https://tracker.example/ABC-1".into(),
-    ];
-    let copy_context = TaskCopyContext::new(
-        &[ada.clone(), grace.clone()],
-        &[workspace_alpha.clone(), workspace_beta.clone()],
-        &[urgent.clone(), backend.clone()],
+fn yanking_highlighted_task_copies_tuido_reference() {
+    let workspace = Workspace::new(
+        "workspace-alpha".into(),
+        "ALPHA".into(),
+        "Alpha".into(),
+        String::new(),
     );
+    let first = task_with("task-first", "Wrong highlighted task", TaskState::Todo);
+    let mut highlighted = task_with("OLD-1234", "Ship agent export", TaskState::Snoozed);
+    highlighted.workspace_id = Some(workspace.id.clone());
+    let copy_context = TaskCopyContext::new(&[workspace]);
     let mut table = task_table_with_copy_context(vec![first, highlighted], None, copy_context);
-    table
-        .data_view_mut()
-        .highlight_id(&"task-highlighted".to_string());
+    table.data_view_mut().highlight_id(&"OLD-1234".to_string());
 
     let effects = yank_task_table(&mut table);
     let payload = effects
         .clipboard
         .expect("yank should request clipboard copy");
-    let json: serde_json::Value = serde_json::from_str(&payload).expect("copy should be JSON");
-
-    assert!(
-        payload.contains("\n  \"id\""),
-        "JSON should be pretty printed"
-    );
-    assert_eq!(json["id"], "task-highlighted");
-    assert_eq!(json["title"], "Ship agent export");
-    assert_eq!(json["description"], "Full detail\nwith context");
-    assert!(json.get("detail").is_none());
-    assert_eq!(json["state"], "snoozed");
-    assert_eq!(json["size"], "big");
-    assert_eq!(json["priority"], "high");
-    assert_eq!(json["snoozed_until"], "2026-08-03T09:08:07");
-    assert_eq!(
-        json["people"],
-        serde_json::json!([
-            {"id": "person-grace", "name": "Grace Hopper", "email": "grace@example.com", "active": false},
-            {"id": "person-ada", "name": "Ada Lovelace", "email": "ada@example.com", "active": true}
-        ])
-    );
-    assert_eq!(
-        json["space"],
-        serde_json::json!({"id": "workspace-alpha", "key": "ALPHA", "name": "Alpha", "description": "First workspace", "lead": {"id": "person-grace", "name": "Grace Hopper", "email": "grace@example.com", "active": false}})
-    );
-    assert_eq!(
-        json["tags"],
-        serde_json::json!([
-            {"id": "tag-backend", "label": "backend"},
-            {"id": "tag-urgent", "label": "urgent"}
-        ])
-    );
-    assert_eq!(
-        json["links"],
-        serde_json::json!([
-            "https://www.example.com/work",
-            "https://tracker.example/ABC-1"
-        ])
-    );
-    for excluded in [
-        "revision",
-        "people_ids",
-        "workspace_id",
-        "tag_ids",
-        "workspace_revision",
-        "selected_task_id",
-        "save_errors",
-    ] {
-        assert!(json.get(excluded).is_none(), "unexpected field: {excluded}");
-    }
+    assert_eq!(payload, "Tuido ALPHA-1234 \"Ship agent export\"");
     assert!(effects.outcome.handled());
     assert_eq!(effects.notifications.len(), 1);
     assert_eq!(
@@ -1855,30 +1782,6 @@ fn yanking_highlighted_task_copies_pretty_resolved_agent_json() {
             "Copied to clipboard",
             format!("\"{payload}\"")
         )]
-    );
-}
-
-#[test]
-fn yanking_task_with_missing_relation_copies_descriptive_json_error() {
-    let mut task = test_task();
-    task.people_ids = vec!["missing-person".into()];
-    let mut table =
-        task_table_with_copy_context(vec![task], Some("task-1"), TaskCopyContext::default());
-
-    let effects = yank_task_table(&mut table);
-    let payload = effects.clipboard.expect("error document should be copied");
-    let json: serde_json::Value = serde_json::from_str(&payload).expect("error should be JSON");
-
-    assert_eq!(
-        json,
-        serde_json::json!({
-            "error": {
-                "message": "task copy could not resolve relationship",
-                "task_id": "task-1",
-                "relation": "person",
-                "id": "missing-person"
-            }
-        })
     );
 }
 
@@ -1973,7 +1876,7 @@ fn clarify_yank_copies_selected_task_command_from_detail_view() {
 
     let mut ctx = EventCtx::default();
     let outcome = workspace.dispatch_event(
-        &EventRoute::new(detail_path),
+        &EventRoute::new(detail_path.clone()),
         &TuiEvent::Hotkey(HotkeyEvent::Commit(keys::TASK_AGENT_YANK_CLARIFY.hotkey())),
         &mut ctx,
     );
@@ -1982,6 +1885,19 @@ fn clarify_yank_copies_selected_task_command_from_detail_view() {
     assert_eq!(
         effects.clipboard.as_deref(),
         Some("Tuido clarify PROJ-1234 \"Clarify this task\"")
+    );
+
+    let mut yank_ctx = EventCtx::default();
+    let outcome = workspace.dispatch_event(
+        &EventRoute::new(detail_path),
+        &TuiEvent::Yank,
+        &mut yank_ctx,
+    );
+    let effects = tuicore::DispatchEffects::from_event_ctx(outcome, yank_ctx);
+
+    assert_eq!(
+        effects.clipboard.as_deref(),
+        Some("Tuido PROJ-1234 \"Clarify this task\"")
     );
 }
 

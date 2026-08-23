@@ -42,6 +42,8 @@ pub struct AppState {
     pub workspace_revision: u64,
     pub entity_revisions: HashMap<String, u64>,
     pub external_started_task_id: Option<String>,
+    pub external_created_backlog_task_id: Option<String>,
+    pub external_note_focus_id: Option<String>,
     pub link_title_fetches: HashSet<(String, String)>,
 }
 
@@ -83,6 +85,8 @@ impl AppState {
             workspace_revision: 0,
             entity_revisions: HashMap::new(),
             external_started_task_id: None,
+            external_created_backlog_task_id: None,
+            external_note_focus_id: None,
             link_title_fetches: HashSet::new(),
         }
     }
@@ -268,6 +272,8 @@ pub enum AppEvent {
         entity_revisions: HashMap<String, u64>,
     },
     ExternalStartedTaskHandled(String),
+    ExternalCreatedBacklogTaskHandled(String),
+    ExternalNoteFocusHandled(String),
     RefreshFailed(String),
     RefreshSucceeded,
     TaskLinkTitleFetchStarted {
@@ -333,10 +339,21 @@ impl SaveTarget {
 pub fn reduce_app_state(state: &mut AppState, event: AppEvent) -> DispatchOutcome {
     match event {
         AppEvent::NotesLoaded(notes) => {
+            let external_note_focus_id = notes
+                .iter()
+                .find(|note| {
+                    state
+                        .notes
+                        .iter()
+                        .find(|previous| previous.value.id == note.value.id)
+                        .is_none_or(|previous| previous.revision != note.revision)
+                })
+                .map(|note| note.value.id.clone());
             state
                 .note_placeholders
                 .retain(|id, _| notes.iter().any(|note| note.value.id == *id));
             state.notes = notes;
+            state.external_note_focus_id = external_note_focus_id;
             state.note_error = None;
             state.notes_version += 1;
             DispatchOutcome::layout()
@@ -381,11 +398,10 @@ pub fn reduce_app_state(state: &mut AppState, event: AppEvent) -> DispatchOutcom
                     .iter()
                     .map(|existing| existing.value.id.clone())
                     .collect::<HashSet<_>>();
-                let additions =
-                    retained_notes
-                        .into_iter()
-                        .filter(|retained| !existing_ids.contains(&retained.value.id))
-                        .collect::<Vec<_>>();
+                let additions = retained_notes
+                    .into_iter()
+                    .filter(|retained| !existing_ids.contains(&retained.value.id))
+                    .collect::<Vec<_>>();
                 state.notes.extend(additions);
                 state.notes.sort_by(|left, right| {
                     left.value
@@ -419,11 +435,10 @@ pub fn reduce_app_state(state: &mut AppState, event: AppEvent) -> DispatchOutcom
                 .iter()
                 .map(|existing| existing.value.id.clone())
                 .collect::<HashSet<_>>();
-            let additions =
-                restored_notes
-                    .into_iter()
-                    .filter(|restored| !existing_ids.contains(&restored.value.id))
-                    .collect::<Vec<_>>();
+            let additions = restored_notes
+                .into_iter()
+                .filter(|restored| !existing_ids.contains(&restored.value.id))
+                .collect::<Vec<_>>();
             state.notes.extend(additions);
             state.notes.sort_by(|left, right| {
                 left.value
@@ -925,6 +940,13 @@ pub fn reduce_app_state(state: &mut AppState, event: AppEvent) -> DispatchOutcom
                 })
                 .min_by_key(|task| task.rank)
                 .map(|task| task.id.clone());
+            let external_created_backlog_task_id = snapshot
+                .tasks
+                .iter()
+                .filter(|task| task.state == TaskState::Backlog)
+                .filter(|task| !state.tasks.iter().any(|previous| previous.id == task.id))
+                .min_by_key(|task| task.rank)
+                .map(|task| task.id.clone());
             let selected_task = state.selected_task_id.clone();
             let selected_person = state.selected_person_id.clone();
             let selected_workspace = state.selected_workspace_id.clone();
@@ -939,9 +961,13 @@ pub fn reduce_app_state(state: &mut AppState, event: AppEvent) -> DispatchOutcom
             state.selected_workspace_id =
                 retained_selection(selected_workspace, &state.workspaces, |v| &v.id);
             state.selected_tag_id = retained_selection(selected_tag, &state.tags, |v| &v.id);
+            if let Some(task_id) = external_created_backlog_task_id.as_ref() {
+                state.selected_task_id = Some(task_id.clone());
+            }
             state.workspace_revision = revision;
             state.entity_revisions = entity_revisions;
             state.external_started_task_id = external_started_task_id;
+            state.external_created_backlog_task_id = external_created_backlog_task_id;
             state.refresh_error = None;
             state.external_refresh_version += 1;
             state.version += 1;
@@ -950,6 +976,18 @@ pub fn reduce_app_state(state: &mut AppState, event: AppEvent) -> DispatchOutcom
         AppEvent::ExternalStartedTaskHandled(task_id) => {
             if state.external_started_task_id.as_deref() == Some(&task_id) {
                 state.external_started_task_id = None;
+            }
+            DispatchOutcome::unchanged()
+        }
+        AppEvent::ExternalCreatedBacklogTaskHandled(task_id) => {
+            if state.external_created_backlog_task_id.as_deref() == Some(&task_id) {
+                state.external_created_backlog_task_id = None;
+            }
+            DispatchOutcome::unchanged()
+        }
+        AppEvent::ExternalNoteFocusHandled(note_id) => {
+            if state.external_note_focus_id.as_deref() == Some(&note_id) {
+                state.external_note_focus_id = None;
             }
             DispatchOutcome::unchanged()
         }
@@ -1820,6 +1858,43 @@ mod tests {
         );
 
         assert_eq!(state.external_started_task_id.as_deref(), Some("task-1"));
+    }
+
+    #[test]
+    fn external_note_refresh_marks_created_and_updated_notes_for_focus() {
+        let note = |id: &str, revision| Versioned {
+            revision,
+            value: NoteView {
+                id: id.into(),
+                position: 0,
+                content: String::new(),
+                created_at: String::new(),
+                updated_at: String::new(),
+            },
+        };
+        let mut state = AppState::from_snapshot(WorkspaceSnapshot {
+            tasks: Vec::new(),
+            people: Vec::new(),
+            workspaces: Vec::new(),
+            tags: Vec::new(),
+        });
+        state.notes = vec![note("existing", 1)];
+
+        reduce_app_state(
+            &mut state,
+            AppEvent::NotesLoaded(vec![note("created", 1), note("existing", 1)]),
+        );
+        assert_eq!(state.external_note_focus_id.as_deref(), Some("created"));
+
+        reduce_app_state(
+            &mut state,
+            AppEvent::ExternalNoteFocusHandled("created".into()),
+        );
+        reduce_app_state(
+            &mut state,
+            AppEvent::NotesLoaded(vec![note("created", 1), note("existing", 2)]),
+        );
+        assert_eq!(state.external_note_focus_id.as_deref(), Some("existing"));
     }
 
     fn request_setting(state: &mut AppState, value: &str, generation: u64) {

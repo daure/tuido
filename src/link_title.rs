@@ -13,7 +13,13 @@ pub(crate) async fn fetch(url: &str) -> Option<String> {
         .user_agent("Tuido link title fetcher")
         .build()
         .ok()?;
-    let response = client.get(target).send().await.ok()?.error_for_status().ok()?;
+    let response = client
+        .get(target)
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?;
     if response
         .content_length()
         .is_some_and(|length| length > 2 * 1024 * 1024)

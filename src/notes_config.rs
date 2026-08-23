@@ -1,6 +1,5 @@
 use std::{
-    fs,
-    io,
+    fs, io,
     path::Path,
     sync::{Mutex, OnceLock},
 };
@@ -125,7 +124,9 @@ fn save_notes_zoom_to(
     fs::create_dir_all(parent)?;
     let temporary = parent.join(format!(
         ".{}.{}.tmp",
-        path.file_name().and_then(|name| name.to_str()).unwrap_or("tuido"),
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("tuido"),
         uuid::Uuid::new_v4()
     ));
     let result = (|| -> io::Result<()> {

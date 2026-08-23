@@ -146,7 +146,10 @@ fn note_create_remaps_temporary_id_before_queued_patch() {
     assert_eq!(persisted[0].value.content, "typed before create completed");
     let local = store.borrow();
     assert_eq!(local.state().notes[0].value.id, persisted[0].value.id);
-    assert_eq!(local.state().notes[0].value.content, persisted[0].value.content);
+    assert_eq!(
+        local.state().notes[0].value.content,
+        persisted[0].value.content
+    );
     assert_eq!(local.state().notes[0].revision, persisted[0].revision);
 }
 
@@ -253,7 +256,10 @@ fn queued_note_patches_use_revision_from_previous_completion() {
     assert_eq!(persisted[0].value.content, "second edit");
     assert_eq!(persisted[0].revision, 3);
     let local = store.borrow();
-    assert_eq!(local.state().notes[0].value.content, persisted[0].value.content);
+    assert_eq!(
+        local.state().notes[0].value.content,
+        persisted[0].value.content
+    );
     assert_eq!(local.state().notes[0].revision, persisted[0].revision);
 }
 
@@ -271,16 +277,19 @@ fn stale_refresh_cannot_replace_newer_local_workspace() {
             });
     }
     let mut coordinator = test_coordinator(&runtime, &pool, Rc::clone(&store));
-    set_notes(&store, vec![Versioned {
-        revision: 1,
-        value: NoteView {
-            id: "latest-note".into(),
-            position: 0,
-            content: "local note".into(),
-            created_at: String::new(),
-            updated_at: String::new(),
-        },
-    }]);
+    set_notes(
+        &store,
+        vec![Versioned {
+            revision: 1,
+            value: NoteView {
+                id: "latest-note".into(),
+                position: 0,
+                content: "local note".into(),
+                created_at: String::new(),
+                updated_at: String::new(),
+            },
+        }],
+    );
     coordinator
         .refresh_tx
         .send(Ok(RefreshCompletion {
@@ -1265,11 +1274,13 @@ fn failed_note_create_restores_optimistically_removed_empty_notes() {
         state.state().notes.as_slice(),
         [note] if note.value.id == removed.value.id && note.value.position == removed.value.position
     ));
-    assert!(state
-        .state()
-        .note_error
-        .as_deref()
-        .is_some_and(|error| error.starts_with("Note create failed:")));
+    assert!(
+        state
+            .state()
+            .note_error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("Note create failed:"))
+    );
 }
 
 #[test]
@@ -1372,11 +1383,13 @@ fn note_failures_restore_state_and_expose_operation_errors() {
 
     let state = store.borrow();
     assert_eq!(state.state().notes[0].value.content, "persisted");
-    assert!(state
-        .state()
-        .note_error
-        .as_deref()
-        .is_some_and(|error| error.starts_with("Note update failed:")));
+    assert!(
+        state
+            .state()
+            .note_error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("Note update failed:"))
+    );
     drop(state);
     settle(&mut coordinator);
     assert_eq!(store.borrow().state().note_error, None);

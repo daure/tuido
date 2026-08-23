@@ -8,12 +8,12 @@ use std::{
 
 use ratatui::{Frame, layout::Rect};
 use tuicore::{
-    AnimationSettings, ChildKey, EventCtx, EventOutcome, EventRoute, FocusCtx, FocusRequest,
-    FocusTarget, Grid, GridItem, GridTrack, HotkeyEvent, HotkeyMatch, HotkeySequenceMatcher,
-    InputChrome, InputPanelChrome, Key, KeyEvent, KeyModifiers, Language, LayoutCtx,
-    LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, Paragraph, RelativeDate,
-    RelativeDateMode, ScrollContainer, ScrollOffset, TextareaInput, TextareaInputKeyBindings,
-    TickResult, TreePath, TuiEvent, TuiNode, keybindings,
+    AnimationSettings, ChildKey, EventCtx, EventOutcome, EventRoute, FocusCtx, FocusId,
+    FocusRequest, FocusTarget, Grid, GridItem, GridTrack, HotkeyEvent, HotkeyMatch,
+    HotkeySequenceMatcher, InputChrome, InputPanelChrome, Language, LayoutCtx, LayoutProposal,
+    LayoutResult, LayoutSizeHint, LifecycleCtx, Paragraph, RelativeDate, RelativeDateMode,
+    ScrollContainer, ScrollOffset, TextareaInput, TextareaInputKeyBindings, TickResult, TreePath,
+    TuiEvent, TuiNode,
 };
 
 use crate::{app_keymap::keys, notes_config::NoteEditingMode, persistence_coordinator::AppStore};
@@ -86,7 +86,7 @@ pub(crate) struct NotesWorkspace<M = ()> {
     focused_note_id: Option<String>,
     selected_target: Option<FocusTarget>,
     new_note_edit_request: Option<Rc<RefCell<Option<NewNoteEditRequest>>>>,
-    pending_top_prefix: bool,
+    focus_note_request: Option<Rc<RefCell<Option<String>>>>,
     pending_scroll_offset: Option<ScrollOffset>,
     grid_scroll_offset: ScrollOffset,
     reveal_after_rebuild: bool,
@@ -115,7 +115,13 @@ impl<M: 'static> NotesWorkspace<M> {
         let notes = Vec::new();
         let base_contents = Vec::new();
         let editing = Vec::new();
-        let command_hotkeys = vec![keys::NOTES_EDIT.hotkey(), keys::NOTES_OPEN_EDITOR.hotkey()];
+        let command_hotkeys = vec![
+            keys::NOTES_EDIT.hotkey(),
+            keys::NOTES_OPEN_EDITOR.hotkey(),
+            keys::NOTES_YANK.hotkey(),
+            keys::NOTES_YANK_PROCESS.hotkey(),
+            keys::NOTES_YANK_CLARIFY.hotkey(),
+        ];
         Self {
             scroll: notes_grid(
                 columns,
@@ -159,7 +165,7 @@ impl<M: 'static> NotesWorkspace<M> {
             focused_note_id: None,
             selected_target: None,
             new_note_edit_request: None,
-            pending_top_prefix: false,
+            focus_note_request: None,
             pending_scroll_offset: None,
             grid_scroll_offset: ScrollOffset::default(),
             reveal_after_rebuild: false,
@@ -232,6 +238,11 @@ impl<M: 'static> NotesWorkspace<M> {
         self
     }
 
+    pub(crate) fn focus_note_request(mut self, request: Rc<RefCell<Option<String>>>) -> Self {
+        self.focus_note_request = Some(request);
+        self
+    }
+
     fn base_columns_for(width: u16) -> usize {
         if width < NARROW_BREAKPOINT { 2 } else { 6 }
     }
@@ -246,6 +257,7 @@ impl<M: 'static> NotesWorkspace<M> {
 
     fn sync_layout(&mut self, width: u16) -> bool {
         let notes_changed = self.sync_notes();
+        let focus_requested = self.take_focus_note_request();
         self.base_columns = Self::base_columns_for(width);
         let available_columns = Self::available_columns(self.base_columns);
         let columns = available_columns[self.current_zoom().min(available_columns.len() - 1)];
@@ -253,13 +265,28 @@ impl<M: 'static> NotesWorkspace<M> {
         if self.columns != columns || self.panel_height != panel_height {
             self.columns = columns;
             self.panel_height = panel_height;
-            self.rebuild_grid(true);
+            self.rebuild_grid(focus_requested);
             return true;
         }
-        if notes_changed {
-            self.rebuild_grid(false);
+        if notes_changed || focus_requested {
+            self.rebuild_grid(focus_requested);
         }
         notes_changed
+    }
+
+    fn take_focus_note_request(&mut self) -> bool {
+        let Some(note_id) = self
+            .focus_note_request
+            .as_ref()
+            .and_then(|request| request.borrow_mut().take())
+        else {
+            return false;
+        };
+        if !self.note_ids.contains(&note_id) {
+            return false;
+        }
+        self.focused_note_id = Some(note_id);
+        true
     }
 
     fn sync_notes(&mut self) -> bool {
@@ -439,75 +466,6 @@ impl<M: 'static> NotesWorkspace<M> {
         }
     }
 
-    fn navigate_selection(
-        &mut self,
-        event: &TuiEvent,
-        ctx: &mut EventCtx<M>,
-    ) -> Option<EventOutcome> {
-        let TuiEvent::Key(key) = event else {
-            return None;
-        };
-        let bindings = keybindings();
-        let count = self.notes.len();
-        if count == 0 {
-            return None;
-        }
-        let current = self.focused_index().unwrap_or(0).min(count - 1);
-        let target = if bindings.home_matches(*key) {
-            self.pending_top_prefix = false;
-            Some(0)
-        } else if bindings.end_matches(*key) || bindings.bottom_matches(*key) {
-            self.pending_top_prefix = false;
-            Some(count - 1)
-        } else if bindings.top_prefix_matches(*key) {
-            if self.pending_top_prefix {
-                self.pending_top_prefix = false;
-                Some(0)
-            } else {
-                self.pending_top_prefix = true;
-                ctx.stop_propagation();
-                return Some(EventOutcome::Handled);
-            }
-        } else if bindings.page_up_matches(*key) && !textarea_page_key(*key) {
-            self.pending_top_prefix = false;
-            Some(self.move_selection_rows(current, -3))
-        } else if bindings.page_down_matches(*key) && !textarea_page_key(*key) {
-            self.pending_top_prefix = false;
-            Some(self.move_selection_rows(current, 3))
-        } else {
-            self.pending_top_prefix = false;
-            return None;
-        };
-
-        if let Some(target) = target {
-            let target_id = self.note_ids[target].clone();
-            self.focused_note_id = Some(target_id.clone());
-            self.rebuild_grid(true);
-            ctx.focus(FocusRequest::Path(note_path(
-                self.focus_path.clone(),
-                &target_id,
-            )));
-            ctx.request_redraw();
-        }
-        ctx.stop_propagation();
-        Some(EventOutcome::Handled)
-    }
-
-    fn move_selection_rows(&self, current: usize, rows: isize) -> usize {
-        let column = current % self.columns;
-        let current_row = current / self.columns;
-        let max_row = (0..)
-            .take_while(|row| row * self.columns + column < self.notes.len())
-            .last()
-            .unwrap_or(current_row);
-        let target_row = if rows.is_negative() {
-            current_row.saturating_sub(rows.unsigned_abs())
-        } else {
-            current_row.saturating_add(rows as usize).min(max_row)
-        };
-        target_row * self.columns + column
-    }
-
     fn move_focus(
         &mut self,
         route: &EventRoute,
@@ -562,8 +520,37 @@ impl<M: 'static> NotesWorkspace<M> {
             HotkeyMatch::Canceled => HotkeyEvent::Canceled,
             HotkeyMatch::Matched(index) => HotkeyEvent::Commit(self.command_hotkeys[index].clone()),
         };
-        self.scroll
-            .dispatch_event(route, &TuiEvent::Hotkey(hotkey), ctx);
+        let event = TuiEvent::Hotkey(hotkey);
+        if let Some(outcome) = self.handle_note_yank(&event, ctx) {
+            return Some(outcome);
+        }
+        self.scroll.dispatch_event(route, &event, ctx);
+        ctx.stop_propagation();
+        Some(EventOutcome::Handled)
+    }
+
+    fn handle_note_yank(&self, event: &TuiEvent, ctx: &mut EventCtx<M>) -> Option<EventOutcome> {
+        let command = match event {
+            TuiEvent::Yank => "Tuido note",
+            TuiEvent::Hotkey(HotkeyEvent::Commit(sequence))
+                if sequence == &keys::NOTES_YANK.hotkey() =>
+            {
+                "Tuido note"
+            }
+            TuiEvent::Hotkey(HotkeyEvent::Commit(sequence))
+                if sequence == &keys::NOTES_YANK_PROCESS.hotkey() =>
+            {
+                "Tuido note process"
+            }
+            TuiEvent::Hotkey(HotkeyEvent::Commit(sequence))
+                if sequence == &keys::NOTES_YANK_CLARIFY.hotkey() =>
+            {
+                "Tuido note clarify"
+            }
+            _ => return None,
+        };
+        let index = self.focused_index()? + 1;
+        ctx.copy_to_clipboard(format!("{command} #{index}"));
         ctx.stop_propagation();
         Some(EventOutcome::Handled)
     }
@@ -573,10 +560,6 @@ impl<M> NotesWorkspace<M> {
     fn note_index(&self, note_id: &str) -> Option<usize> {
         self.note_ids.iter().position(|id| id == note_id)
     }
-}
-
-fn textarea_page_key(key: KeyEvent) -> bool {
-    key.modifiers == KeyModifiers::CONTROL && matches!(key.code, Key::Char('u' | 'd'))
 }
 
 fn notes_grid<M: 'static>(
@@ -669,6 +652,7 @@ fn notes_grid<M: 'static>(
             input,
             value,
             editing,
+            focused,
             number: index + 1,
             created_at: note_created_ats
                 .get(index)
@@ -738,6 +722,7 @@ struct NoteInput<M> {
     input: TextareaInput<M>,
     value: Rc<RefCell<String>>,
     editing: Rc<Cell<bool>>,
+    focused: bool,
     number: usize,
     created_at: Option<RelativeDate>,
     speed_read_sink: Option<Rc<dyn Fn(String) -> M>>,
@@ -751,7 +736,21 @@ impl<M: 'static> TuiNode<M> for NoteInput<M> {
 
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
         self.area = area;
-        self.input.layout(area, ctx)
+        if self.focused {
+            ctx.with_focus_fallback_hotkey_sequences_status(
+                FocusId::new("note"),
+                area,
+                [
+                    keys::NOTES_YANK.hotkey(),
+                    keys::NOTES_YANK_PROCESS.hotkey(),
+                    keys::NOTES_YANK_CLARIFY.hotkey(),
+                ],
+                |ctx| self.input.layout(area, ctx),
+            )
+            .0
+        } else {
+            self.input.layout(area, ctx)
+        }
     }
 
     fn render<'a>(&'a self, frame: &mut Frame, area: Rect, ctx: &mut tuicore::RenderCtx<'a>) {
@@ -791,9 +790,7 @@ impl<M: 'static> TuiNode<M> for NoteInput<M> {
         let relative_date = self
             .created_at
             .as_mut()
-            .map(|created_at| {
-                <RelativeDate as TuiNode<M>>::tick(created_at, dt, settings)
-            })
+            .map(|created_at| <RelativeDate as TuiNode<M>>::tick(created_at, dt, settings))
             .unwrap_or(TickResult::IDLE);
         if relative_date.changed {
             self.sync_chrome();
@@ -839,6 +836,7 @@ impl<M: 'static> NoteInput<M> {
     }
 
     fn configure_focus(&mut self, focused: bool) {
+        self.focused = focused;
         self.input.set_insert_mode(self.editing.get());
         self.input.clear_action_hotkeys();
         if focused {
@@ -849,7 +847,7 @@ impl<M: 'static> NoteInput<M> {
             let mut badge = format!(
                 "{} · {}",
                 keys::NOTES_EDIT.label(),
-                keys::NOTES_OPEN_EDITOR.label()
+                keys::NOTES_OPEN_EDITOR.label(),
             );
             if let Some(sink) = self.speed_read_sink.clone() {
                 self.input
@@ -917,8 +915,8 @@ impl<M: 'static> TuiNode<M> for NotesWorkspace<M> {
                 },
             );
         }
-        if (resized || std::mem::take(&mut self.reveal_after_rebuild))
-            && self.scroll.is_focused()
+        if self.scroll.is_focused()
+            && (resized || std::mem::take(&mut self.reveal_after_rebuild))
             && let Some(panel) = self.focused_index()
         {
             self.scroll.scroll_to(
@@ -937,6 +935,9 @@ impl<M: 'static> TuiNode<M> for NotesWorkspace<M> {
     }
 
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<M>) -> EventOutcome {
+        if let Some(outcome) = self.handle_note_yank(event, ctx) {
+            return outcome;
+        }
         let offset = self.scroll.offset();
         let outcome = self.scroll.event(event, ctx);
         if self.scroll.offset() != offset {
@@ -951,6 +952,9 @@ impl<M: 'static> TuiNode<M> for NotesWorkspace<M> {
         event: &TuiEvent,
         ctx: &mut EventCtx<M>,
     ) -> EventOutcome {
+        if let Some(outcome) = self.handle_note_yank(event, ctx) {
+            return outcome;
+        }
         if self
             .focused_index()
             .is_some_and(|index| !self.editing[index].get())
@@ -974,7 +978,10 @@ impl<M: 'static> TuiNode<M> for NotesWorkspace<M> {
             ctx.stop_propagation();
             return EventOutcome::Handled;
         }
-        if let Some(index) = self.focused_index().filter(|index| self.editing[*index].get()) {
+        if let Some(index) = self
+            .focused_index()
+            .filter(|index| self.editing[*index].get())
+        {
             let offset = self.scroll.offset();
             let outcome = self.scroll.dispatch_event(route, event, ctx);
             if self.scroll.offset() != offset {
@@ -1001,9 +1008,6 @@ impl<M: 'static> TuiNode<M> for NotesWorkspace<M> {
             return EventOutcome::Handled;
         }
         if let Some(outcome) = self.zoom(event, ctx) {
-            return outcome;
-        }
-        if let Some(outcome) = self.navigate_selection(event, ctx) {
             return outcome;
         }
         if let Some(outcome) = self.move_focus(route, event, ctx) {
@@ -1036,16 +1040,13 @@ impl<M: 'static> TuiNode<M> for NotesWorkspace<M> {
         }
         self.focused_note_id = Some(note_id.to_string());
         self.selected_target = Some(target.clone());
-        let edit_mode = self
-            .new_note_edit_request
-            .as_ref()
-            .and_then(|request| {
-                request
-                    .borrow()
-                    .as_ref()
-                    .filter(|request| request.id == note_id)
-                    .map(|request| request.mode)
-            });
+        let edit_mode = self.new_note_edit_request.as_ref().and_then(|request| {
+            request
+                .borrow()
+                .as_ref()
+                .filter(|request| request.id == note_id)
+                .map(|request| request.mode)
+        });
         if edit_mode.is_some() {
             if let Some(index) = self.note_index(note_id) {
                 self.editing[index].set(true);
@@ -1060,7 +1061,7 @@ impl<M: 'static> TuiNode<M> for NotesWorkspace<M> {
         if edit_mode == Some(NoteEditingMode::External) {
             ctx.request_external_editor_with_extension(String::new(), 0, 0, "md");
         }
-        if self.focused_note_id != previous {
+        if self.focused_note_id != previous || self.reveal_after_rebuild {
             ctx.request_layout();
         }
     }
@@ -1126,17 +1127,17 @@ mod tests {
             tags: Vec::new(),
         });
         state.notes = (0..count)
-                .map(|index| Versioned {
-                    revision: 1,
-                    value: NoteView {
-                        id: format!("note-{index}"),
-                        position: index as i64,
-                        content: String::new(),
-                        created_at: String::new(),
-                        updated_at: String::new(),
-                    },
-                })
-                .collect();
+            .map(|index| Versioned {
+                revision: 1,
+                value: NoteView {
+                    id: format!("note-{index}"),
+                    position: index as i64,
+                    content: String::new(),
+                    created_at: String::new(),
+                    updated_at: String::new(),
+                },
+            })
+            .collect();
         state.notes_version = 1;
         Rc::new(RefCell::new(Store::new(
             state,
@@ -1247,6 +1248,35 @@ mod tests {
     }
 
     #[test]
+    fn requested_note_focus_materializes_and_reveals_a_virtualized_note() {
+        let request = Rc::new(RefCell::new(Some("note-119".into())));
+        let mut workspace = NotesWorkspace::<()>::new()
+            .note_source(note_source(120))
+            .focus_note_request(Rc::clone(&request));
+        let area = Rect::new(0, 0, 120, 15);
+        let mut layout = LayoutCtx::new();
+
+        workspace.layout(area, &mut layout);
+        let target = layout
+            .focus_targets()
+            .iter()
+            .find(|target| target.path.keys().last() == Some(&test_panel_key(119)))
+            .expect("requested virtualized note should be focusable")
+            .clone();
+        workspace.dispatch_focus(
+            &target,
+            true,
+            &mut FocusCtx::new(AnimationSettings {
+                enabled: false,
+                ..AnimationSettings::default()
+            }),
+        );
+        workspace.layout(area, &mut LayoutCtx::new());
+
+        assert!(workspace.scroll.offset().y > 0);
+    }
+
+    #[test]
     fn empty_notes_message_is_centered_in_the_workspace() {
         let mut workspace = NotesWorkspace::<()>::new();
         let area = Rect::new(0, 0, 80, 30);
@@ -1313,7 +1343,14 @@ mod tests {
             .find(|target| target.path.keys().last() == Some(&test_panel_key(0)))
             .expect("first note should be focusable")
             .clone();
-        workspace.dispatch_focus(&target, true, &mut FocusCtx::default());
+        workspace.dispatch_focus(
+            &target,
+            true,
+            &mut FocusCtx::new(AnimationSettings {
+                enabled: false,
+                ..AnimationSettings::default()
+            }),
+        );
 
         let mut focused_layout = LayoutCtx::new();
         workspace.layout(area, &mut focused_layout);
@@ -1323,7 +1360,10 @@ mod tests {
             .find(|target| target.path.keys().last() == Some(&test_panel_key(0)))
             .expect("focused note should be focusable")
             .clone();
-        assert_eq!(target.hotkey_sequences, ["dd", "do", "ds"]);
+        assert_eq!(
+            target.hotkey_sequences,
+            ["dd", "do", "ds", "yy", "yp", "yc"]
+        );
 
         let route = EventRoute::new(target.path.clone());
         let mut prefix = EventCtx::default();
@@ -1373,6 +1413,52 @@ mod tests {
         let mut edit_layout = LayoutCtx::new();
         workspace.layout(area, &mut edit_layout);
         assert!(edit_layout.focus_targets()[0].focused_events_before_global_hotkeys);
+    }
+
+    #[test]
+    fn yanking_a_focused_note_copies_its_tuido_commands() {
+        let mut workspace = NotesWorkspace::<()>::new().note_source(note_source(2));
+        let area = Rect::new(0, 0, 120, 15);
+        let mut layout = LayoutCtx::new();
+        workspace.layout(area, &mut layout);
+        let target = layout
+            .focus_targets()
+            .iter()
+            .find(|target| target.path.keys().last() == Some(&test_panel_key(1)))
+            .expect("second note should be focusable")
+            .clone();
+        workspace.dispatch_focus(&target, true, &mut FocusCtx::default());
+        let route = EventRoute::new(target.path);
+
+        let mut yank_ctx = EventCtx::default();
+        let outcome = workspace.dispatch_event(&route, &TuiEvent::Yank, &mut yank_ctx);
+        let effects = tuicore::DispatchEffects::from_event_ctx(outcome, yank_ctx);
+        assert_eq!(effects.clipboard.as_deref(), Some("Tuido note #2"));
+
+        let mut prefix_ctx = EventCtx::default();
+        workspace.dispatch_event(
+            &route,
+            &TuiEvent::Key(KeyEvent::from(Key::Char('y'))),
+            &mut prefix_ctx,
+        );
+        let mut process_ctx = EventCtx::default();
+        let outcome = workspace.dispatch_event(
+            &route,
+            &TuiEvent::Key(KeyEvent::from(Key::Char('p'))),
+            &mut process_ctx,
+        );
+        let effects = tuicore::DispatchEffects::from_event_ctx(outcome, process_ctx);
+        assert_eq!(effects.clipboard.as_deref(), Some("Tuido note process #2"));
+        assert_eq!(workspace.focused_index(), Some(1));
+
+        let mut clarify_ctx = EventCtx::default();
+        let outcome = workspace.dispatch_event(
+            &route,
+            &TuiEvent::Hotkey(HotkeyEvent::Commit(keys::NOTES_YANK_CLARIFY.hotkey())),
+            &mut clarify_ctx,
+        );
+        let effects = tuicore::DispatchEffects::from_event_ctx(outcome, clarify_ctx);
+        assert_eq!(effects.clipboard.as_deref(), Some("Tuido note clarify #2"));
     }
 
     #[test]
@@ -1826,12 +1912,10 @@ mod tests {
 
         assert_eq!(workspace.note_revisions[0], 2);
         let mut ctx = EventCtx::default();
-        workspace.dispatch_event(
-            &route,
-            &TuiEvent::Key(KeyEvent::from(Key::Esc)),
-            &mut ctx,
+        workspace.dispatch_event(&route, &TuiEvent::Key(KeyEvent::from(Key::Esc)), &mut ctx);
+        assert!(
+            matches!(ctx.messages(), [change] if change.revision == 2 && change.content == "x")
         );
-        assert!(matches!(ctx.messages(), [change] if change.revision == 2 && change.content == "x"));
     }
 
     #[test]
@@ -1856,7 +1940,11 @@ mod tests {
 
         assert!(visible.len() <= 6 * 6 + 1);
         assert!(visible.contains(&9_999));
-        assert!(visible.iter().all(|index| *index >= 1_194 || *index == 9_999));
+        assert!(
+            visible
+                .iter()
+                .all(|index| *index >= 1_194 || *index == 9_999)
+        );
     }
 
     #[test]
@@ -1891,7 +1979,9 @@ mod tests {
                 },
             );
             refreshed.remove(1);
-            source.borrow_mut().dispatch(AppEvent::NotesLoaded(refreshed));
+            source
+                .borrow_mut()
+                .dispatch(AppEvent::NotesLoaded(refreshed));
         }
 
         workspace.layout(area, &mut LayoutCtx::new());
@@ -1910,7 +2000,9 @@ mod tests {
                 .unwrap();
             note.value.content = "authoritative content".into();
             note.revision = 2;
-            source.borrow_mut().dispatch(AppEvent::NotesLoaded(refreshed));
+            source
+                .borrow_mut()
+                .dispatch(AppEvent::NotesLoaded(refreshed));
         }
         workspace.layout(area, &mut LayoutCtx::new());
 
@@ -1952,7 +2044,9 @@ mod tests {
                 },
             );
             refreshed.remove(1);
-            source.borrow_mut().dispatch(AppEvent::NotesLoaded(refreshed));
+            source
+                .borrow_mut()
+                .dispatch(AppEvent::NotesLoaded(refreshed));
         }
 
         workspace.layout(area, &mut LayoutCtx::new());
@@ -2051,10 +2145,7 @@ mod tests {
     fn single_column_notes_fit_content_up_to_eighteen_textarea_rows() {
         let mut workspace = NotesWorkspace::<()>::new().note_source(note_source(2));
         *workspace.notes[0].borrow_mut() = "short note".into();
-        *workspace.notes[1].borrow_mut() = (0..19)
-            .map(|_| "line")
-            .collect::<Vec<_>>()
-            .join("\n");
+        *workspace.notes[1].borrow_mut() = (0..19).map(|_| "line").collect::<Vec<_>>().join("\n");
         let area = Rect::new(0, 0, 80, 70);
 
         workspace.layout(area, &mut LayoutCtx::new());
@@ -2073,115 +2164,118 @@ mod tests {
     }
 
     #[test]
-    fn global_navigation_bindings_move_the_note_selection() {
-        let mut workspace = NotesWorkspace::<()>::new().note_source(note_source(12));
-        workspace.layout(Rect::new(0, 0, 120, 70), &mut LayoutCtx::new());
-        workspace.focused_note_id = Some("note-4".into());
-        let route = EventRoute::new(TreePath::from_keys([ChildKey::body(), test_panel_key(4)]));
-        let navigate = |workspace: &mut NotesWorkspace<()>, event| {
-            let mut ctx = EventCtx::default();
-            workspace.dispatch_event(&route, &TuiEvent::Key(event), &mut ctx);
-            ctx.focus_request().cloned()
-        };
+    fn single_column_note_card_contains_wrapped_markdown_content() {
+        let mut workspace = NotesWorkspace::<()>::new().note_source(note_source(1));
+        *workspace.notes[0].borrow_mut() = "# Refinement — onboarding reminder\n\nTurn the account setup reminder into a calm, one-step prompt.\n\n## Decision\n- Show it only after profile completion.\n- Offer **Set up now** and **Not now**.\n- Do not block navigation.\n\n## Done when\n- Copy fits one screen.\n- Dismissal stays dismissed for 14 days.".into();
+        let area = Rect::new(0, 0, 70, 30);
 
-        assert_eq!(
-            navigate(&mut workspace, KeyEvent::from(Key::PageDown)),
-            Some(FocusRequest::Path(TreePath::from_keys([
-                ChildKey::body(),
-                test_panel_key(10),
-            ])))
-        );
-        assert_eq!(
-            navigate(&mut workspace, KeyEvent::from(Key::PageUp)),
-            Some(FocusRequest::Path(TreePath::from_keys([
-                ChildKey::body(),
-                test_panel_key(4),
-            ])))
-        );
-        assert_eq!(
-            navigate(&mut workspace, KeyEvent::from(Key::End)),
-            Some(FocusRequest::Path(TreePath::from_keys([
-                ChildKey::body(),
-                test_panel_key(11),
-            ])))
-        );
-        assert_eq!(
-            navigate(&mut workspace, KeyEvent::from(Key::Home)),
-            Some(FocusRequest::Path(TreePath::from_keys([
-                ChildKey::body(),
-                test_panel_key(0),
-            ])))
-        );
-        assert_eq!(
-            navigate(
-                &mut workspace,
-                KeyEvent {
-                    code: Key::Char('G'),
-                    modifiers: KeyModifiers::SHIFT,
-                },
-            ),
-            Some(FocusRequest::Path(TreePath::from_keys([
-                ChildKey::body(),
-                test_panel_key(11),
-            ])))
-        );
-        assert_eq!(
-            navigate(&mut workspace, KeyEvent::from(Key::Char('g'))),
-            None
-        );
-        assert_eq!(
-            navigate(&mut workspace, KeyEvent::from(Key::Char('g'))),
-            Some(FocusRequest::Path(TreePath::from_keys([
-                ChildKey::body(),
-                test_panel_key(0),
-            ])))
-        );
+        workspace.layout(area, &mut LayoutCtx::new());
+        workspace.set_current_zoom(1);
+        workspace.layout(area, &mut LayoutCtx::new());
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+
+        terminal
+            .draw(|frame| workspace.render(frame, area, &mut tuicore::RenderCtx::new()))
+            .unwrap();
+
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Done when"));
+        assert!(rendered.contains("Dismissal stays dismissed"));
     }
 
     #[test]
-    fn ctrl_page_keys_do_not_navigate_note_selection() {
-        let mut workspace = NotesWorkspace::<()>::new().note_source(note_source(12));
-        workspace.layout(Rect::new(0, 0, 120, 70), &mut LayoutCtx::new());
-        workspace.focused_note_id = Some("note-4".into());
-        let route = EventRoute::new(TreePath::from_keys([ChildKey::body(), test_panel_key(4)]));
-
-        for key in ['u', 'd'] {
-            let mut ctx = EventCtx::default();
-            workspace.dispatch_event(
-                &route,
-                &TuiEvent::Key(KeyEvent {
-                    code: Key::Char(key),
-                    modifiers: KeyModifiers::CONTROL,
-                }),
-                &mut ctx,
-            );
-
-            assert!(ctx.focus_request().is_none());
-            assert_eq!(workspace.focused_note_id.as_deref(), Some("note-4"));
+    fn focused_single_column_note_reveals_its_full_card() {
+        let mut workspace = NotesWorkspace::<()>::new().note_source(note_source(4));
+        for note in &workspace.notes[..3] {
+            *note.borrow_mut() = "# Earlier note\n\nShort content.".into();
         }
+        *workspace.notes[3].borrow_mut() = "# Refinement — onboarding reminder\n\nTurn the account setup reminder into a calm, one-step prompt.\n\n## Decision\n- Show it only after profile completion.\n- Offer **Set up now** and **Not now**.\n- Do not block navigation.\n\n## Done when\n- Copy fits one screen.\n- Dismissal stays dismissed for 14 days.".into();
+        let area = Rect::new(0, 0, 70, 20);
+
+        workspace.layout(area, &mut LayoutCtx::new());
+        workspace.set_current_zoom(1);
+        let mut layout = LayoutCtx::new();
+        workspace.layout(area, &mut layout);
+        let target = layout
+            .focus_targets()
+            .iter()
+            .find(|target| target.path.keys().last() == Some(&test_panel_key(3)))
+            .unwrap()
+            .clone();
+        workspace.dispatch_focus(
+            &target,
+            true,
+            &mut FocusCtx::new(AnimationSettings {
+                enabled: false,
+                ..AnimationSettings::default()
+            }),
+        );
+        workspace.layout(area, &mut LayoutCtx::new());
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+
+        terminal
+            .draw(|frame| workspace.render(frame, area, &mut tuicore::RenderCtx::new()))
+            .unwrap();
+
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Done when"));
+        assert!(rendered.contains("Dismissal stays dismissed"));
     }
 
     #[test]
-    fn paging_moves_three_rows_within_the_selected_column() {
-        let mut workspace = NotesWorkspace::<()>::new().note_source(note_source(12));
-        workspace.layout(Rect::new(0, 0, 80, 70), &mut LayoutCtx::new());
-        workspace.focused_note_id = Some("note-1".into());
-        let route = EventRoute::new(TreePath::from_keys([ChildKey::body(), test_panel_key(1)]));
-        let mut ctx = EventCtx::default();
+    fn textarea_navigation_keys_do_not_move_the_note_selection() {
+        let mut workspace = NotesWorkspace::<()>::new().note_source(note_source(2));
+        *workspace.notes[0].borrow_mut() = (0..20)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        workspace.rebuild_grid(false);
+        let area = Rect::new(0, 0, 120, 15);
+        let mut layout = LayoutCtx::new();
+        workspace.layout(area, &mut layout);
+        let target = layout
+            .focus_targets()
+            .iter()
+            .find(|target| target.path.keys().last() == Some(&test_panel_key(0)))
+            .unwrap()
+            .clone();
+        workspace.dispatch_focus(&target, true, &mut FocusCtx::default());
+        let route = EventRoute::new(target.path);
 
-        workspace.dispatch_event(
-            &route,
-            &TuiEvent::Key(KeyEvent::from(Key::PageDown)),
-            &mut ctx,
-        );
+        for key in [
+            KeyEvent::from(Key::Home),
+            KeyEvent::from(Key::End),
+            KeyEvent::from(Key::PageUp),
+            KeyEvent::from(Key::PageDown),
+            KeyEvent {
+                code: Key::Char('G'),
+                modifiers: KeyModifiers::SHIFT,
+            },
+            KeyEvent::from(Key::Char('g')),
+            KeyEvent::from(Key::Char('g')),
+        ] {
+            let mut ctx = EventCtx::default();
 
-        assert_eq!(
-            ctx.focus_request(),
-            Some(&FocusRequest::Path(TreePath::from_keys([
-                ChildKey::body(),
-                test_panel_key(7),
-            ])))
-        );
+            assert_eq!(
+                workspace.dispatch_event(&route, &TuiEvent::Key(key), &mut ctx),
+                EventOutcome::Handled
+            );
+            assert_eq!(workspace.focused_note_id.as_deref(), Some("note-0"));
+            assert!(ctx.focus_request().is_none());
+            assert_eq!(ctx.propagation(), Propagation::Stopped);
+        }
     }
 }
 

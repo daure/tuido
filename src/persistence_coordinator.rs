@@ -102,9 +102,7 @@ impl PersistenceCommand {
             Self::SetAppSetting { key, .. } => CommandKey::AppSetting(key.clone()),
             Self::CreateNote { temporary_id, .. } => CommandKey::Note(temporary_id.clone()),
             Self::PatchNote { before, .. } => CommandKey::Note(before.value.id.clone()),
-            Self::DeleteNote { note, .. } => {
-                CommandKey::Note(note.value.id.clone())
-            }
+            Self::DeleteNote { note, .. } => CommandKey::Note(note.value.id.clone()),
             Self::SaveNotesZoom(_) => CommandKey::UiEffect("notes-zoom".into()),
             Self::OpenBrowserLink { url, .. } => CommandKey::UiEffect(format!("browser:{url}")),
         }
@@ -117,8 +115,7 @@ fn remap_note_command(
     replacement: &Versioned<NoteView>,
 ) {
     match command {
-        PersistenceCommand::PatchNote { before, .. } if before.value.id == previous_id =>
-        {
+        PersistenceCommand::PatchNote { before, .. } if before.value.id == previous_id => {
             *before = replacement.clone();
         }
         PersistenceCommand::DeleteNote { note, .. } if note.value.id == previous_id => {
@@ -485,17 +482,25 @@ impl PersistenceCoordinator {
         let tx = self.completion_tx.clone();
         self.runtime.spawn(async move {
             let result = execute(service, command.clone(), expected_revision).await;
-            let (error, related_revisions, created_task, link_title, created_note, note) = match result {
-                Ok(result) => (
-                    None,
-                    result.related_revisions,
-                    result.created_task,
-                    result.link_title,
-                    result.created_note,
-                    result.note,
-                ),
-                Err(error) => (Some(error.to_string()), HashMap::new(), None, None, None, None),
-            };
+            let (error, related_revisions, created_task, link_title, created_note, note) =
+                match result {
+                    Ok(result) => (
+                        None,
+                        result.related_revisions,
+                        result.created_task,
+                        result.link_title,
+                        result.created_note,
+                        result.note,
+                    ),
+                    Err(error) => (
+                        Some(error.to_string()),
+                        HashMap::new(),
+                        None,
+                        None,
+                        None,
+                        None,
+                    ),
+                };
             let _ = tx.send(Completion {
                 key,
                 sequence,
@@ -824,7 +829,9 @@ impl PersistenceCoordinator {
                         })
                         .changed;
                 } else {
-                    let error = completion.error.unwrap_or_else(|| "note create failed".into());
+                    let error = completion
+                        .error
+                        .unwrap_or_else(|| "note create failed".into());
                     changed |= self
                         .store
                         .borrow_mut()
@@ -846,7 +853,9 @@ impl PersistenceCoordinator {
                     }
                 }
                 let result = completion.note.ok_or_else(|| {
-                    completion.error.unwrap_or_else(|| "note update failed".into())
+                    completion
+                        .error
+                        .unwrap_or_else(|| "note update failed".into())
                 });
                 changed |= self
                     .store
@@ -1144,7 +1153,10 @@ fn command_entity(command: &PersistenceCommand) -> Option<(&'static str, &str)> 
     }
 }
 
-fn open_browser_link(url: &str, background: bool) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn open_browser_link(
+    url: &str,
+    background: bool,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     #[cfg(target_os = "macos")]
     if background {
         let mut options = webbrowser::BrowserOptions::new();

@@ -17,8 +17,8 @@ use tuicore::{
 
 use crate::app::{
     ActiveLabelFilter, ActiveWorkspaceFilter, AppContext, AppMsg, SnoozeReturnFocus,
-    persist_task_order, task_agent_clarify_command, task_agent_command, task_copy_payload,
-    task_detail::{TASK_DESCRIPTION_NARROW_EXTRA_ABOVE_MIN, detail_escape},
+    persist_task_order, task_agent_clarify_command, task_agent_command, task_detail::detail_escape,
+    task_reference,
 };
 use crate::app_keymap::keys;
 use crate::domain::{Task, TaskState, Workspace};
@@ -143,7 +143,8 @@ impl CalendarWorkspace {
             create_context,
             pane: ResponsiveSplit::master_detail(calendar, detail)
                 .wide_ratio(45, 55)
-                .narrow_second_max_above_min(TASK_DESCRIPTION_NARROW_EXTRA_ABOVE_MIN)
+                .narrow_second_max_percent(75)
+                .narrow_first_percent_space_between(25)
                 .second_visible(false),
             visible_entries,
             empty_state: SeasonalEmptyState::new("No tasks scheduled for this day"),
@@ -547,7 +548,7 @@ impl CalendarWorkspace {
         Some(EventOutcome::Handled)
     }
 
-    fn handle_task_json_yank(
+    fn handle_task_reference_yank(
         &self,
         event: &TuiEvent,
         ctx: &mut EventCtx<AppMsg>,
@@ -557,7 +558,7 @@ impl CalendarWorkspace {
         }
         let task_id = self.highlighted_task_id()?;
         let state = self.context.store.borrow();
-        if let Some(payload) = task_copy_payload(state.state(), &task_id) {
+        if let Some(payload) = task_reference(state.state(), &task_id) {
             ctx.copy_to_clipboard(payload);
         }
         ctx.stop_propagation();
@@ -753,6 +754,10 @@ impl TuiNode<AppMsg> for CalendarWorkspace {
             area.width,
             area.height.saturating_sub(u16::from(has_error)),
         );
+        self.detail_mut().set_layout_limits(
+            calendar_area.width < crate::ui::responsive_split::MASTER_DETAIL_NARROW_BREAKPOINT,
+            calendar_area.height,
+        );
         ctx.with_focus_fallback_hotkey_sequences_status(
             FocusId::new("calendar"),
             calendar_area,
@@ -817,7 +822,7 @@ impl TuiNode<AppMsg> for CalendarWorkspace {
         if let Some(outcome) = self.handle_task_agent_yank(event, ctx) {
             return outcome;
         }
-        if let Some(outcome) = self.handle_task_json_yank(event, ctx) {
+        if let Some(outcome) = self.handle_task_reference_yank(event, ctx) {
             return outcome;
         }
         let previous = self.calendar().is_showing_weekends();
@@ -849,10 +854,10 @@ impl TuiNode<AppMsg> for CalendarWorkspace {
         if let Some(outcome) = self.handle_task_agent_yank(event, ctx) {
             return outcome;
         }
-        let detail_route = route.path.keys().first() == Some(&ChildKey::second());
-        if !detail_route && let Some(outcome) = self.handle_task_json_yank(event, ctx) {
+        if let Some(outcome) = self.handle_task_reference_yank(event, ctx) {
             return outcome;
         }
+        let detail_route = route.path.keys().first() == Some(&ChildKey::second());
         let previous = self.calendar().is_showing_weekends();
         let mut calendar_event = !detail_route;
         let mut outcome = if detail_route {
@@ -1383,7 +1388,7 @@ mod tests {
     }
 
     #[test]
-    fn day_view_narrow_long_description_uses_six_rows_max() {
+    fn day_view_narrow_long_description_uses_scrollable_seventy_five_percent_detail_pane() {
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
             tasks: Vec::new(),
             people: Vec::new(),
@@ -1422,7 +1427,11 @@ mod tests {
             })
             .expect("description should be focusable");
 
-        assert_eq!(description.area.height, 6);
+        let (calendar, detail) = workspace.pane.child_areas();
+        assert_eq!(description.area.height, 8);
+        assert!(detail.height <= narrow.height - calendar.height);
+        assert_eq!(calendar.height, narrow.height * 25 / 100);
+        assert!(detail.y >= calendar.bottom());
     }
 
     #[test]
@@ -1510,7 +1519,7 @@ mod tests {
     }
 
     #[test]
-    fn day_view_agent_yank_copies_highlighted_task_command() {
+    fn day_view_yank_copies_highlighted_task_reference() {
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
             tasks: Vec::new(),
             people: Vec::new(),
@@ -1556,14 +1565,14 @@ mod tests {
             Some("Tuido clarify 1234 \"Calendar task\"")
         );
 
-        let mut json_ctx = EventCtx::default();
-        let outcome = workspace.event(&TuiEvent::Yank, &mut json_ctx);
-        let effects = tuicore::DispatchEffects::from_event_ctx(outcome, json_ctx);
-        let payload = effects.clipboard.expect("yank should copy task JSON");
-        let json: serde_json::Value = serde_json::from_str(&payload).expect("copy should be JSON");
+        let mut yank_ctx = EventCtx::default();
+        let outcome = workspace.event(&TuiEvent::Yank, &mut yank_ctx);
+        let effects = tuicore::DispatchEffects::from_event_ctx(outcome, yank_ctx);
 
-        assert_eq!(json["id"], "1234");
-        assert_eq!(json["title"], "Calendar task");
+        assert_eq!(
+            effects.clipboard.as_deref(),
+            Some("Tuido 1234 \"Calendar task\"")
+        );
     }
 
     #[test]
@@ -1600,7 +1609,7 @@ mod tests {
 
         let mut ctx = EventCtx::default();
         let outcome = workspace.dispatch_event(
-            &EventRoute::new(detail_path),
+            &EventRoute::new(detail_path.clone()),
             &TuiEvent::Hotkey(HotkeyEvent::Commit(keys::TASK_AGENT_YANK_CLARIFY.hotkey())),
             &mut ctx,
         );
@@ -1609,6 +1618,19 @@ mod tests {
         assert_eq!(
             effects.clipboard.as_deref(),
             Some("Tuido clarify 1234 \"Calendar task\"")
+        );
+
+        let mut yank_ctx = EventCtx::default();
+        let outcome = workspace.dispatch_event(
+            &EventRoute::new(detail_path),
+            &TuiEvent::Yank,
+            &mut yank_ctx,
+        );
+        let effects = tuicore::DispatchEffects::from_event_ctx(outcome, yank_ctx);
+
+        assert_eq!(
+            effects.clipboard.as_deref(),
+            Some("Tuido 1234 \"Calendar task\"")
         );
     }
 

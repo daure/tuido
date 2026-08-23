@@ -1,14 +1,24 @@
-use std::{cell::RefCell, rc::Rc, time::Duration};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+    time::Duration,
+};
 
 use ratatui::{Frame, layout::Rect};
 use tuicore::{
     AnimationSettings, EventCtx, EventOutcome, EventRoute, Flex, FlexItem, FocusCtx, FocusId,
     FocusTarget, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, RenderCtx,
-    TickResult, TuiEvent, TuiNode,
+    ScrollContainer, TickResult, TuiEvent, TuiNode,
 };
 
 use crate::{
-    app::{AppMsg, task_detail::detail_form},
+    app::{
+        AppMsg,
+        task_detail::{
+            TASK_DESCRIPTION_DESKTOP_MAX_PERCENT, TASK_DESCRIPTION_DESKTOP_MIN_CONTENT_ROWS,
+            TASK_DESCRIPTION_NARROW_MAX_CONTENT_ROWS, detail_form,
+        },
+    },
     domain::{Person, Tag, Task, TaskPatch, TaskState, Workspace},
     ui::save_status::SaveStatusLine,
 };
@@ -17,7 +27,7 @@ pub(crate) type PatchSink = Rc<RefCell<Vec<TaskPatch>>>;
 pub(crate) type TaskDetailCatalogs<'a> = (&'a [Task], &'a [Person], &'a [Workspace], &'a [Tag]);
 
 pub(crate) struct TaskDetailForm {
-    root: Flex<AppMsg>,
+    root: ScrollContainer<Flex<AppMsg>, AppMsg>,
     pub(crate) task_id: Option<String>,
     pub(crate) task_state: Option<TaskState>,
     pub(crate) task_snapshot: Option<Task>,
@@ -29,6 +39,7 @@ pub(crate) struct TaskDetailForm {
     checklist_highlighted_id: Rc<RefCell<Option<String>>>,
     pending_issue_link_highlight: Option<String>,
     save_status: SaveStatusLine,
+    description_max_rows: Rc<Cell<Option<usize>>>,
 }
 
 impl TaskDetailForm {
@@ -43,8 +54,9 @@ impl TaskDetailForm {
         let patches = Rc::new(RefCell::new(Vec::new()));
         let checklist_highlighted_id = Rc::new(RefCell::new(None));
         let save_status = SaveStatusLine::new(save_error);
+        let description_max_rows = Rc::new(Cell::new(None));
         Self {
-            root: Flex::column().child(
+            root: ScrollContainer::vertical(Flex::column().child(
                 "form",
                 detail_form(
                     task,
@@ -53,9 +65,11 @@ impl TaskDetailForm {
                     Rc::clone(&checklist_highlighted_id),
                     None,
                     save_status.clone(),
+                    Rc::clone(&description_max_rows),
                 ),
                 FlexItem::content(),
-            ),
+            ))
+            .focus_reveal(true),
             task_id: task.map(|task| task.id.clone()),
             task_state: task.map(|task| task.state),
             task_snapshot: task.cloned(),
@@ -67,6 +81,7 @@ impl TaskDetailForm {
             checklist_highlighted_id,
             pending_issue_link_highlight: None,
             save_status,
+            description_max_rows,
         }
     }
 
@@ -104,6 +119,7 @@ impl TaskDetailForm {
         self.save_status = SaveStatusLine::new(save_error);
         let highlighted_issue_link_task_id = self.pending_issue_link_highlight.take();
         self.root
+            .child_mut()
             .replace(
                 "form",
                 detail_form(
@@ -113,6 +129,7 @@ impl TaskDetailForm {
                     Rc::clone(&self.checklist_highlighted_id),
                     highlighted_issue_link_task_id.as_deref(),
                     self.save_status.clone(),
+                    Rc::clone(&self.description_max_rows),
                 ),
                 FlexItem::content(),
                 ctx,
@@ -127,6 +144,17 @@ impl TaskDetailForm {
     pub(crate) fn queue_issue_link_highlight(&mut self, task_id: String) {
         self.pending_issue_link_highlight = Some(task_id);
     }
+
+    pub(crate) fn set_layout_limits(&self, narrow: bool, height: u16) {
+        let max_rows = if narrow {
+            usize::from(TASK_DESCRIPTION_NARROW_MAX_CONTENT_ROWS)
+        } else {
+            usize::from(height.saturating_mul(TASK_DESCRIPTION_DESKTOP_MAX_PERCENT) / 100)
+                .saturating_sub(2)
+                .max(usize::from(TASK_DESCRIPTION_DESKTOP_MIN_CONTENT_ROWS))
+        };
+        self.description_max_rows.set(Some(max_rows));
+    }
 }
 
 impl TuiNode<AppMsg> for TaskDetailForm {
@@ -135,6 +163,12 @@ impl TuiNode<AppMsg> for TaskDetailForm {
     }
 
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
+        if self.description_max_rows.get().is_none() {
+            self.set_layout_limits(
+                area.width < crate::ui::responsive_split::MASTER_DETAIL_NARROW_BREAKPOINT,
+                area.height,
+            );
+        }
         self.root.layout(area, ctx)
     }
 

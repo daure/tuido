@@ -29,6 +29,9 @@ fn task_create(title: &str) -> TaskCreate {
         workspace_id: None,
         tag_ids: Vec::new(),
         links: Vec::new(),
+        checklist: Vec::new(),
+        relations: Vec::new(),
+        tags: Vec::new(),
     }
 }
 
@@ -170,9 +173,12 @@ async fn creating_a_note_reports_candidates_retained_by_concurrent_updates() {
     };
 
     let result = service
-        .create_note_reconciled(NoteInput {
-            content: "new note".into(),
-        }, &[candidate])
+        .create_note_reconciled(
+            NoteInput {
+                content: "new note".into(),
+            },
+            &[candidate],
+        )
         .await
         .unwrap();
 
@@ -504,6 +510,9 @@ fn explicit_expiry_processing_unsnoozes_due_tasks() {
             workspace_id: None,
             tag_ids: Vec::new(),
             links: Vec::new(),
+            checklist: Vec::new(),
+            relations: Vec::new(),
+            tags: Vec::new(),
         };
         let expired = service
             .create_task(create("Expired", "2000-01-01T00:00:00"))
@@ -572,6 +581,9 @@ fn backlog_tasks_round_trip_through_persistence() {
                 workspace_id: None,
                 tag_ids: Vec::new(),
                 links: Vec::new(),
+                checklist: Vec::new(),
+                relations: Vec::new(),
+                tags: Vec::new(),
             })
             .await
             .unwrap();
@@ -608,6 +620,9 @@ fn task_tags_by_label_reuse_create_replace_clear_and_rollback_atomically() {
                 workspace_id: None,
                 tag_ids: Vec::new(),
                 links: Vec::new(),
+                checklist: Vec::new(),
+                relations: Vec::new(),
+                tags: Vec::new(),
             })
             .await
             .unwrap();
@@ -741,6 +756,9 @@ fn filtered_workspace_filters_tasks_and_returns_complete_entity_catalogs() {
                 workspace_id: Some(workspace.value.id.clone()),
                 tag_ids: vec![tag.value.id.clone()],
                 links: Vec::new(),
+                checklist: Vec::new(),
+                relations: Vec::new(),
+                tags: Vec::new(),
             })
             .await
             .unwrap();
@@ -756,6 +774,9 @@ fn filtered_workspace_filters_tasks_and_returns_complete_entity_catalogs() {
                 workspace_id: None,
                 tag_ids: Vec::new(),
                 links: Vec::new(),
+                checklist: Vec::new(),
+                relations: Vec::new(),
+                tags: Vec::new(),
             })
             .await
             .unwrap();
@@ -844,6 +865,9 @@ fn public_task_inputs_reject_legacy_state_aliases() {
                     workspace_id: None,
                     tag_ids: Vec::new(),
                     links: Vec::new(),
+                    checklist: Vec::new(),
+                    relations: Vec::new(),
+                    tags: Vec::new(),
                 })
                 .await;
             assert!(matches!(create, Err(ServiceError::Invalid(_))));
@@ -869,6 +893,9 @@ fn public_task_inputs_reject_legacy_state_aliases() {
                 workspace_id: None,
                 tag_ids: Vec::new(),
                 links: Vec::new(),
+                checklist: Vec::new(),
+                relations: Vec::new(),
+                tags: Vec::new(),
             })
             .await
             .unwrap();

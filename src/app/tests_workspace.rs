@@ -386,6 +386,48 @@ fn created_backlog_task_becomes_visible_and_selected_from_any_task_view() {
 }
 
 #[test]
+fn externally_created_backlog_task_becomes_visible_and_selected_from_active_view() {
+    let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+        tasks: vec![test_task()],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut workspace = TaskWorkspace::new(context);
+    workspace.layout(Rect::new(0, 0, 120, 40), &mut LayoutCtx::new());
+
+    store.borrow_mut().dispatch(AppEvent::WorkspaceRefreshed {
+        snapshot: WorkspaceSnapshot {
+            tasks: vec![
+                test_task(),
+                Task::quick_capture(
+                    "task-2".to_string(),
+                    "Created from MCP".to_string(),
+                    String::new(),
+                    TaskSize::Small,
+                ),
+            ],
+            people: Vec::new(),
+            workspaces: Vec::new(),
+            tags: Vec::new(),
+        },
+        revision: 1,
+        entity_revisions: std::collections::HashMap::new(),
+    });
+    workspace.layout(Rect::new(0, 0, 120, 40), &mut LayoutCtx::new());
+
+    assert_eq!(workspace.task_view, TaskView::Backlog);
+    assert_eq!(
+        store.borrow().state().selected_task_id.as_deref(),
+        Some("task-2")
+    );
+    assert_eq!(
+        workspace.table().highlighted_id().as_deref(),
+        Some("task-2")
+    );
+}
+
+#[test]
 fn escape_keeps_task_table_focused_as_tab_root() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
@@ -716,6 +758,158 @@ fn externally_started_task_opens_tasks_active_view_and_selects_it() {
     let text = rendered_text(&app, area);
     assert!(text.contains(" Active"));
     assert!(text.contains("Started from chat"));
+}
+
+#[test]
+fn externally_created_backlog_task_opens_tasks_backlog_view_and_selects_it() {
+    let active = task_with("active", "Existing active task", TaskState::Todo);
+    let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+        tasks: vec![active.clone()],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(context.store, context.coordinator);
+    app.active_tab.set(CALENDAR_TAB_INDEX);
+    let created = Task::quick_capture(
+        "created".into(),
+        "Created from MCP".into(),
+        String::new(),
+        TaskSize::Small,
+    );
+    store.borrow_mut().dispatch(AppEvent::WorkspaceRefreshed {
+        snapshot: WorkspaceSnapshot {
+            tasks: vec![active, created],
+            people: Vec::new(),
+            workspaces: Vec::new(),
+            tags: Vec::new(),
+        },
+        revision: 1,
+        entity_revisions: std::collections::HashMap::new(),
+    });
+
+    app.show_externally_created_backlog_task(
+        store
+            .borrow()
+            .state()
+            .external_created_backlog_task_id
+            .clone()
+            .expect("refresh should identify the created backlog task"),
+    );
+    let area = Rect::new(0, 0, 120, 40);
+    app.layout(area, &mut LayoutCtx::new());
+
+    assert_eq!(app.active_tab.get(), TASKS_TAB_INDEX);
+    assert_eq!(
+        store.borrow().state().selected_task_id.as_deref(),
+        Some("created")
+    );
+    assert_eq!(
+        app.take_pending_focus_request(),
+        Some(initial_task_table_focus_request())
+    );
+    let text = rendered_text(&app, area);
+    assert!(text.contains(" Backlog"));
+    assert!(text.contains("Created from MCP"));
+}
+
+#[test]
+fn created_backlog_task_routes_to_tasks_when_note_refresh_also_changes() {
+    let active = task_with("active", "Existing active task", TaskState::Todo);
+    let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+        tasks: vec![active.clone()],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(context.store, context.coordinator);
+    app.active_tab.set(NOTES_TAB_INDEX);
+    store.borrow_mut().dispatch(AppEvent::WorkspaceRefreshed {
+        snapshot: WorkspaceSnapshot {
+            tasks: vec![
+                active,
+                Task::quick_capture(
+                    "created".into(),
+                    "Created from MCP".into(),
+                    String::new(),
+                    TaskSize::Small,
+                ),
+            ],
+            people: Vec::new(),
+            workspaces: Vec::new(),
+            tags: Vec::new(),
+        },
+        revision: 1,
+        entity_revisions: std::collections::HashMap::new(),
+    });
+    store
+        .borrow_mut()
+        .dispatch(AppEvent::NotesLoaded(vec![test_note("changed-note", 0)]));
+
+    app.tick(Duration::ZERO, AnimationSettings::default());
+
+    assert_eq!(app.active_tab.get(), TASKS_TAB_INDEX);
+    assert_eq!(
+        store.borrow().state().selected_task_id.as_deref(),
+        Some("created")
+    );
+    assert!(
+        store
+            .borrow()
+            .state()
+            .external_created_backlog_task_id
+            .is_none()
+    );
+    assert!(store.borrow().state().external_note_focus_id.is_none());
+    assert_eq!(
+        app.take_pending_focus_request(),
+        Some(initial_task_table_focus_request())
+    );
+}
+
+#[test]
+fn externally_changed_note_opens_notes_tab_and_focuses_the_note() {
+    let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+        tasks: Vec::new(),
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(context.store, context.coordinator);
+    store
+        .borrow_mut()
+        .dispatch(AppEvent::NotesLoaded(vec![Versioned {
+            revision: 1,
+            value: NoteView {
+                id: "from-mcp".into(),
+                position: 0,
+                content: "Created from chat".into(),
+                created_at: String::new(),
+                updated_at: String::new(),
+            },
+        }]));
+
+    app.show_externally_changed_note("from-mcp".into());
+    let area = Rect::new(0, 0, 120, 30);
+    let mut layout = LayoutCtx::new();
+    app.layout(area, &mut layout);
+    let request = app
+        .take_pending_focus_request()
+        .expect("changed note should request focus");
+    let mut focus = FocusManager::new();
+    let transition = focus
+        .apply_request(&request, layout.focus_targets())
+        .expect("changed note should be focusable");
+
+    assert_eq!(app.active_tab.get(), NOTES_TAB_INDEX);
+    assert_eq!(
+        transition
+            .current
+            .as_ref()
+            .and_then(|target| target.path.keys().last())
+            .map(ChildKey::as_str),
+        Some("panel-from-mcp")
+    );
 }
 
 #[test]
@@ -3037,7 +3231,7 @@ fn ctrl_t_toggles_task_progress_when_focused_inside_detail_view() {
 }
 
 #[test]
-fn desktop_detail_gives_description_remaining_height_before_lower_fields() {
+fn desktop_detail_caps_description_at_forty_percent_of_pane_height() {
     let mut task = test_task();
     task.description = (1..=40)
         .map(|line| format!("Line {line}"))
@@ -3076,48 +3270,7 @@ fn desktop_detail_gives_description_remaining_height_before_lower_fields() {
                     .any(|key| key.as_str() == "description")
         })
         .expect("description should be focusable");
-    let state = layout
-        .focus_targets()
-        .iter()
-        .find(|target| {
-            target.id.as_str() == "field"
-                && target.path.keys().iter().any(|key| key.as_str() == "state")
-        })
-        .expect("state should be focusable");
-    let relations = layout
-        .focus_targets()
-        .iter()
-        .find(|target| {
-            target
-                .path
-                .keys()
-                .iter()
-                .any(|key| key.as_str() == "relations")
-        })
-        .expect("relations should be focusable");
-    let links = layout
-        .focus_targets()
-        .iter()
-        .find(|target| {
-            target.id.as_str() == "data-view"
-                && target.path.keys().iter().any(|key| key.as_str() == "links")
-        })
-        .expect("URL links should be focusable");
-    let (_, detail) = workspace.layout.child_areas();
-    let text = rendered_text(&workspace, area);
-
-    assert!(description.area.height > 6);
-    assert_eq!(state.area.y, description.area.bottom() + 1);
-    for lower in [links, relations] {
-        assert!(lower.area.x >= detail.x);
-        assert!(lower.area.y >= detail.y);
-        assert!(lower.area.right() <= detail.right());
-        assert!(lower.area.bottom() <= detail.bottom());
-    }
-    assert!(text.contains("https://example.com/first"));
-    assert!(text.contains("https://example.com/second"));
-    assert!(text.contains("blocks"));
-    assert!(text.contains("Dependency target"));
+    assert_eq!(description.area.height, 16);
 }
 
 #[test]
@@ -3160,90 +3313,7 @@ fn desktop_detail_places_state_immediately_after_short_description() {
 }
 
 #[test]
-fn lower_rows_take_height_from_description_without_shrinking_lower_controls() {
-    let mut base_task = test_task();
-    base_task.description = (1..=40)
-        .map(|line| format!("Line {line}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let related = task_with("related-task", "Dependency target", TaskState::Todo);
-    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
-        tasks: vec![base_task.clone(), related.clone()],
-        people: Vec::new(),
-        workspaces: Vec::new(),
-        tags: Vec::new(),
-    });
-    let mut base = TaskWorkspace::new(context);
-    let area = Rect::new(0, 0, 160, 45);
-    let mut base_layout = LayoutCtx::new();
-    base.layout(area, &mut base_layout);
-
-    base_task.links = vec![
-        "https://example.com/first".into(),
-        "https://example.com/second".into(),
-    ];
-    base_task.checklist = vec![
-        ChecklistItem {
-            id: "check-1".into(),
-            parent_id: None,
-            text: "First protected item".into(),
-            checked: false,
-        },
-        ChecklistItem {
-            id: "check-2".into(),
-            parent_id: None,
-            text: "Second protected item".into(),
-            checked: true,
-        },
-    ];
-    base_task.relations = vec![TaskRelation {
-        task_id: related.id.clone(),
-        kind: TaskRelationKind::Blocks,
-    }];
-    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
-        tasks: vec![base_task, related],
-        people: Vec::new(),
-        workspaces: Vec::new(),
-        tags: Vec::new(),
-    });
-    let mut populated = TaskWorkspace::new(context);
-    let mut populated_layout = LayoutCtx::new();
-    populated.layout(area, &mut populated_layout);
-
-    let focus_area = |layout: &LayoutCtx, id: &str, child: &str| {
-        layout
-            .focus_targets()
-            .iter()
-            .find(|target| {
-                target.id.as_str() == id
-                    && target.path.keys().iter().any(|key| key.as_str() == child)
-            })
-            .unwrap_or_else(|| panic!("{child} should be focusable"))
-            .area
-    };
-    let base_description = focus_area(&base_layout, "textarea", "description");
-    let populated_description = focus_area(&populated_layout, "textarea", "description");
-    let base_links = focus_area(&base_layout, "data-view", "links");
-    let populated_links = focus_area(&populated_layout, "data-view", "links");
-    let base_checklist = focus_area(&base_layout, "data-view", "checklist");
-    let populated_checklist = focus_area(&populated_layout, "data-view", "checklist");
-    let base_relations = focus_area(&base_layout, "data-view", "relations");
-    let populated_relations = focus_area(&populated_layout, "data-view", "relations");
-
-    assert!(populated_description.height < base_description.height);
-    assert_eq!(populated_checklist.height, 2);
-    assert_eq!(populated_links.height, 2);
-    assert_eq!(populated_relations.height, 1);
-    assert_eq!(
-        base_description.height - populated_description.height,
-        (populated_checklist.height - base_checklist.height)
-            + (populated_links.height - base_links.height)
-            + (populated_relations.height - base_relations.height)
-    );
-}
-
-#[test]
-fn narrow_long_description_uses_six_rows_and_preserves_lower_fields() {
+fn narrow_long_description_uses_scrollable_seventy_five_percent_detail_pane() {
     let mut task = test_task();
     task.description = (1..=40)
         .map(|line| format!("Line {line}"))
@@ -3282,42 +3352,12 @@ fn narrow_long_description_uses_six_rows_and_preserves_lower_fields() {
                     .any(|key| key.as_str() == "description")
         })
         .expect("description should be focusable");
-    let state = layout
-        .focus_targets()
-        .iter()
-        .find(|target| {
-            target.id.as_str() == "field"
-                && target.path.keys().iter().any(|key| key.as_str() == "state")
-        })
-        .expect("state should be focusable");
-    let links = layout
-        .focus_targets()
-        .iter()
-        .find(|target| {
-            target.id.as_str() == "data-view"
-                && target.path.keys().iter().any(|key| key.as_str() == "links")
-        })
-        .expect("URL links should be focusable");
-    let relations = layout
-        .focus_targets()
-        .iter()
-        .find(|target| {
-            target.id.as_str() == "data-view"
-                && target
-                    .path
-                    .keys()
-                    .iter()
-                    .any(|key| key.as_str() == "relations")
-        })
-        .expect("relations should be focusable");
-    let (_, detail) = workspace.layout.child_areas();
+    let (master, detail) = workspace.layout.child_areas();
 
-    assert_eq!(description.area.height, 6);
-    assert_eq!(state.area.y, description.area.bottom() + 1);
-    assert_eq!(links.area.height, 2);
-    assert_eq!(relations.area.height, 1);
-    assert!(links.area.bottom() <= detail.bottom());
-    assert!(relations.area.bottom() <= detail.bottom());
+    assert_eq!(description.area.height, 8);
+    assert_eq!(master.height, area.height * 25 / 100);
+    assert!(detail.y >= master.bottom());
+    assert!(detail.height <= area.height - master.height);
     assert_eq!(detail.bottom(), area.bottom());
 }
 

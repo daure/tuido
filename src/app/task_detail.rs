@@ -5,9 +5,8 @@ use tuicore::SeasonalGlyphs;
 
 const DATE_TIME_PLACEHOLDER: &str = "YYYY-MM-DD HH:MM";
 pub(crate) const TASK_DESCRIPTION_DESKTOP_MIN_CONTENT_ROWS: u16 = 2;
-pub(crate) const TASK_DESCRIPTION_NARROW_MAX_CONTENT_ROWS: u16 = 6;
-pub(crate) const TASK_DESCRIPTION_NARROW_EXTRA_ABOVE_MIN: u16 =
-    TASK_DESCRIPTION_NARROW_MAX_CONTENT_ROWS - TASK_DESCRIPTION_DESKTOP_MIN_CONTENT_ROWS;
+pub(crate) const TASK_DESCRIPTION_DESKTOP_MAX_PERCENT: u16 = 40;
+pub(crate) const TASK_DESCRIPTION_NARROW_MAX_CONTENT_ROWS: u16 = 8;
 
 pub(super) fn task_toolbar(
     pending_view: TaskViewChange,
@@ -81,7 +80,7 @@ pub(super) fn task_workspace_layout(
         .selected_task_id
         .as_deref()
         .filter(|id| rows.iter().any(|task| task.id == **id));
-    let copy_context = TaskCopyContext::new(&state.people, &state.workspaces, &state.tags);
+    let copy_context = TaskCopyContext::new(&state.workspaces);
     let table = task_table_with_copy_context_for_view(
         rows,
         selected,
@@ -102,7 +101,8 @@ pub(super) fn task_workspace_layout(
     let master = TaskMaster::new(toolbar, table);
     ResponsiveSplit::master_detail(master, detail)
         .wide_ratio(45, 55)
-        .narrow_second_max_above_min(TASK_DESCRIPTION_NARROW_EXTRA_ABOVE_MIN)
+        .narrow_second_max_percent(75)
+        .narrow_first_percent_space_between(25)
         .second_visible(selected_task.is_some())
 }
 
@@ -213,7 +213,7 @@ fn task_table_with_copy_context_and_empty(
         [ListControlField::text("Task")],
         |_, _| unreachable!("task creation uses the task dialog"),
     )
-    .copy_with(move |row| copy_context.export(row))
+    .copy_with(move |row| copy_context.reference(row))
     .empty_state(empty_state)
     .hotkey(keys::TASK_AGENT_YANK.hotkey())
     .action_bar(true)
@@ -434,6 +434,7 @@ pub(crate) fn detail_form(
     checklist_highlighted_id: Rc<RefCell<Option<String>>>,
     highlighted_issue_link_task_id: Option<&str>,
     save_status: SaveStatusLine,
+    max_rows: Rc<Cell<Option<usize>>>,
 ) -> Flex<AppMsg> {
     let (tasks, people, workspaces, tags) = catalogs;
     let Some(task) = task else {
@@ -526,25 +527,28 @@ pub(crate) fn detail_form(
         )
         .child(
             "description",
-            TextareaInput::<AppMsg>::new()
-                .value(task.description.clone())
-                .placeholder("Task description")
-                .panel("Description")
-                .language(Language::Markdown)
-                .hotkey(keys::TASK_DESCRIPTION_FIELD.hotkey())
-                .editor_hotkey(keys::TASK_DESCRIPTION_EDITOR.hotkey())
-                .action_hotkey(
-                    keys::TASK_DESCRIPTION_SPEED_READ.hotkey(),
-                    AppMsg::OpenDescriptionSpeedReader,
-                )
-                .on_edit_end({
-                    let patch_sink = Rc::clone(&patch_sink);
-                    move |value| {
-                        patch_sink.borrow_mut().push(TaskPatch::Description(value));
-                        AppMsg::Noop
-                    }
-                })
-                .min_rows(usize::from(TASK_DESCRIPTION_DESKTOP_MIN_CONTENT_ROWS)),
+            TaskDescriptionInput::new(
+                TextareaInput::<AppMsg>::new()
+                    .value(task.description.clone())
+                    .placeholder("Task description")
+                    .panel("Description")
+                    .language(Language::Markdown)
+                    .hotkey(keys::TASK_DESCRIPTION_FIELD.hotkey())
+                    .editor_hotkey(keys::TASK_DESCRIPTION_EDITOR.hotkey())
+                    .action_hotkey(
+                        keys::TASK_DESCRIPTION_SPEED_READ.hotkey(),
+                        AppMsg::OpenDescriptionSpeedReader,
+                    )
+                    .on_edit_end({
+                        let patch_sink = Rc::clone(&patch_sink);
+                        move |value| {
+                            patch_sink.borrow_mut().push(TaskPatch::Description(value));
+                            AppMsg::Noop
+                        }
+                    })
+                    .min_rows(usize::from(TASK_DESCRIPTION_DESKTOP_MIN_CONTENT_ROWS)),
+                max_rows,
+            ),
             FlexItem::content().shrink(1),
         )
         .child("status-fields", status_fields, FlexItem::fixed(3))
@@ -596,6 +600,74 @@ pub(crate) fn detail_form(
             ),
             FlexItem::content().shrink(0),
         )
+}
+
+struct TaskDescriptionInput {
+    input: TextareaInput<AppMsg>,
+    max_rows: Rc<Cell<Option<usize>>>,
+}
+
+impl TaskDescriptionInput {
+    fn new(input: TextareaInput<AppMsg>, max_rows: Rc<Cell<Option<usize>>>) -> Self {
+        Self { input, max_rows }
+    }
+}
+
+impl TuiNode<AppMsg> for TaskDescriptionInput {
+    fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
+        let mut hint = self.input.measure(proposal);
+        if let Some(max_rows) = self.max_rows.get() {
+            let height = (max_rows.saturating_add(2)).min(usize::from(u16::MAX)) as u16;
+            hint.min.height = hint.min.height.min(height);
+            hint.preferred.height = hint.preferred.height.min(height);
+        }
+        hint
+    }
+
+    fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
+        self.input.layout(area, ctx)
+    }
+
+    fn render<'a>(&'a self, frame: &mut Frame, area: Rect, ctx: &mut RenderCtx<'a>) {
+        <TextareaInput<AppMsg> as TuiNode<AppMsg>>::render(&self.input, frame, area, ctx);
+    }
+
+    fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<AppMsg>) -> EventOutcome {
+        self.input.event(event, ctx)
+    }
+
+    fn dispatch_event(
+        &mut self,
+        route: &EventRoute,
+        event: &TuiEvent,
+        ctx: &mut EventCtx<AppMsg>,
+    ) -> EventOutcome {
+        self.input.dispatch_event(route, event, ctx)
+    }
+
+    fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<AppMsg>) {
+        self.input.dispatch_focus(target, focused, ctx);
+    }
+
+    fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
+        self.input.tick(dt, settings)
+    }
+
+    fn init(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
+        self.input.init(ctx);
+    }
+
+    fn mount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
+        self.input.mount(ctx);
+    }
+
+    fn unmount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
+        self.input.unmount(ctx);
+    }
+
+    fn destroy(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
+        self.input.destroy(ctx);
+    }
 }
 
 pub(super) fn chip_line(label: &'static str, role: ChipColorRole) -> Line<'static> {
