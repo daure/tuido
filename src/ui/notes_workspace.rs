@@ -549,8 +549,8 @@ impl<M: 'static> NotesWorkspace<M> {
             }
             _ => return None,
         };
-        let index = self.focused_index()? + 1;
-        ctx.copy_to_clipboard(format!("{command} #{index}"));
+        let note_id = self.focused_note_id.as_deref()?;
+        ctx.copy_to_clipboard(format!("{command} {note_id}"));
         ctx.stop_propagation();
         Some(EventOutcome::Handled)
     }
@@ -1433,7 +1433,7 @@ mod tests {
         let mut yank_ctx = EventCtx::default();
         let outcome = workspace.dispatch_event(&route, &TuiEvent::Yank, &mut yank_ctx);
         let effects = tuicore::DispatchEffects::from_event_ctx(outcome, yank_ctx);
-        assert_eq!(effects.clipboard.as_deref(), Some("Tuido note #2"));
+        assert_eq!(effects.clipboard.as_deref(), Some("Tuido note note-1"));
 
         let mut prefix_ctx = EventCtx::default();
         workspace.dispatch_event(
@@ -1448,7 +1448,10 @@ mod tests {
             &mut process_ctx,
         );
         let effects = tuicore::DispatchEffects::from_event_ctx(outcome, process_ctx);
-        assert_eq!(effects.clipboard.as_deref(), Some("Tuido note process #2"));
+        assert_eq!(
+            effects.clipboard.as_deref(),
+            Some("Tuido note process note-1")
+        );
         assert_eq!(workspace.focused_index(), Some(1));
 
         let mut clarify_ctx = EventCtx::default();
@@ -1458,7 +1461,10 @@ mod tests {
             &mut clarify_ctx,
         );
         let effects = tuicore::DispatchEffects::from_event_ctx(outcome, clarify_ctx);
-        assert_eq!(effects.clipboard.as_deref(), Some("Tuido note clarify #2"));
+        assert_eq!(
+            effects.clipboard.as_deref(),
+            Some("Tuido note clarify note-1")
+        );
     }
 
     #[test]
