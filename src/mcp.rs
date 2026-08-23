@@ -1077,10 +1077,18 @@ mod tests {
                     .0,
             )
             .unwrap();
-            for task in [
-                &all["spaces"][0]["value"]["tasks"][0],
-                &by_key["value"]["tasks"][0],
+            for tasks in [
+                all["spaces"][0]["value"]["tasks"]
+                    .as_array()
+                    .expect("all-spaces response should include tasks"),
+                by_key["value"]["tasks"]
+                    .as_array()
+                    .expect("workspace response should include tasks"),
             ] {
+                let task = tasks
+                    .iter()
+                    .find(|task| task["value"]["id"].as_str() == Some(first.value.id.as_str()))
+                    .expect("first task should be present in workspace response");
                 let relation = &task["value"]["relations"][0];
                 assert_eq!(relation["relation_type"], "blocks");
                 assert_eq!(relation["task"]["space_id"], workspace.value.id);

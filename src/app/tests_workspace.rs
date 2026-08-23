@@ -2191,8 +2191,10 @@ fn active_snooze_modal_receives_routed_navigation_and_selection() {
         [AppMsg::SnoozeTask {
             task_id,
             until,
-            remember_custom: None
-        }] if task_id == "task-1" && *until == time::macros::datetime!(2026-07-25 8:00)
+            remember_custom: Some(remembered)
+        }] if task_id == "task-1"
+            && *until == time::macros::datetime!(2026-07-25 8:00)
+            && *remembered == *until
     ));
 }
 

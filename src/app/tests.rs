@@ -2551,9 +2551,9 @@ fn escape_from_global_filters_focuses_active_tab_content() {
                     })
                     .expect("global filter should be focusable");
                 let expected_hotkey = if component == "workspace" {
-                    "shift+s"
+                    keys::TASK_WORKSPACE_FILTER.hotkey()
                 } else {
-                    "shift+t"
+                    keys::TASK_LABEL_FILTER.hotkey()
                 };
                 assert_eq!(target.hotkey_sequences, [expected_hotkey]);
                 let mut ctx = EventCtx::default();

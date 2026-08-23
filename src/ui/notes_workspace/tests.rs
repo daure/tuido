@@ -106,9 +106,11 @@ fn note_panel_shows_its_creation_time_in_the_top_right() {
     let top_row = (0..area.width)
         .filter_map(|x| buffer.cell((x, 0)).map(|cell| cell.symbol()))
         .collect::<String>();
-    assert!(
-        top_row
-            .find("A moment ago")
-            .is_some_and(|position| position > usize::from(area.width / 2))
-    );
+    let title = "A moment ago";
+    let position = top_row
+        .find(title)
+        .expect("note creation time should render in its panel header");
+    let panel_width = usize::from(area.width.div_ceil(workspace.columns as u16));
+    assert!(position < panel_width);
+    assert!(position + title.len() >= panel_width - 1);
 }
