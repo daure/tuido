@@ -371,6 +371,136 @@ fn new_tasks_prepend_and_reordering_updates_ranks_atomically() {
     });
 }
 
+#[tokio::test]
+async fn bulk_task_state_claims_targets_once_and_promotes_the_selected_rank_order() {
+    let service = test_service().await;
+    let first = service.create_task(task_create("First")).await.unwrap();
+    let second = service.create_task(task_create("Second")).await.unwrap();
+    let third = service.create_task(task_create("Third")).await.unwrap();
+    let before_revision = service.workspace_revision().await.unwrap();
+
+    let revisions = service
+        .bulk_patch_tasks(
+            vec![
+                TaskMutationTarget {
+                    id: first.value.id.clone(),
+                    expected_revision: first.revision,
+                },
+                TaskMutationTarget {
+                    id: third.value.id.clone(),
+                    expected_revision: third.revision,
+                },
+            ],
+            TaskPatch::State(TaskState::InProgress),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        service.workspace_revision().await.unwrap(),
+        before_revision + 1
+    );
+    assert_eq!(revisions.revisions[&format!("task:{}", first.value.id)], 2);
+    assert_eq!(revisions.revisions[&format!("task:{}", third.value.id)], 2);
+    let tasks = service.consistent_workspace().await.unwrap().snapshot.tasks;
+    let task = |id: &str| tasks.iter().find(|task| task.id == id).unwrap();
+    assert_eq!(task(&third.value.id).state, TaskState::InProgress);
+    assert_eq!(task(&first.value.id).state, TaskState::InProgress);
+    assert_eq!(
+        (task(&third.value.id).rank, task(&first.value.id).rank),
+        (-4, -3)
+    );
+    assert_eq!(task(&second.value.id).rank, -2);
+}
+
+#[tokio::test]
+async fn bulk_task_patch_conflict_rolls_back_all_claims_and_writes() {
+    let service = test_service().await;
+    let first = service.create_task(task_create("First")).await.unwrap();
+    let second = service.create_task(task_create("Second")).await.unwrap();
+    service
+        .patch_task(
+            first.value.id.clone(),
+            first.revision,
+            TaskPatch::Title("External winner".into()),
+        )
+        .await
+        .unwrap();
+    let before_revision = service.workspace_revision().await.unwrap();
+
+    let result = service
+        .bulk_patch_tasks(
+            vec![
+                TaskMutationTarget {
+                    id: second.value.id.clone(),
+                    expected_revision: second.revision,
+                },
+                TaskMutationTarget {
+                    id: first.value.id.clone(),
+                    expected_revision: first.revision,
+                },
+            ],
+            TaskPatch::Snooze {
+                until: time::macros::datetime!(2026-10-01 08:00),
+                remember_custom: None,
+            },
+        )
+        .await;
+
+    assert!(matches!(result, Err(ServiceError::Conflict { .. })));
+    assert_eq!(service.workspace_revision().await.unwrap(), before_revision);
+    let second = service.get_task(&second.value.id).await.unwrap();
+    assert_eq!(second.revision, 1);
+    assert_eq!(second.value.state, "todo");
+    assert_eq!(second.value.snoozed_until, None);
+}
+
+#[tokio::test]
+async fn bulk_unsnooze_updates_all_selected_tasks() {
+    let service = test_service().await;
+    let first = service.create_task(task_create("First")).await.unwrap();
+    let second = service.create_task(task_create("Second")).await.unwrap();
+    let until = time::macros::datetime!(2026-10-01 08:00);
+
+    for task in [&first, &second] {
+        service
+            .patch_task(
+                task.value.id.clone(),
+                task.revision,
+                TaskPatch::Snooze {
+                    until,
+                    remember_custom: None,
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    let result = service
+        .bulk_patch_tasks(
+            vec![
+                TaskMutationTarget {
+                    id: first.value.id.clone(),
+                    expected_revision: first.revision + 1,
+                },
+                TaskMutationTarget {
+                    id: second.value.id.clone(),
+                    expected_revision: second.revision + 1,
+                },
+            ],
+            TaskPatch::Unsnooze,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.revisions[&format!("task:{}", first.value.id)], 3);
+    assert_eq!(result.revisions[&format!("task:{}", second.value.id)], 3);
+    for task in service.consistent_workspace().await.unwrap().snapshot.tasks {
+        assert_eq!(task.state, TaskState::Todo);
+        assert_eq!(task.snoozed_until, None);
+    }
+}
+
 #[test]
 fn app_settings_are_persisted_and_replace_previous_values() {
     let runtime = tokio::runtime::Builder::new_current_thread()

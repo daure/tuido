@@ -1,5 +1,6 @@
 use std::{
     cell::{Cell, RefCell},
+    collections::BTreeSet,
     error::Error,
     rc::Rc,
     sync::atomic::{AtomicU64, Ordering},
@@ -19,7 +20,10 @@ use crate::domain::{
 };
 use crate::note_quick_menu::NoteQuickMenu;
 use crate::notes_config::{DEFAULT_NOTE_EDITING_SETTING, NoteEditingMode, parse_note_editing_mode};
-use crate::persistence_coordinator::{AppStore, PersistenceCommand, PersistenceCoordinator};
+use crate::persistence_coordinator::{
+    AppStore, PersistenceCommand, PersistenceCoordinator, PersistenceSelectionInvocation,
+    PersistenceSelectionSource,
+};
 use crate::service::{NoteView, TuidoService, Versioned};
 use crate::settings_dialog::SettingsDialog;
 use crate::snooze::{
@@ -207,36 +211,76 @@ pub(crate) enum AppMsg {
         task_id: String,
         return_focus: Option<TreePath>,
     },
-    DeleteTaskConfirmed(String),
-    OpenTaskQuickMenu(String),
-    OpenCalendarTaskQuickMenu {
+    OpenCalendarDeleteTask {
         task_id: String,
-        time: PrimitiveDateTime,
+        return_focus: Option<TreePath>,
     },
+    DeleteTaskConfirmed(String),
+    OpenDeleteTasks(Vec<String>),
+    DeleteTasksConfirmed(Vec<String>),
+    SelectionAction {
+        invocation: PersistenceSelectionInvocation,
+        action: Box<AppMsg>,
+    },
+    OpenTaskQuickMenu(String),
+    OpenTasksQuickMenu(Vec<String>),
+    OpenCalendarTasksQuickMenu {
+        task_ids: Vec<String>,
+        time: Option<PrimitiveDateTime>,
+        selection_active: bool,
+    },
+    CopyTaskClipboard(String),
+    OpenCalendarDeleteTasks(Vec<String>),
+    OpenCalendarTasksSnooze(Vec<String>),
+    OpenCalendarCompleteTasks(Vec<String>),
     MoveTaskToTop(String),
     MoveTaskToBottom(String),
-    MoveCalendarTaskToTop {
+    MoveTaskToTopAtTime {
         task_id: String,
         time: PrimitiveDateTime,
     },
-    MoveCalendarTaskToBottom {
+    MoveTaskToBottomAtTime {
         task_id: String,
+        time: PrimitiveDateTime,
+    },
+    MoveTasksToTop(Vec<String>),
+    MoveTasksToBottom(Vec<String>),
+    MoveTasksToTopAtTime {
+        task_ids: Vec<String>,
+        time: PrimitiveDateTime,
+    },
+    MoveTasksToBottomAtTime {
+        task_ids: Vec<String>,
         time: PrimitiveDateTime,
     },
     OpenTaskSnooze {
         task_id: String,
         return_focus: Option<SnoozeReturnFocus>,
     },
+    OpenTasksSnooze(Vec<String>),
     OpenCompleteTask {
         task_id: String,
         return_focus: Option<TreePath>,
     },
-    OpenCalendarQuickCompleteTask(String),
+    OpenCalendarCompleteTask {
+        task_id: String,
+        return_focus: Option<TreePath>,
+    },
+    OpenCompleteTasks(Vec<String>),
     CompleteTask {
         task_id: String,
         state: TaskState,
     },
+    CompleteTasks {
+        task_ids: Vec<String>,
+        state: TaskState,
+    },
+    CompleteCalendarTasks {
+        task_ids: Vec<String>,
+        state: TaskState,
+    },
     ToggleTaskProgress(String),
+    ToggleCalendarTaskProgress(String),
     NavigateToTask {
         source_task_id: String,
         target_task_id: String,
@@ -257,6 +301,12 @@ pub(crate) enum AppMsg {
         remember_custom: Option<PrimitiveDateTime>,
     },
     UnsnoozeTask(String),
+    SnoozeTasks {
+        task_ids: Vec<String>,
+        until: PrimitiveDateTime,
+        remember_custom: Option<PrimitiveDateTime>,
+    },
+    UnsnoozeTasks(Vec<String>),
     CloseManagementOverlay,
     CloseSnoozeDialog,
     CloseDeleteTaskDialog,
@@ -415,38 +465,98 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             task_id,
             return_focus,
         } => app.open_delete_task_dialog(&task_id, return_focus, ctx),
+        AppMsg::OpenCalendarDeleteTask {
+            task_id,
+            return_focus,
+        } => {
+            app.begin_calendar_bulk_action();
+            app.open_delete_task_dialog(&task_id, return_focus, ctx);
+        }
         AppMsg::DeleteTaskConfirmed(task_id) => app.delete_task(task_id, ctx),
+        AppMsg::OpenDeleteTasks(task_ids) => app.open_delete_tasks_dialog(&task_ids, None, ctx),
+        AppMsg::DeleteTasksConfirmed(task_ids) => app.delete_tasks(task_ids, None, ctx),
+        AppMsg::SelectionAction { invocation, action } => {
+            app.dispatch_selection_action(invocation, *action, ctx)
+        }
         AppMsg::OpenTaskQuickMenu(task_id) => app.open_task_quick_menu(&task_id, ctx),
-        AppMsg::OpenCalendarTaskQuickMenu { task_id, time } => {
-            app.open_calendar_task_quick_menu(&task_id, time, ctx)
+        AppMsg::OpenTasksQuickMenu(task_ids) => app.open_tasks_quick_menu(task_ids, None, ctx),
+        AppMsg::OpenCalendarTasksQuickMenu {
+            task_ids,
+            time,
+            selection_active,
+        } => app.open_calendar_tasks_quick_menu(task_ids, time, selection_active, None, ctx),
+        AppMsg::CopyTaskClipboard(payload) => app.copy_task_clipboard(payload, None, ctx),
+        AppMsg::OpenCalendarDeleteTasks(task_ids) => {
+            app.begin_calendar_bulk_action();
+            app.open_delete_tasks_dialog(&task_ids, None, ctx);
+        }
+        AppMsg::OpenCalendarTasksSnooze(task_ids) => {
+            app.begin_calendar_bulk_action();
+            app.open_tasks_snooze_dialog(task_ids, None, ctx);
+        }
+        AppMsg::OpenCalendarCompleteTasks(task_ids) => {
+            app.begin_calendar_bulk_action();
+            app.open_complete_tasks_dialog(&task_ids, None, ctx);
         }
         AppMsg::MoveTaskToTop(task_id) => app.move_task_to_edge(&task_id, true, ctx),
         AppMsg::MoveTaskToBottom(task_id) => app.move_task_to_edge(&task_id, false, ctx),
-        AppMsg::MoveCalendarTaskToTop { task_id, time } => {
+        AppMsg::MoveTaskToTopAtTime { task_id, time } => {
             app.move_calendar_task_to_edge(&task_id, time, true, ctx)
         }
-        AppMsg::MoveCalendarTaskToBottom { task_id, time } => {
+        AppMsg::MoveTaskToBottomAtTime { task_id, time } => {
             app.move_calendar_task_to_edge(&task_id, time, false, ctx)
+        }
+        AppMsg::MoveTasksToTop(task_ids) => app.move_tasks_to_edge(task_ids, true, None, ctx),
+        AppMsg::MoveTasksToBottom(task_ids) => app.move_tasks_to_edge(task_ids, false, None, ctx),
+        AppMsg::MoveTasksToTopAtTime { task_ids, time } => {
+            app.move_calendar_tasks_to_edge(task_ids, time, true, None, ctx)
+        }
+        AppMsg::MoveTasksToBottomAtTime { task_ids, time } => {
+            app.move_calendar_tasks_to_edge(task_ids, time, false, None, ctx)
         }
         AppMsg::OpenTaskSnooze {
             task_id,
             return_focus,
         } => app.open_task_snooze_dialog(&task_id, return_focus, ctx),
+        AppMsg::OpenTasksSnooze(task_ids) => app.open_tasks_snooze_dialog(task_ids, None, ctx),
         AppMsg::SnoozeTask {
             task_id,
             until,
             remember_custom,
         } => app.snooze_task(task_id, until, remember_custom, ctx),
         AppMsg::UnsnoozeTask(task_id) => app.unsnooze_task(task_id, ctx),
+        AppMsg::SnoozeTasks {
+            task_ids,
+            until,
+            remember_custom,
+        } => app.snooze_tasks(task_ids, until, remember_custom, None, ctx),
+        AppMsg::UnsnoozeTasks(task_ids) => app.unsnooze_tasks(task_ids, None, ctx),
         AppMsg::OpenCompleteTask {
             task_id,
             return_focus,
-        } => app.open_complete_task_dialog(&task_id, return_focus, ctx),
-        AppMsg::OpenCalendarQuickCompleteTask(task_id) => {
-            app.open_calendar_quick_complete_task(&task_id, ctx)
+        } => {
+            if app.calendar_bulk_origin {
+                app.open_calendar_complete_task_dialog(&task_id, return_focus, ctx);
+            } else {
+                app.open_complete_task_dialog(&task_id, return_focus, ctx);
+            }
         }
+        AppMsg::OpenCalendarCompleteTask {
+            task_id,
+            return_focus,
+        } => app.open_calendar_complete_task_dialog(&task_id, return_focus, ctx),
+        AppMsg::OpenCompleteTasks(task_ids) => app.open_complete_tasks_dialog(&task_ids, None, ctx),
         AppMsg::CompleteTask { task_id, state } => app.complete_task(task_id, state, ctx),
+        AppMsg::CompleteTasks { task_ids, state } => app.complete_tasks(task_ids, state, None, ctx),
+        AppMsg::CompleteCalendarTasks { task_ids, state } => {
+            app.begin_calendar_bulk_action();
+            app.complete_tasks(task_ids, state, None, ctx);
+        }
         AppMsg::ToggleTaskProgress(task_id) => app.toggle_task_progress(task_id, ctx),
+        AppMsg::ToggleCalendarTaskProgress(task_id) => {
+            app.begin_calendar_bulk_action();
+            app.toggle_task_progress(task_id, ctx);
+        }
         AppMsg::NavigateToTask {
             source_task_id,
             target_task_id,
@@ -574,6 +684,7 @@ struct App {
     delete_return_focus: Option<TreePath>,
     complete_return_focus: Option<CompleteReturnFocus>,
     complete_return_to_calendar: bool,
+    calendar_bulk_origin: bool,
     active_tab: Rc<Cell<usize>>,
     active_focus_path: Option<TreePath>,
     note_focus_path: Rc<RefCell<TreePath>>,
@@ -603,6 +714,14 @@ fn toggled_task_progress_state(state: TaskState) -> TaskState {
     }
 }
 
+fn toggled_tasks_progress_state(tasks: &[Task]) -> TaskState {
+    if tasks.iter().all(|task| task.state == TaskState::Todo) {
+        TaskState::InProgress
+    } else {
+        TaskState::Todo
+    }
+}
+
 fn task_agent_identifier(state: &AppState, task_id: &str) -> Option<String> {
     let task = state.tasks.iter().find(|task| task.id == task_id)?;
     let number = task_number(&task.id)?;
@@ -618,9 +737,25 @@ fn task_agent_identifier(state: &AppState, task_id: &str) -> Option<String> {
 
 fn task_agent_command_for(state: &AppState, task_id: &str, action: &str) -> Option<String> {
     let task = state.tasks.iter().find(|task| task.id == task_id)?;
-    let identifier = task_agent_identifier(state, task_id)?;
-    let title = task.title.replace('\\', "\\\\").replace('"', "\\\"");
-    Some(format!("Tuido {action} {identifier} \"{title}\""))
+    task_agent_commands_for(state, std::slice::from_ref(task), action)
+}
+
+pub(crate) fn task_agent_commands_for(
+    state: &AppState,
+    tasks: &[Task],
+    action: &str,
+) -> Option<String> {
+    let entries = tasks
+        .iter()
+        .map(|task| {
+            let identifier = task_agent_identifier(state, &task.id)?;
+            Some(format!(
+                "{identifier} {}",
+                TaskCopyContext::quoted_title(task)
+            ))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    (!entries.is_empty()).then(|| format!("Tuido {action} {}", entries.join("; ")))
 }
 
 pub(crate) fn task_agent_command(state: &AppState, task_id: &str) -> Option<String> {
@@ -634,6 +769,10 @@ pub(crate) fn task_agent_clarify_command(state: &AppState, task_id: &str) -> Opt
 pub(crate) fn task_reference(state: &AppState, task_id: &str) -> Option<String> {
     let task = state.tasks.iter().find(|task| task.id == task_id)?;
     Some(TaskCopyContext::new(&state.workspaces).reference(task))
+}
+
+pub(crate) fn task_references_for(state: &AppState, tasks: &[Task]) -> String {
+    TaskCopyContext::new(&state.workspaces).references(tasks)
 }
 
 impl App {
@@ -653,7 +792,7 @@ impl App {
         show_calendar_weekends: bool,
         notes_zoom: crate::notes_config::NotesZoomLevels,
     ) -> Self {
-        let context = AppContext { store, coordinator };
+        let context = AppContext::new(store, coordinator);
         let active_tab = Rc::new(Cell::new(0));
         let note_focus_path = Rc::new(RefCell::new(TreePath::new()));
         let focus_note_request = Rc::new(RefCell::new(None));
@@ -792,6 +931,7 @@ impl App {
             delete_return_focus: None,
             complete_return_focus: None,
             complete_return_to_calendar: false,
+            calendar_bulk_origin: false,
             active_tab,
             active_focus_path: None,
             note_focus_path,
@@ -1255,6 +1395,8 @@ impl App {
                 self.note_focus_path.borrow().clone(),
                 &return_focus,
             )));
+        } else {
+            ctx.focus(app_tabs_focus_request());
         }
         ctx.request_layout();
     }
@@ -1686,7 +1828,7 @@ impl App {
             self.context
                 .coordinator
                 .borrow_mut()
-                .submit(PersistenceCommand::PatchTask(task_id, patch));
+                .submit(PersistenceCommand::PatchTask(task_id.clone(), patch));
         }
         let notification = if let Some(until) = snoozed_until {
             format!(
@@ -1733,8 +1875,13 @@ impl App {
     ) {
         self.delete_return_focus = None;
         let Some(task) = self.task(task_id) else {
+            let calendar_origin = self.take_calendar_bulk_origin();
             self.close_dialog(ctx);
-            focus_task_table(ctx);
+            if calendar_origin {
+                self.focus_calendar_bulk_result(ctx);
+            } else {
+                focus_return_path(return_focus, ctx);
+            }
             return;
         };
         let primary = self.primary_dialog();
@@ -1750,11 +1897,7 @@ impl App {
         let Some(task) = state.tasks.iter().find(|task| task.id == task_id) else {
             return;
         };
-        let ordered_task_ids = state
-            .tasks
-            .iter()
-            .map(|task| task.id.clone())
-            .collect::<Vec<_>>();
+        let ordered_task_ids = ordered_task_ids(state);
         let (can_move_to_top, can_move_to_bottom) =
             task_edge_availability(&ordered_task_ids, task_id);
         let menu = TaskQuickMenu::new(
@@ -1777,21 +1920,60 @@ impl App {
         primary.set_active_with_context(true, ctx);
     }
 
+    fn open_tasks_quick_menu(
+        &mut self,
+        task_ids: Vec<String>,
+        selection_invocation: Option<PersistenceSelectionInvocation>,
+        ctx: &mut EventCtx<AppMsg>,
+    ) {
+        let state = self.context.store.borrow().state().clone();
+        let tasks = tasks_for_ids(&state, &task_ids);
+        if tasks.is_empty() {
+            self.finish_transient_selection_without_persistence(selection_invocation);
+            return;
+        }
+        let task_states = tasks.iter().map(|task| task.state).collect::<Vec<_>>();
+        let ordered_task_ids = ordered_task_ids(&state);
+        let (can_move_to_top, can_move_to_bottom) =
+            task_block_edge_availability(&ordered_task_ids, &task_ids);
+        let clipboard = TaskQuickClipboard {
+            execute: task_agent_commands_for(&state, &tasks, "execute"),
+            clarify: task_agent_commands_for(&state, &tasks, "clarify"),
+            reference: Some(task_references_for(&state, &tasks)),
+        };
+        let mut menu = TaskQuickMenu::new_multiple(
+            task_ids,
+            task_states,
+            clipboard,
+            can_move_to_top,
+            can_move_to_bottom,
+        );
+        menu.set_selection_invocation(selection_invocation);
+        let primary = self.primary_dialog();
+        primary.replace_layer(AppDialog::TaskQuickMenu(Box::new(menu)), ctx);
+        primary.set_layer_percent(40);
+        primary.set_layer_cross_percent(35);
+        primary.set_fit_content(true);
+        primary.set_active_with_context(true, ctx);
+    }
+
     fn open_calendar_task_quick_menu(
         &mut self,
         task_id: &str,
         time: PrimitiveDateTime,
         ctx: &mut EventCtx<AppMsg>,
     ) {
+        self.begin_calendar_bulk_action();
         let store = self.context.store.borrow();
         let state = store.state();
         let Some(task) = state.tasks.iter().find(|task| task.id == task_id) else {
+            self.finish_transient_selection_without_persistence(None);
             return;
         };
         let ordered_at_time = task_ids_at_snooze_time(state, time);
         let (can_move_to_top, can_move_to_bottom) =
             task_edge_availability(&ordered_at_time, task_id);
-        let menu = TaskQuickMenu::new_at_time(
+        let menu = TaskQuickMenu::new_calendar_at_time(
             task_id.to_string(),
             task.state,
             TaskQuickClipboard {
@@ -1810,6 +1992,200 @@ impl App {
         primary.set_layer_cross_percent(35);
         primary.set_fit_content(true);
         primary.set_active_with_context(true, ctx);
+    }
+
+    fn open_calendar_tasks_quick_menu(
+        &mut self,
+        task_ids: Vec<String>,
+        time: Option<PrimitiveDateTime>,
+        selection_active: bool,
+        selection_invocation: Option<PersistenceSelectionInvocation>,
+        ctx: &mut EventCtx<AppMsg>,
+    ) {
+        if selection_active {
+            self.begin_calendar_bulk_action();
+        }
+        let state = self.context.store.borrow().state().clone();
+        let tasks = tasks_for_ids(&state, &task_ids);
+        let Some(task) = tasks.first() else {
+            self.finish_transient_selection_without_persistence(selection_invocation);
+            self.finish_bulk_action(ctx);
+            return;
+        };
+        if !selection_active
+            && tasks.len() == 1
+            && let Some(time) = time
+        {
+            self.open_calendar_task_quick_menu(&task.id, time, ctx);
+            return;
+        }
+        let task_states = tasks.iter().map(|task| task.state).collect::<Vec<_>>();
+        let clipboard = TaskQuickClipboard {
+            execute: task_agent_commands_for(&state, &tasks, "execute"),
+            clarify: task_agent_commands_for(&state, &tasks, "clarify"),
+            reference: Some(task_references_for(&state, &tasks)),
+        };
+        let mut menu = if let Some(time) = time {
+            let ordered_at_time = task_ids_at_snooze_time(&state, time);
+            let (can_move_to_top, can_move_to_bottom) =
+                task_block_edge_availability(&ordered_at_time, &task_ids);
+            TaskQuickMenu::new_calendar_multiple_at_time(
+                task_ids,
+                task_states,
+                clipboard,
+                time,
+                can_move_to_top,
+                can_move_to_bottom,
+            )
+        } else {
+            TaskQuickMenu::new_calendar_multiple(task_ids, task_states, clipboard, false, false)
+        };
+        menu.set_selection_invocation(selection_invocation);
+        let primary = self.primary_dialog();
+        primary.replace_layer(AppDialog::TaskQuickMenu(Box::new(menu)), ctx);
+        primary.set_layer_percent(40);
+        primary.set_layer_cross_percent(35);
+        primary.set_fit_content(true);
+        primary.set_active_with_context(true, ctx);
+    }
+
+    fn copy_task_clipboard(
+        &mut self,
+        payload: String,
+        selection_invocation: Option<PersistenceSelectionInvocation>,
+        ctx: &mut EventCtx<AppMsg>,
+    ) {
+        self.context
+            .accept_transient_selection_without_persistence(selection_invocation);
+        ctx.copy_to_clipboard(payload);
+        self.close_dialog(ctx);
+        ctx.request_layout();
+        ctx.request_redraw();
+    }
+
+    fn dispatch_selection_action(
+        &mut self,
+        selection_invocation: PersistenceSelectionInvocation,
+        action: AppMsg,
+        ctx: &mut EventCtx<AppMsg>,
+    ) {
+        if !self
+            .context
+            .has_transient_selection_invocation(selection_invocation)
+            || !selection_action_matches_invocation(&action, &self.context, selection_invocation)
+        {
+            return;
+        }
+        match action {
+            AppMsg::CopyTaskClipboard(payload) => {
+                self.copy_task_clipboard(payload, Some(selection_invocation), ctx)
+            }
+            AppMsg::OpenTasksQuickMenu(task_ids) => {
+                self.open_tasks_quick_menu(task_ids, Some(selection_invocation), ctx)
+            }
+            AppMsg::OpenCalendarTasksQuickMenu {
+                task_ids,
+                time,
+                selection_active,
+            } => self.open_calendar_tasks_quick_menu(
+                task_ids,
+                time,
+                selection_active,
+                Some(selection_invocation),
+                ctx,
+            ),
+            AppMsg::OpenDeleteTasks(task_ids) => {
+                self.open_delete_tasks_dialog(&task_ids, Some(selection_invocation), ctx)
+            }
+            AppMsg::DeleteTasksConfirmed(task_ids) => {
+                self.delete_tasks(task_ids, Some(selection_invocation), ctx)
+            }
+            AppMsg::OpenCalendarDeleteTasks(task_ids) => {
+                self.begin_calendar_bulk_action();
+                self.open_delete_tasks_dialog(&task_ids, Some(selection_invocation), ctx);
+            }
+            AppMsg::OpenTasksSnooze(task_ids) => {
+                self.open_tasks_snooze_dialog(task_ids, Some(selection_invocation), ctx)
+            }
+            AppMsg::OpenCalendarTasksSnooze(task_ids) => {
+                self.begin_calendar_bulk_action();
+                self.open_tasks_snooze_dialog(task_ids, Some(selection_invocation), ctx)
+            }
+            AppMsg::OpenCompleteTasks(task_ids) => {
+                self.open_complete_tasks_dialog(&task_ids, Some(selection_invocation), ctx)
+            }
+            AppMsg::OpenCalendarCompleteTasks(task_ids) => {
+                self.begin_calendar_bulk_action();
+                self.open_complete_tasks_dialog(&task_ids, Some(selection_invocation), ctx)
+            }
+            AppMsg::MoveTasksToTop(task_ids) => {
+                self.move_tasks_to_edge(task_ids, true, Some(selection_invocation), ctx)
+            }
+            AppMsg::MoveTasksToBottom(task_ids) => {
+                self.move_tasks_to_edge(task_ids, false, Some(selection_invocation), ctx)
+            }
+            AppMsg::MoveTasksToTopAtTime { task_ids, time } => self.move_calendar_tasks_to_edge(
+                task_ids,
+                time,
+                true,
+                Some(selection_invocation),
+                ctx,
+            ),
+            AppMsg::MoveTasksToBottomAtTime { task_ids, time } => self.move_calendar_tasks_to_edge(
+                task_ids,
+                time,
+                false,
+                Some(selection_invocation),
+                ctx,
+            ),
+            AppMsg::CompleteTasks { task_ids, state }
+            | AppMsg::CompleteCalendarTasks { task_ids, state } => {
+                self.complete_tasks(task_ids, state, Some(selection_invocation), ctx)
+            }
+            AppMsg::SnoozeTasks {
+                task_ids,
+                until,
+                remember_custom,
+            } => self.snooze_tasks(
+                task_ids,
+                until,
+                remember_custom,
+                Some(selection_invocation),
+                ctx,
+            ),
+            AppMsg::UnsnoozeTasks(task_ids) => {
+                self.unsnooze_tasks(task_ids, Some(selection_invocation), ctx)
+            }
+            AppMsg::CloseDialog => {
+                self.context
+                    .cancel_transient_selection(selection_invocation);
+                self.close_dialog(ctx);
+            }
+            AppMsg::CloseDeleteTaskDialog => {
+                self.context
+                    .cancel_transient_selection(selection_invocation);
+                self.close_delete_task_dialog(ctx);
+            }
+            AppMsg::CloseCompleteTaskDialog => {
+                self.context
+                    .cancel_transient_selection(selection_invocation);
+                self.close_complete_task_dialog(ctx);
+            }
+            AppMsg::CloseSnoozeDialog => {
+                self.context
+                    .cancel_transient_selection(selection_invocation);
+                self.close_snooze_dialog(ctx);
+            }
+            _ => {}
+        }
+    }
+
+    fn finish_transient_selection_without_persistence(
+        &self,
+        selection_invocation: Option<PersistenceSelectionInvocation>,
+    ) {
+        self.context
+            .retire_transient_selection_without_persistence(selection_invocation);
     }
 
     fn move_task_to_edge(&mut self, task_id: &str, to_top: bool, ctx: &mut EventCtx<AppMsg>) {
@@ -1831,7 +2207,7 @@ impl App {
         } else {
             ordered.push(task_id);
         }
-        if persist_task_order(&self.context, &state, &ordered) {
+        if persist_task_order(&self.context, &state, &ordered, None) {
             let edge = if to_top { "top" } else { "bottom" };
             ctx.notify(tuicore::Notification::success(
                 "Task moved",
@@ -1840,6 +2216,67 @@ impl App {
         }
         self.close_dialog(ctx);
         focus_task_table(ctx);
+    }
+
+    fn move_tasks_to_edge(
+        &mut self,
+        task_ids: Vec<String>,
+        to_top: bool,
+        selection_invocation: Option<PersistenceSelectionInvocation>,
+        ctx: &mut EventCtx<AppMsg>,
+    ) {
+        let calendar_origin = self.take_calendar_bulk_origin();
+        let state = self.context.store.borrow().state().clone();
+        let selected = tasks_for_ids(&state, &task_ids)
+            .into_iter()
+            .map(|task| task.id)
+            .collect::<Vec<_>>();
+        if selected.is_empty() {
+            self.finish_transient_selection_without_persistence(selection_invocation);
+            self.close_dialog(ctx);
+            self.focus_bulk_result(calendar_origin, ctx);
+            return;
+        }
+        let ordered = ordered_task_ids(&state);
+        let mut remaining = ordered
+            .iter()
+            .filter(|id| !selected.contains(id))
+            .cloned()
+            .collect::<Vec<_>>();
+        let reordered = if to_top {
+            selected
+                .iter()
+                .cloned()
+                .chain(remaining)
+                .collect::<Vec<_>>()
+        } else {
+            remaining.extend(selected.iter().cloned());
+            remaining
+        };
+        if persist_task_order(&self.context, &state, &reordered, selection_invocation) {
+            let edge = if to_top { "top" } else { "bottom" };
+            let (title, body) = if selected.len() == 1 {
+                let task = state
+                    .tasks
+                    .iter()
+                    .find(|task| task.id == selected[0])
+                    .unwrap();
+                (
+                    "Task moved",
+                    format!("“{}” moved to the {edge}.", task.title),
+                )
+            } else {
+                (
+                    "Tasks moved",
+                    format!("{} tasks moved to the {edge}.", selected.len()),
+                )
+            };
+            ctx.notify(tuicore::Notification::success(title, body));
+        } else {
+            self.finish_transient_selection_without_persistence(selection_invocation);
+        }
+        self.close_dialog(ctx);
+        self.focus_bulk_result(calendar_origin, ctx);
     }
 
     fn move_calendar_task_to_edge(
@@ -1853,6 +2290,7 @@ impl App {
         let mut ordered = task_ids_at_snooze_time(&state, time);
         let Some(index) = ordered.iter().position(|id| id == task_id) else {
             self.close_dialog(ctx);
+            self.focus_calendar_bulk_result(ctx);
             return;
         };
         let task_title = state
@@ -1866,7 +2304,7 @@ impl App {
         } else {
             ordered.push(task_id);
         }
-        if persist_task_order(&self.context, &state, &ordered)
+        if persist_task_order(&self.context, &state, &ordered, None)
             && let Some(task_title) = task_title
         {
             let edge = if to_top { "top" } else { "bottom" };
@@ -1876,17 +2314,81 @@ impl App {
             ));
         }
         self.close_dialog(ctx);
+        self.focus_calendar_bulk_result(ctx);
+    }
+
+    fn move_calendar_tasks_to_edge(
+        &mut self,
+        task_ids: Vec<String>,
+        time: PrimitiveDateTime,
+        to_top: bool,
+        selection_invocation: Option<PersistenceSelectionInvocation>,
+        ctx: &mut EventCtx<AppMsg>,
+    ) {
+        let state = self.context.store.borrow().state().clone();
+        let ordered = task_ids_at_snooze_time(&state, time);
+        if task_ids.iter().any(|task_id| !ordered.contains(task_id)) {
+            self.finish_transient_selection_without_persistence(selection_invocation);
+            self.close_dialog(ctx);
+            self.focus_calendar_bulk_result(ctx);
+            return;
+        }
+        let selected = ordered
+            .iter()
+            .filter(|task_id| task_ids.contains(task_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        if selected.is_empty() {
+            self.finish_transient_selection_without_persistence(selection_invocation);
+            self.close_dialog(ctx);
+            self.focus_calendar_bulk_result(ctx);
+            return;
+        }
+        let mut remaining = ordered
+            .iter()
+            .filter(|task_id| !selected.contains(task_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        let reordered = if to_top {
+            selected
+                .iter()
+                .cloned()
+                .chain(remaining)
+                .collect::<Vec<_>>()
+        } else {
+            remaining.extend(selected.iter().cloned());
+            remaining
+        };
+        if persist_task_order(&self.context, &state, &reordered, selection_invocation) {
+            let edge = if to_top { "top" } else { "bottom" };
+            ctx.notify(tuicore::Notification::success(
+                "Tasks moved",
+                format!(
+                    "{} tasks moved to the {edge} of tasks at the same time.",
+                    selected.len()
+                ),
+            ));
+        } else {
+            self.finish_transient_selection_without_persistence(selection_invocation);
+        }
+        self.close_dialog(ctx);
+        self.focus_calendar_bulk_result(ctx);
     }
 
     fn delete_task(&mut self, task_id: String, ctx: &mut EventCtx<AppMsg>) {
         self.delete_return_focus = None;
+        let calendar_origin = self.take_calendar_bulk_origin();
         let task = {
             let store = self.context.store.borrow();
             let state = store.state();
             state.tasks.iter().find(|task| task.id == task_id).cloned()
         };
         let Some(task) = task else {
+            self.finish_transient_selection_without_persistence(None);
             self.close_dialog(ctx);
+            if calendar_origin {
+                self.focus_calendar_bulk_result(ctx);
+            }
             return;
         };
         let task_title = task.title.clone();
@@ -1903,6 +2405,68 @@ impl App {
             format!("“{task_title}” was deleted."),
         ));
         self.close_dialog(ctx);
+        if calendar_origin {
+            self.focus_calendar_bulk_result(ctx);
+        }
+    }
+
+    fn open_delete_tasks_dialog(
+        &mut self,
+        task_ids: &[String],
+        selection_invocation: Option<PersistenceSelectionInvocation>,
+        ctx: &mut EventCtx<AppMsg>,
+    ) {
+        self.delete_return_focus = None;
+        let tasks = tasks_for_ids(self.context.store.borrow().state(), task_ids);
+        if tasks.is_empty() {
+            self.finish_transient_selection_without_persistence(selection_invocation);
+            let calendar_origin = self.take_calendar_bulk_origin();
+            self.close_dialog(ctx);
+            self.focus_bulk_result(calendar_origin, ctx);
+            return;
+        }
+        let primary = self.primary_dialog();
+        primary.replace_layer(delete_tasks_dialog(&tasks, selection_invocation), ctx);
+        primary.set_fit_content(true);
+        primary.set_active_with_context(true, ctx);
+    }
+
+    fn delete_tasks(
+        &mut self,
+        task_ids: Vec<String>,
+        selection_invocation: Option<PersistenceSelectionInvocation>,
+        ctx: &mut EventCtx<AppMsg>,
+    ) {
+        self.delete_return_focus = None;
+        let calendar_origin = self.take_calendar_bulk_origin();
+        let tasks = tasks_for_ids(self.context.store.borrow().state(), &task_ids);
+        if tasks.is_empty() {
+            self.finish_transient_selection_without_persistence(selection_invocation);
+            self.close_dialog(ctx);
+            self.focus_bulk_result(calendar_origin, ctx);
+            return;
+        }
+        for task in &tasks {
+            self.context
+                .store
+                .borrow_mut()
+                .dispatch(AppEvent::TaskDeleted(task.id.clone()));
+        }
+        let selection_invocation = self.context.accept_transient_mutation(selection_invocation);
+        self.context
+            .coordinator
+            .borrow_mut()
+            .submit(PersistenceCommand::BulkDeleteTasks {
+                before: tasks.clone(),
+                expected_revisions: Default::default(),
+                selection_invocation,
+            });
+        ctx.notify(tuicore::Notification::success(
+            "Tasks deleted",
+            format!("{} tasks were deleted.", tasks.len()),
+        ));
+        self.close_dialog(ctx);
+        self.focus_bulk_result(calendar_origin, ctx);
     }
 
     fn open_task_snooze_dialog(
@@ -1914,7 +2478,7 @@ impl App {
         self.snooze_return_focus = None;
         let Some(task) = self.task(task_id) else {
             self.close_dialog(ctx);
-            focus_task_table(ctx);
+            focus_snooze_return_focus(return_focus, ctx);
             return;
         };
         let now = match local_now() {
@@ -1925,7 +2489,7 @@ impl App {
                     format!("Cannot open snooze options: {error}"),
                 ));
                 self.close_dialog(ctx);
-                focus_task_table(ctx);
+                focus_snooze_return_focus(return_focus, ctx);
                 return;
             }
         };
@@ -1953,6 +2517,56 @@ impl App {
         primary.set_fit_content(true);
         primary.set_active_with_context(true, ctx);
         self.snooze_return_focus = return_focus;
+    }
+
+    fn open_tasks_snooze_dialog(
+        &mut self,
+        task_ids: Vec<String>,
+        selection_invocation: Option<PersistenceSelectionInvocation>,
+        ctx: &mut EventCtx<AppMsg>,
+    ) {
+        self.snooze_return_focus = None;
+        let tasks = tasks_for_ids(self.context.store.borrow().state(), &task_ids);
+        if tasks.is_empty() {
+            self.finish_transient_selection_without_persistence(selection_invocation);
+            let calendar_origin = self.take_calendar_bulk_origin();
+            self.close_dialog(ctx);
+            self.focus_bulk_result(calendar_origin, ctx);
+            return;
+        }
+        let now = match local_now() {
+            Ok(now) => now,
+            Err(error) => {
+                self.finish_transient_selection_without_persistence(selection_invocation);
+                let calendar_origin = self.take_calendar_bulk_origin();
+                ctx.notify(tuicore::Notification::error(
+                    "Local time unavailable",
+                    format!("Cannot open snooze options: {error}"),
+                ));
+                self.close_dialog(ctx);
+                self.focus_bulk_result(calendar_origin, ctx);
+                return;
+            }
+        };
+        let state = self.context.store.borrow();
+        let last_custom = state.state().last_custom_snooze;
+        let default_time = state
+            .state()
+            .app_setting_values
+            .get(DEFAULT_SNOOZE_TIME_SETTING)
+            .and_then(|value| parse_default_snooze_time(Some(value)).ok())
+            .unwrap_or(default_snooze_time());
+        drop(state);
+        let primary = self.primary_dialog();
+        primary.replace_layer(
+            AppDialog::Snooze(Box::new(
+                SnoozeDialog::new_multiple_with_default_time(tasks, now, default_time, last_custom)
+                    .with_selection_invocation(selection_invocation),
+            )),
+            ctx,
+        );
+        primary.set_fit_content(true);
+        primary.set_active_with_context(true, ctx);
     }
 
     fn open_complete_task_dialog(
@@ -1988,9 +2602,41 @@ impl App {
         });
     }
 
-    fn open_calendar_quick_complete_task(&mut self, task_id: &str, ctx: &mut EventCtx<AppMsg>) {
-        self.open_complete_task_dialog(task_id, None, ctx);
-        self.complete_return_to_calendar = self.primary_dialog().is_active();
+    fn open_complete_tasks_dialog(
+        &mut self,
+        task_ids: &[String],
+        selection_invocation: Option<PersistenceSelectionInvocation>,
+        ctx: &mut EventCtx<AppMsg>,
+    ) {
+        self.complete_return_focus = None;
+        self.complete_return_to_calendar = false;
+        let tasks = tasks_for_ids(self.context.store.borrow().state(), task_ids);
+        if tasks.is_empty() {
+            self.finish_transient_selection_without_persistence(selection_invocation);
+            let calendar_origin = self.take_calendar_bulk_origin();
+            self.close_dialog(ctx);
+            self.focus_bulk_result(calendar_origin, ctx);
+            return;
+        }
+        let primary = self.primary_dialog();
+        primary.replace_layer(complete_tasks_dialog(&tasks, selection_invocation), ctx);
+        primary.set_fit_content(true);
+        primary.set_active_with_context(true, ctx);
+    }
+
+    fn open_calendar_complete_task_dialog(
+        &mut self,
+        task_id: &str,
+        return_focus: Option<TreePath>,
+        ctx: &mut EventCtx<AppMsg>,
+    ) {
+        if self.task(task_id).is_none() {
+            self.close_dialog(ctx);
+            self.focus_calendar_bulk_result(ctx);
+            return;
+        }
+        self.open_complete_task_dialog(task_id, return_focus, ctx);
+        self.complete_return_to_calendar = true;
     }
 
     fn complete_task(&mut self, task_id: String, state: TaskState, ctx: &mut EventCtx<AppMsg>) {
@@ -2009,7 +2655,7 @@ impl App {
             self.context
                 .coordinator
                 .borrow_mut()
-                .submit(PersistenceCommand::PatchTask(task_id, patch));
+                .submit(PersistenceCommand::PatchTask(task_id.clone(), patch));
             if let Some(task_title) = task_title {
                 let (title, body) = match state {
                     TaskState::Done => ("Task completed", format!("“{task_title}” moved to done.")),
@@ -2024,6 +2670,8 @@ impl App {
                 };
                 ctx.notify(tuicore::Notification::success(title, body));
             }
+        } else {
+            self.finish_transient_selection_without_persistence(None);
         }
         self.complete_return_focus = None;
         self.close_dialog(ctx);
@@ -2036,8 +2684,70 @@ impl App {
         }
     }
 
+    fn complete_tasks(
+        &mut self,
+        task_ids: Vec<String>,
+        state: TaskState,
+        selection_invocation: Option<PersistenceSelectionInvocation>,
+        ctx: &mut EventCtx<AppMsg>,
+    ) {
+        let calendar_origin = self.take_calendar_bulk_origin();
+        let tasks = tasks_for_ids(self.context.store.borrow().state(), &task_ids);
+        let patch = TaskPatch::State(state);
+        let mut changed_tasks = Vec::new();
+        for task in tasks {
+            if self
+                .context
+                .store
+                .borrow_mut()
+                .dispatch(AppEvent::PatchTask {
+                    task_id: task.id.clone(),
+                    patch: patch.clone(),
+                })
+                .changed
+            {
+                changed_tasks.push(task);
+            }
+        }
+        if !changed_tasks.is_empty() {
+            let selection_invocation = self.context.accept_transient_mutation(selection_invocation);
+            self.context
+                .coordinator
+                .borrow_mut()
+                .submit(PersistenceCommand::BulkPatchTasks {
+                    before: changed_tasks.clone(),
+                    patch,
+                    expected_revisions: Default::default(),
+                    selection_invocation,
+                });
+            let (title, body) = match state {
+                TaskState::Done => (
+                    "Tasks completed",
+                    format!("{} tasks moved to done.", changed_tasks.len()),
+                ),
+                TaskState::Rejected => (
+                    "Tasks rejected",
+                    format!("{} tasks moved to rejected.", changed_tasks.len()),
+                ),
+                _ => (
+                    "Tasks updated",
+                    format!("{} tasks moved to {}.", changed_tasks.len(), state.id()),
+                ),
+            };
+            ctx.notify(tuicore::Notification::success(title, body));
+        } else {
+            self.finish_transient_selection_without_persistence(selection_invocation);
+        }
+        self.complete_return_focus = None;
+        self.complete_return_to_calendar = false;
+        self.close_dialog(ctx);
+        self.focus_bulk_result(calendar_origin, ctx);
+    }
+
     fn toggle_task_progress(&mut self, task_id: String, ctx: &mut EventCtx<AppMsg>) {
+        let calendar_origin = self.take_calendar_bulk_origin();
         let Some(task) = self.task(&task_id) else {
+            self.focus_bulk_result(calendar_origin, ctx);
             return;
         };
         let was_backlog = task.state == TaskState::Backlog;
@@ -2053,6 +2763,7 @@ impl App {
                 patch: patch.clone(),
             });
         if !outcome.changed {
+            self.finish_transient_selection_without_persistence(None);
             return;
         }
         self.context
@@ -2062,7 +2773,7 @@ impl App {
         if was_backlog || was_snoozed {
             *self.pending_task_view.borrow_mut() = Some(TaskView::Active);
         }
-        if was_snoozed {
+        if was_snoozed && !calendar_origin {
             self.context
                 .store
                 .borrow_mut()
@@ -2079,6 +2790,9 @@ impl App {
             "Task moved",
             format!("“{}” moved to {state_label}.", task.title),
         ));
+        if calendar_origin {
+            self.focus_calendar_bulk_result(ctx);
+        }
         ctx.request_layout();
     }
 
@@ -2106,13 +2820,15 @@ impl App {
             self.context
                 .coordinator
                 .borrow_mut()
-                .submit(PersistenceCommand::PatchTask(task_id, patch));
+                .submit(PersistenceCommand::PatchTask(task_id.clone(), patch));
             if let Some(task_title) = task_title {
                 ctx.notify(tuicore::Notification::success(
                     "Task snoozed",
                     format!("“{task_title}” snoozed until {}.", format_datetime(until)),
                 ));
             }
+        } else {
+            self.finish_transient_selection_without_persistence(None);
         }
         let return_focus = if self.active_tab.get() == CALENDAR_TAB_INDEX {
             self.snooze_return_focus.take()
@@ -2162,13 +2878,15 @@ impl App {
             self.context
                 .coordinator
                 .borrow_mut()
-                .submit(PersistenceCommand::PatchTask(task_id, patch));
+                .submit(PersistenceCommand::PatchTask(task_id.clone(), patch));
             if let Some(task_title) = task_title {
                 ctx.notify(tuicore::Notification::success(
                     "Task unsnoozed",
                     format!("“{task_title}” moved to todo."),
                 ));
             }
+        } else {
+            self.finish_transient_selection_without_persistence(None);
         }
         let return_focus = if self.active_tab.get() == CALENDAR_TAB_INDEX {
             self.snooze_return_focus.take()
@@ -2190,6 +2908,150 @@ impl App {
         }
     }
 
+    fn snooze_tasks(
+        &mut self,
+        task_ids: Vec<String>,
+        until: PrimitiveDateTime,
+        remember_custom: Option<PrimitiveDateTime>,
+        selection_invocation: Option<PersistenceSelectionInvocation>,
+        ctx: &mut EventCtx<AppMsg>,
+    ) {
+        let calendar_origin = self.take_calendar_bulk_origin();
+        let tasks = tasks_for_ids(self.context.store.borrow().state(), &task_ids);
+        let patch = TaskPatch::Snooze {
+            until,
+            remember_custom,
+        };
+        let mut changed_tasks = Vec::new();
+        for task in tasks {
+            if self
+                .context
+                .store
+                .borrow_mut()
+                .dispatch(AppEvent::PatchTask {
+                    task_id: task.id.clone(),
+                    patch: patch.clone(),
+                })
+                .changed
+            {
+                changed_tasks.push(task);
+            }
+        }
+        if !changed_tasks.is_empty() {
+            let selection_invocation = self.context.accept_transient_mutation(selection_invocation);
+            self.context
+                .coordinator
+                .borrow_mut()
+                .submit(PersistenceCommand::BulkPatchTasks {
+                    before: changed_tasks.clone(),
+                    patch,
+                    expected_revisions: Default::default(),
+                    selection_invocation,
+                });
+            ctx.notify(tuicore::Notification::success(
+                "Tasks snoozed",
+                format!(
+                    "{} tasks snoozed until {}.",
+                    changed_tasks.len(),
+                    format_datetime(until)
+                ),
+            ));
+        } else {
+            self.finish_transient_selection_without_persistence(selection_invocation);
+        }
+        self.snooze_return_focus = None;
+        self.close_dialog(ctx);
+        self.focus_bulk_result(calendar_origin, ctx);
+    }
+
+    fn unsnooze_tasks(
+        &mut self,
+        task_ids: Vec<String>,
+        selection_invocation: Option<PersistenceSelectionInvocation>,
+        ctx: &mut EventCtx<AppMsg>,
+    ) {
+        let calendar_origin = self.take_calendar_bulk_origin();
+        let tasks = tasks_for_ids(self.context.store.borrow().state(), &task_ids);
+        if tasks.is_empty() || tasks.iter().any(|task| task.state != TaskState::Snoozed) {
+            self.finish_transient_selection_without_persistence(selection_invocation);
+            self.close_dialog(ctx);
+            self.focus_bulk_result(calendar_origin, ctx);
+            return;
+        }
+        let patch = TaskPatch::Unsnooze;
+        for task in &tasks {
+            self.context
+                .store
+                .borrow_mut()
+                .dispatch(AppEvent::PatchTask {
+                    task_id: task.id.clone(),
+                    patch: patch.clone(),
+                });
+        }
+        let selection_invocation = self.context.accept_transient_mutation(selection_invocation);
+        self.context
+            .coordinator
+            .borrow_mut()
+            .submit(PersistenceCommand::BulkPatchTasks {
+                before: tasks.clone(),
+                patch,
+                expected_revisions: Default::default(),
+                selection_invocation,
+            });
+        ctx.notify(tuicore::Notification::success(
+            "Tasks unsnoozed",
+            format!("{} tasks moved to todo.", tasks.len()),
+        ));
+        self.snooze_return_focus = None;
+        self.close_dialog(ctx);
+        self.focus_bulk_result(calendar_origin, ctx);
+    }
+
+    fn begin_calendar_bulk_action(&mut self) {
+        self.calendar_bulk_origin = true;
+    }
+
+    fn take_calendar_bulk_origin(&mut self) -> bool {
+        std::mem::take(&mut self.calendar_bulk_origin)
+    }
+
+    fn finish_bulk_action(&mut self, ctx: &mut EventCtx<AppMsg>) {
+        let calendar_origin = self.take_calendar_bulk_origin();
+        self.focus_bulk_result(calendar_origin, ctx);
+    }
+
+    fn focus_bulk_result(&self, calendar_origin: bool, ctx: &mut EventCtx<AppMsg>) {
+        if calendar_origin {
+            self.focus_calendar_bulk_result(ctx);
+        } else {
+            focus_task_table(ctx);
+        }
+    }
+
+    fn focus_calendar_bulk_result(&self, ctx: &mut EventCtx<AppMsg>) {
+        let selected_date = self.calendar_create_context.selected_date();
+        let has_calendar_entry = self
+            .context
+            .store
+            .borrow()
+            .state()
+            .tasks
+            .iter()
+            .any(|task| {
+                task.state == TaskState::Snoozed
+                    && task
+                        .snoozed_until
+                        .is_some_and(|snoozed_until| snoozed_until.date() == selected_date)
+            });
+        if has_calendar_entry {
+            ctx.focus(initial_calendar_focus_request());
+        } else {
+            ctx.focus(app_tabs_focus_request());
+        }
+        ctx.stop_propagation();
+        ctx.request_redraw();
+    }
+
     fn task(&self, task_id: &str) -> Option<Task> {
         let store = self.context.store.borrow();
         store
@@ -2205,6 +3067,7 @@ impl App {
         let returning_from_task_creation = std::mem::take(&mut self.task_creation_active);
         self.pending_calendar_task = None;
         self.create_task_calendar_date = None;
+        self.calendar_bulk_origin = false;
         self.root.set_active_with_context(false, ctx);
         self.primary_dialog().set_active_with_context(false, ctx);
         if returning_from_task_creation {
@@ -2588,10 +3451,42 @@ fn task_edge_availability(ordered_task_ids: &[String], task_id: &str) -> (bool, 
     (index > 0, index + 1 < ordered_task_ids.len())
 }
 
+fn task_block_edge_availability(ordered_task_ids: &[String], task_ids: &[String]) -> (bool, bool) {
+    if task_ids.is_empty()
+        || task_ids
+            .iter()
+            .any(|task_id| !ordered_task_ids.contains(task_id))
+    {
+        return (false, false);
+    }
+    (
+        !task_ids.contains(&ordered_task_ids[0]),
+        !task_ids.contains(&ordered_task_ids[ordered_task_ids.len() - 1]),
+    )
+}
+
+fn ordered_task_ids(state: &AppState) -> Vec<String> {
+    let mut tasks = state.tasks.iter().collect::<Vec<_>>();
+    tasks.sort_by_key(|task| task.rank);
+    tasks.into_iter().map(|task| task.id.clone()).collect()
+}
+
+pub(crate) fn tasks_for_ids(state: &AppState, task_ids: &[String]) -> Vec<Task> {
+    let mut tasks = state
+        .tasks
+        .iter()
+        .filter(|task| task_ids.contains(&task.id))
+        .cloned()
+        .collect::<Vec<_>>();
+    tasks.sort_by_key(|task| task.rank);
+    tasks
+}
+
 pub(crate) fn persist_task_order(
     context: &AppContext,
     state: &AppState,
     ordered_ids: &[String],
+    selection_invocation: Option<PersistenceSelectionInvocation>,
 ) -> bool {
     let mut ranks = ordered_ids
         .iter()
@@ -2639,6 +3534,7 @@ pub(crate) fn persist_task_order(
         .store
         .borrow_mut()
         .dispatch(AppEvent::TaskRanksChanged(after.clone()));
+    let selection_invocation = context.accept_transient_mutation(selection_invocation);
     context
         .coordinator
         .borrow_mut()
@@ -2646,6 +3542,7 @@ pub(crate) fn persist_task_order(
             before,
             after,
             expected_revisions: std::collections::HashMap::new(),
+            selection_invocation,
         });
     true
 }
@@ -2724,10 +3621,265 @@ fn initial_calendar_focus_request() -> FocusRequest {
     }
 }
 
+fn focus_return_path(return_focus: Option<TreePath>, ctx: &mut EventCtx<AppMsg>) {
+    if let Some(path) = return_focus {
+        ctx.focus(FocusRequest::Path(path));
+        ctx.stop_propagation();
+        ctx.request_redraw();
+    } else {
+        focus_task_table(ctx);
+    }
+}
+
+fn focus_snooze_return_focus(return_focus: Option<SnoozeReturnFocus>, ctx: &mut EventCtx<AppMsg>) {
+    focus_return_path(return_focus.map(|focus| focus.path().clone()), ctx);
+}
+
+pub(crate) fn selection_action(
+    invocation: Option<PersistenceSelectionInvocation>,
+    action: AppMsg,
+) -> AppMsg {
+    if let Some(invocation) = invocation {
+        AppMsg::SelectionAction {
+            invocation,
+            action: Box::new(action),
+        }
+    } else {
+        action
+    }
+}
+
+fn selection_action_matches_invocation(
+    action: &AppMsg,
+    context: &AppContext,
+    invocation: PersistenceSelectionInvocation,
+) -> bool {
+    let task_ids = match action {
+        AppMsg::OpenTasksQuickMenu(task_ids)
+        | AppMsg::OpenDeleteTasks(task_ids)
+        | AppMsg::DeleteTasksConfirmed(task_ids)
+        | AppMsg::OpenCalendarDeleteTasks(task_ids)
+        | AppMsg::OpenCalendarTasksSnooze(task_ids)
+        | AppMsg::OpenCalendarCompleteTasks(task_ids)
+        | AppMsg::MoveTasksToTop(task_ids)
+        | AppMsg::MoveTasksToBottom(task_ids)
+        | AppMsg::OpenTasksSnooze(task_ids)
+        | AppMsg::UnsnoozeTasks(task_ids) => Some(task_ids.as_slice()),
+        AppMsg::OpenCalendarTasksQuickMenu { task_ids, .. }
+        | AppMsg::MoveTasksToTopAtTime { task_ids, .. }
+        | AppMsg::MoveTasksToBottomAtTime { task_ids, .. }
+        | AppMsg::CompleteTasks { task_ids, .. }
+        | AppMsg::CompleteCalendarTasks { task_ids, .. }
+        | AppMsg::SnoozeTasks { task_ids, .. } => Some(task_ids.as_slice()),
+        AppMsg::CopyTaskClipboard(_)
+        | AppMsg::CloseDialog
+        | AppMsg::CloseDeleteTaskDialog
+        | AppMsg::CloseCompleteTaskDialog
+        | AppMsg::CloseSnoozeDialog => None,
+        _ => return false,
+    };
+    task_ids.is_none_or(|task_ids| context.selection_matches(invocation, task_ids))
+}
+
 #[derive(Clone)]
 pub(crate) struct AppContext {
     pub(crate) store: AppStore,
     pub(crate) coordinator: Rc<RefCell<PersistenceCoordinator>>,
+    selection_invocations: Rc<RefCell<Vec<SelectionInvocation>>>,
+    next_selection_token: Rc<Cell<u64>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TransientSelectionSource {
+    TaskList,
+    Calendar,
+}
+
+#[derive(Clone, Debug)]
+struct SelectionInvocation {
+    invocation: PersistenceSelectionInvocation,
+    selected_task_ids: BTreeSet<String>,
+    start_highlight: Option<String>,
+    clear_requested: bool,
+    clear_consumed: bool,
+    persistence_invocation: Option<PersistenceSelectionInvocation>,
+    rollback_pending: bool,
+}
+
+pub(crate) fn persistence_selection_invocation(
+    source: TransientSelectionSource,
+    token: u64,
+) -> PersistenceSelectionInvocation {
+    PersistenceSelectionInvocation {
+        token,
+        source: match source {
+            TransientSelectionSource::TaskList => PersistenceSelectionSource::TaskList,
+            TransientSelectionSource::Calendar => PersistenceSelectionSource::Calendar,
+        },
+    }
+}
+
+impl AppContext {
+    fn new(store: AppStore, coordinator: Rc<RefCell<PersistenceCoordinator>>) -> Self {
+        Self {
+            store,
+            coordinator,
+            selection_invocations: Rc::new(RefCell::new(Vec::new())),
+            next_selection_token: Rc::new(Cell::new(1)),
+        }
+    }
+
+    pub(crate) fn begin_transient_selection(
+        &self,
+        source: TransientSelectionSource,
+        task_ids: Vec<String>,
+        highlighted_task_id: Option<String>,
+    ) -> Option<PersistenceSelectionInvocation> {
+        if task_ids.is_empty() {
+            return None;
+        }
+        let token = self.next_selection_token.get();
+        self.next_selection_token.set(token.wrapping_add(1));
+        let invocation = persistence_selection_invocation(source, token);
+        self.selection_invocations
+            .borrow_mut()
+            .push(SelectionInvocation {
+                invocation,
+                selected_task_ids: task_ids.into_iter().collect(),
+                start_highlight: highlighted_task_id,
+                clear_requested: false,
+                clear_consumed: false,
+                persistence_invocation: None,
+                rollback_pending: false,
+            });
+        Some(invocation)
+    }
+
+    pub(crate) fn accept_transient_clipboard(
+        &self,
+        invocation: Option<PersistenceSelectionInvocation>,
+    ) {
+        self.resolve_transient_selection(invocation, false);
+    }
+
+    fn accept_transient_mutation(
+        &self,
+        invocation: Option<PersistenceSelectionInvocation>,
+    ) -> Option<PersistenceSelectionInvocation> {
+        self.resolve_transient_selection(invocation, true)
+    }
+
+    fn resolve_transient_selection(
+        &self,
+        persistence_invocation: Option<PersistenceSelectionInvocation>,
+        persistence_guard: bool,
+    ) -> Option<PersistenceSelectionInvocation> {
+        let persistence_invocation = persistence_invocation?;
+        let mut invocations = self.selection_invocations.borrow_mut();
+        let Some(invocation) = invocations.iter_mut().find(|invocation| {
+            !invocation.clear_requested && invocation.invocation == persistence_invocation
+        }) else {
+            return None;
+        };
+        invocation.clear_requested = true;
+        if persistence_guard {
+            invocation.persistence_invocation = Some(persistence_invocation);
+            return Some(persistence_invocation);
+        }
+        None
+    }
+
+    pub(crate) fn take_selection_clear_request(
+        &self,
+        invocation: PersistenceSelectionInvocation,
+    ) -> bool {
+        let mut invocations = self.selection_invocations.borrow_mut();
+        let Some(index) = invocations.iter().position(|current| {
+            current.invocation == invocation && current.clear_requested && !current.clear_consumed
+        }) else {
+            return false;
+        };
+        invocations[index].clear_consumed = true;
+        if invocations[index].persistence_invocation.is_none() {
+            invocations.remove(index);
+        }
+        true
+    }
+
+    fn retire_transient_selection_without_persistence(
+        &self,
+        invocation: Option<PersistenceSelectionInvocation>,
+    ) {
+        self.resolve_transient_selection(invocation, false);
+    }
+
+    fn accept_transient_selection_without_persistence(
+        &self,
+        invocation: Option<PersistenceSelectionInvocation>,
+    ) {
+        self.resolve_transient_selection(invocation, false);
+    }
+
+    fn cancel_transient_selection(&self, invocation: PersistenceSelectionInvocation) {
+        self.selection_invocations
+            .borrow_mut()
+            .retain(|current| current.clear_requested || current.invocation != invocation);
+    }
+
+    pub(crate) fn rollback_transient_selection_highlight(
+        &self,
+        invocation: PersistenceSelectionInvocation,
+    ) -> Option<String> {
+        let mut invocations = self.selection_invocations.borrow_mut();
+        invocations
+            .iter()
+            .rposition(|current| current.invocation == invocation && current.rollback_pending)
+            .and_then(|index| invocations.remove(index).start_highlight)
+    }
+
+    pub(crate) fn resolve_persistence_selection_outcomes(&self) {
+        for outcome in self.coordinator.borrow_mut().take_selection_outcomes() {
+            let mut invocations = self.selection_invocations.borrow_mut();
+            let Some(index) = invocations
+                .iter()
+                .position(|current| current.persistence_invocation == Some(outcome.invocation))
+            else {
+                continue;
+            };
+            if outcome.failed {
+                invocations[index].rollback_pending = true;
+            } else {
+                invocations.remove(index);
+            }
+        }
+    }
+
+    fn has_transient_selection_invocation(
+        &self,
+        persistence_invocation: PersistenceSelectionInvocation,
+    ) -> bool {
+        self.selection_invocations
+            .borrow()
+            .iter()
+            .any(|invocation| {
+                !invocation.clear_requested && invocation.invocation == persistence_invocation
+            })
+    }
+
+    fn selection_matches(
+        &self,
+        persistence_invocation: PersistenceSelectionInvocation,
+        task_ids: &[String],
+    ) -> bool {
+        self.selection_invocations
+            .borrow()
+            .iter()
+            .any(|invocation| {
+                !invocation.clear_requested
+                    && invocation.invocation == persistence_invocation
+                    && invocation.selected_task_ids == task_ids.iter().cloned().collect()
+            })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -3175,6 +4327,7 @@ struct TaskWorkspace {
     observed_version: u64,
     observed_external_refresh_version: u64,
     pending_navigation: PendingTaskNavigation,
+    active_selection_invocation: Option<PersistenceSelectionInvocation>,
 }
 
 #[derive(Debug, Default)]
@@ -3269,6 +4422,7 @@ impl TaskWorkspace {
             observed_version,
             observed_external_refresh_version,
             pending_navigation,
+            active_selection_invocation: None,
         }
     }
 
@@ -3300,7 +4454,17 @@ impl TaskWorkspace {
         let state = self.context.store.borrow().state().clone();
         let external_refresh =
             self.observed_external_refresh_version != state.external_refresh_version;
+        self.context.resolve_persistence_selection_outcomes();
+        if let Some(invocation) = self.active_selection_invocation
+            && self.context.take_selection_clear_request(invocation)
+        {
+            self.task_list_mut().clear_transient_selection();
+        }
         if self.observed_version != state.version || external_refresh {
+            let rollback_highlight = self.active_selection_invocation.and_then(|invocation| {
+                self.context
+                    .rollback_transient_selection_highlight(invocation)
+            });
             let selected_new_backlog = state
                 .selected_task_id
                 .as_deref()
@@ -3320,6 +4484,7 @@ impl TaskWorkspace {
                 false,
                 !external_refresh,
                 external_refresh && !protect_detail,
+                rollback_highlight.as_deref(),
             );
             if selected_new_backlog {
                 self.table_mut().reveal_highlighted();
@@ -3345,9 +4510,15 @@ impl TaskWorkspace {
         self.context
             .store
             .borrow_mut()
-            .dispatch(AppEvent::SelectTask(navigation.target_task_id));
+            .dispatch(AppEvent::SelectTask(navigation.target_task_id.clone()));
         let state = self.context.store.borrow().state().clone();
-        self.refresh_from_state(&state, false, false, false);
+        self.refresh_from_state(
+            &state,
+            false,
+            false,
+            false,
+            Some(&navigation.target_task_id),
+        );
         true
     }
 
@@ -3357,6 +4528,7 @@ impl TaskWorkspace {
         select_first: bool,
         preserve_position: bool,
         refresh_detail: bool,
+        preferred_task_id: Option<&str>,
     ) {
         let external_refresh =
             self.observed_external_refresh_version != state.external_refresh_version;
@@ -3377,15 +4549,26 @@ impl TaskWorkspace {
         );
         let empty_state = task_empty_state(&state.tasks, self.task_view);
         let contains_id = |id: &str| rows.iter().any(|task| task.id == id);
-        let selected_task_id = if select_first {
+        let selected_from_state = state
+            .selected_task_id
+            .as_deref()
+            .filter(|id| contains_id(id))
+            .map(str::to_string);
+        let selected_from_table = previous_task_id.filter(|id| contains_id(id));
+        let preferred_task_id = preferred_task_id
+            .filter(|id| contains_id(id))
+            .map(str::to_string);
+        let selected_task_id = if let Some(task_id) = preferred_task_id {
+            Some(task_id)
+        } else if select_first {
             rows.first().map(|task| task.id.clone())
         } else {
-            state
-                .selected_task_id
-                .as_deref()
-                .filter(|id| contains_id(id))
-                .map(str::to_string)
-                .or_else(|| previous_task_id.filter(|id| contains_id(id)))
+            let selected = if external_refresh {
+                selected_from_state.or(selected_from_table)
+            } else {
+                selected_from_table.or(selected_from_state)
+            };
+            selected
                 .or_else(|| {
                     previous_index.flatten().and_then(|index| {
                         rows.get(index.min(rows.len().saturating_sub(1)))
@@ -3395,13 +4578,15 @@ impl TaskWorkspace {
                 .or_else(|| rows.first().map(|task| task.id.clone()))
         };
         self.visible_task_ids = rows.iter().map(|task| task.id.clone()).collect();
-        self.table_mut().set_rows(rows);
+        self.task_list_mut().set_rows(rows);
         self.task_list_mut().set_empty_state(empty_state);
-        if let Some(task_id) = selected_task_id.as_ref() {
+        if self.task_list().transient_selected_ids().is_empty()
+            && let Some(task_id) = selected_task_id.as_ref()
+        {
             self.table_mut().highlight_id(task_id);
             self.table_mut().select_id(task_id.clone());
         }
-        self.table_mut().take_events();
+        self.task_list_mut().take_data_view_events();
         let selected_task_id = self.table().highlighted_id();
         let selected_task = selected_task_id
             .as_deref()
@@ -3490,7 +4675,7 @@ impl TaskWorkspace {
                 &self.label_filter,
             );
         }
-        self.refresh_from_state(&state, !preserve_selected, false, false);
+        self.refresh_from_state(&state, !preserve_selected, false, false, None);
         true
     }
 
@@ -3502,7 +4687,7 @@ impl TaskWorkspace {
         self.table_mut().clear_search();
         self.label_filter = next_filter;
         let state = self.context.store.borrow().state().clone();
-        self.refresh_from_state(&state, false, false, false);
+        self.refresh_from_state(&state, false, false, false, None);
         true
     }
 
@@ -3514,7 +4699,7 @@ impl TaskWorkspace {
         self.table_mut().clear_search();
         self.workspace_filter = next_filter;
         let state = self.context.store.borrow().state().clone();
-        self.refresh_from_state(&state, false, false, false);
+        self.refresh_from_state(&state, false, false, false, None);
         true
     }
 
@@ -3548,7 +4733,7 @@ impl TaskWorkspace {
             match event {
                 ListControlEvent::Reordered { row_ids } => {
                     let state = self.context.store.borrow().state().clone();
-                    if persist_task_order(&self.context, &state, &row_ids) {
+                    if persist_task_order(&self.context, &state, &row_ids, None) {
                         ctx.notify(tuicore::Notification::success(
                             "Tasks reordered",
                             "Task order was updated.",
@@ -3576,7 +4761,7 @@ impl TaskWorkspace {
                 | ListControlEvent::ReorderCancelled { .. } => {}
             }
         }
-        let events = self.table_mut().take_events();
+        let events = self.task_list_mut().take_data_view_events();
         let mut focus_detail = false;
         let mut selected_changed = false;
 
@@ -3664,7 +4849,6 @@ impl TaskWorkspace {
         if !self.drain_detail_patches() {
             return TaskDetailSync::default();
         }
-        self.detail_draft_protected = false;
         let previous_task_id = self.table().highlighted_id();
         let state = self.context.store.borrow().state().clone();
         let selected_task = self
@@ -3679,7 +4863,7 @@ impl TaskWorkspace {
         detail.people_snapshot = state.people.clone();
         detail.workspaces_snapshot = state.workspaces.clone();
         detail.tags_snapshot = state.tags.clone();
-        self.refresh_from_state(&state, false, true, false);
+        self.refresh_from_state(&state, false, true, false, None);
         let selected_task_id = self.table().highlighted_id();
         TaskDetailSync {
             changed: true,
@@ -3717,8 +4901,17 @@ impl TaskWorkspace {
             .any(|task| task.id == task_id)
     }
 
+    fn table_action_task_ids(&self) -> Vec<String> {
+        let selected = self.task_list().transient_selected_ids();
+        if selected.is_empty() {
+            self.table().highlighted_id().into_iter().collect()
+        } else {
+            selected
+        }
+    }
+
     fn handle_workspace_event(
-        &self,
+        &mut self,
         outcome: EventOutcome,
         event: &TuiEvent,
         ctx: &mut EventCtx<AppMsg>,
@@ -3734,25 +4927,56 @@ impl TaskWorkspace {
             return outcome;
         }
         let visible_task_id = self.visible_selection.borrow().clone();
-        let message = if visible_task_id.is_some() && keys::TASK_QUICK_MENU.matches(event) {
+        let table_task_ids = self.table_focused.then(|| self.table_action_task_ids());
+        let message = if self.table_focused
+            && keys::TASK_QUICK_MENU.matches(event)
+            && let Some(task_ids) = table_task_ids
+                .as_ref()
+                .filter(|task_ids| !task_ids.is_empty())
+        {
+            if task_ids.len() == 1 && self.task_list().transient_selected_ids().is_empty() {
+                Some(AppMsg::OpenTaskQuickMenu(task_ids[0].clone()))
+            } else {
+                Some(AppMsg::OpenTasksQuickMenu(task_ids.clone()))
+            }
+        } else if !self.table_focused
+            && visible_task_id.is_some()
+            && keys::TASK_QUICK_MENU.matches(event)
+        {
             visible_task_id.map(AppMsg::OpenTaskQuickMenu)
         } else if self.table_focused
-            && visible_task_id.is_some()
             && keys::TASK_COMPLETE.matches(event)
+            && let Some(task_ids) = table_task_ids
+                .as_ref()
+                .filter(|task_ids| !task_ids.is_empty())
         {
-            visible_task_id.map(|task_id| AppMsg::OpenCompleteTask {
-                task_id,
-                return_focus: None,
-            })
+            if task_ids.len() == 1 && self.task_list().transient_selected_ids().is_empty() {
+                Some(AppMsg::OpenCompleteTask {
+                    task_id: task_ids[0].clone(),
+                    return_focus: None,
+                })
+            } else {
+                Some(AppMsg::OpenCompleteTasks(task_ids.clone()))
+            }
         } else if self.table_focused
             && keys::TASK_TOGGLE_PROGRESS.matches(event)
-            && visible_task_id
-                .as_deref()
-                .is_some_and(|task_id| self.can_toggle_task_progress(task_id))
+            && let Some(task_ids) = table_task_ids
+                .as_ref()
+                .filter(|task_ids| !task_ids.is_empty())
         {
-            visible_task_id.map(AppMsg::ToggleTaskProgress)
+            let state = self.context.store.borrow().state().clone();
+            let tasks = tasks_for_ids(&state, task_ids);
+            if tasks.is_empty() {
+                None
+            } else if task_ids.len() == 1 && self.task_list().transient_selected_ids().is_empty() {
+                Some(AppMsg::ToggleTaskProgress(task_ids[0].clone()))
+            } else {
+                Some(AppMsg::CompleteTasks {
+                    task_ids: task_ids.clone(),
+                    state: toggled_tasks_progress_state(&tasks),
+                })
+            }
         } else if self.table_focused
-            && visible_task_id.is_some()
             && app_keymap::matches_any(
                 event,
                 &[
@@ -3761,24 +4985,48 @@ impl TaskWorkspace {
                     keys::TASK_DELETE_BACKSPACE,
                 ],
             )
+            && let Some(task_ids) = table_task_ids
+                .as_ref()
+                .filter(|task_ids| !task_ids.is_empty())
         {
-            visible_task_id.map(|task_id| AppMsg::OpenDeleteTask {
-                task_id,
-                return_focus: None,
-            })
+            if task_ids.len() == 1 && self.task_list().transient_selected_ids().is_empty() {
+                Some(AppMsg::OpenDeleteTask {
+                    task_id: task_ids[0].clone(),
+                    return_focus: None,
+                })
+            } else {
+                Some(AppMsg::OpenDeleteTasks(task_ids.clone()))
+            }
         } else if self.table_focused
-            && visible_task_id.is_some()
             && keys::TASK_SNOOZE.matches(event)
+            && let Some(task_ids) = table_task_ids
+                .as_ref()
+                .filter(|task_ids| !task_ids.is_empty())
         {
-            visible_task_id.map(|task_id| AppMsg::OpenTaskSnooze {
-                task_id,
-                return_focus: None,
-            })
+            if task_ids.len() == 1 && self.task_list().transient_selected_ids().is_empty() {
+                Some(AppMsg::OpenTaskSnooze {
+                    task_id: task_ids[0].clone(),
+                    return_focus: None,
+                })
+            } else {
+                Some(AppMsg::OpenTasksSnooze(task_ids.clone()))
+            }
         } else {
             None
         };
         if let Some(message) = message {
-            ctx.emit(message);
+            let transient_task_ids = self.task_list().transient_selected_ids();
+            let selection_invocation = if self.table_focused && !transient_task_ids.is_empty() {
+                self.context.begin_transient_selection(
+                    TransientSelectionSource::TaskList,
+                    transient_task_ids,
+                    self.table().highlighted_id(),
+                )
+            } else {
+                None
+            };
+            self.active_selection_invocation = selection_invocation;
+            ctx.emit(selection_action(selection_invocation, message));
             ctx.stop_propagation();
             return EventOutcome::Handled;
         }
@@ -3871,7 +5119,7 @@ impl TaskWorkspace {
     }
 
     fn handle_task_agent_yank(
-        &self,
+        &mut self,
         event: &TuiEvent,
         ctx: &mut EventCtx<AppMsg>,
     ) -> Option<EventOutcome> {
@@ -3883,43 +5131,87 @@ impl TaskWorkspace {
         {
             return None;
         }
-        let command = self
-            .visible_selection
-            .borrow()
-            .as_ref()
-            .and_then(|task_id| {
-                let state = self.context.store.borrow();
-                if sequence == &keys::TASK_AGENT_YANK.hotkey() {
-                    task_agent_command(state.state(), task_id)
-                } else {
-                    task_agent_clarify_command(state.state(), task_id)
-                }
-            });
+        let (task_ids, selected_group) = self.task_yank_ids();
+        let store = self.context.store.borrow();
+        let tasks = tasks_for_ids(store.state(), &task_ids);
+        let command = if sequence == &keys::TASK_AGENT_YANK.hotkey() {
+            task_agent_commands_for(store.state(), &tasks, "execute")
+        } else {
+            task_agent_commands_for(store.state(), &tasks, "clarify")
+        };
+        drop(store);
         if let Some(command) = command {
+            let selection_invocation = if selected_group {
+                self.context.begin_transient_selection(
+                    TransientSelectionSource::TaskList,
+                    task_ids.clone(),
+                    self.table().highlighted_id(),
+                )
+            } else {
+                None
+            };
+            self.active_selection_invocation = selection_invocation;
+            self.context
+                .accept_transient_clipboard(selection_invocation);
             ctx.copy_to_clipboard(command);
+            if selection_invocation
+                .is_some_and(|invocation| self.context.take_selection_clear_request(invocation))
+            {
+                self.task_list_mut().clear_transient_selection();
+            }
         }
         ctx.stop_propagation();
         Some(EventOutcome::Handled)
     }
 
     fn handle_task_reference_yank(
-        &self,
+        &mut self,
         event: &TuiEvent,
         ctx: &mut EventCtx<AppMsg>,
     ) -> Option<EventOutcome> {
         if !matches!(event, TuiEvent::Yank) {
             return None;
         }
-        let reference = self
-            .visible_selection
-            .borrow()
-            .as_ref()
-            .and_then(|task_id| task_reference(self.context.store.borrow().state(), task_id));
-        if let Some(reference) = reference {
-            ctx.copy_to_clipboard(reference);
+        let (task_ids, selected_group) = self.task_yank_ids();
+        let store = self.context.store.borrow();
+        let tasks = tasks_for_ids(store.state(), &task_ids);
+        if !tasks.is_empty() {
+            let selection_invocation = if selected_group {
+                self.context.begin_transient_selection(
+                    TransientSelectionSource::TaskList,
+                    task_ids.clone(),
+                    self.table().highlighted_id(),
+                )
+            } else {
+                None
+            };
+            self.active_selection_invocation = selection_invocation;
+            self.context
+                .accept_transient_clipboard(selection_invocation);
+            ctx.copy_to_clipboard(task_references_for(store.state(), &tasks));
+            drop(store);
+            if selection_invocation
+                .is_some_and(|invocation| self.context.take_selection_clear_request(invocation))
+            {
+                self.task_list_mut().clear_transient_selection();
+            }
         }
         ctx.stop_propagation();
         Some(EventOutcome::Handled)
+    }
+
+    fn task_yank_ids(&self) -> (Vec<String>, bool) {
+        let selected = self.task_list().transient_selected_ids();
+        if !selected.is_empty() {
+            return (selected, true);
+        }
+        if self.table_focused {
+            return (self.table().highlighted_id().into_iter().collect(), false);
+        }
+        (
+            self.visible_selection.borrow().iter().cloned().collect(),
+            false,
+        )
     }
 }
 

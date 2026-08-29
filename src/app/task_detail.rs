@@ -194,6 +194,7 @@ fn task_table_with_copy_context_and_empty(
     allow_reordering: bool,
 ) -> TaskTable {
     let display_context = copy_context.clone();
+    let continuation_context = copy_context.clone();
     let keybindings = if allow_reordering {
         ListControlKeyBindings::default()
             .add([])
@@ -269,11 +270,15 @@ fn task_table_with_copy_context_and_empty(
             },
         )
         .sortable(|row| row.title.clone())
-        .search_key(|row| row.title.clone()),
+        .search_key(|row| row.title.clone())
+        .wrap_continuation_indent_by(move |row| {
+            tuicore::line_width(&Line::from(continuation_context.display_id(row))) + 1
+        }),
     ]);
     if allow_reordering {
         table = table.reorderable_by("rank");
     }
+    table.data_view_mut().set_wrap_cells(true);
     if let Some(id) = selected_id {
         table.data_view_mut().select_id(id.to_string());
     }
@@ -533,6 +538,7 @@ pub(crate) fn detail_form(
                     .placeholder("Task description")
                     .panel("Description")
                     .language(Language::Markdown)
+                    .fill_height(true)
                     .hotkey(keys::TASK_DESCRIPTION_FIELD.hotkey())
                     .editor_hotkey(keys::TASK_DESCRIPTION_EDITOR.hotkey())
                     .action_hotkey(

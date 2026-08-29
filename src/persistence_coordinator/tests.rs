@@ -428,6 +428,259 @@ fn stale_patch_reloads_authoritative_task_after_pending_write_drains() {
 }
 
 #[test]
+fn bulk_delete_commits_once_and_removes_all_target_revisions() {
+    let (runtime, pool) = test_database();
+    let service = TuidoService::from_parts(pool.clone(), SqlDialect::Sqlite);
+    persist_task(&runtime, &pool, test_task("first"));
+    persist_task(&runtime, &pool, test_task("second"));
+    let tasks = runtime.block_on(service.domain_snapshot()).unwrap().tasks;
+    let store = test_store(tasks.clone());
+    for task in &tasks {
+        store
+            .borrow_mut()
+            .dispatch(AppEvent::TaskDeleted(task.id.clone()));
+    }
+    let mut coordinator = test_coordinator(&runtime, &pool, Rc::clone(&store));
+
+    coordinator.submit(PersistenceCommand::BulkDeleteTasks {
+        before: tasks.clone(),
+        expected_revisions: HashMap::new(),
+        selection_invocation: None,
+    });
+    settle(&mut coordinator);
+
+    let count: i64 = runtime
+        .block_on(sqlx::query("SELECT COUNT(*) AS count FROM tasks").fetch_one(&pool))
+        .unwrap()
+        .try_get("count")
+        .unwrap();
+    assert_eq!(count, 0);
+    let state = store.borrow();
+    assert!(state.state().tasks.is_empty());
+    assert_eq!(state.state().workspace_revision, 1);
+    assert!(state.state().entity_revisions.is_empty());
+}
+
+#[test]
+fn bulk_patch_conflict_restores_snapshots_without_partial_writes() {
+    let (runtime, pool) = test_database();
+    let service = TuidoService::from_parts(pool.clone(), SqlDialect::Sqlite);
+    persist_task(&runtime, &pool, test_task("first"));
+    persist_task(&runtime, &pool, test_task("second"));
+    let before = runtime.block_on(service.domain_snapshot()).unwrap().tasks;
+    let winner = before
+        .iter()
+        .find(|task| task.title == "Original")
+        .unwrap()
+        .id
+        .clone();
+    runtime
+        .block_on(service.patch_task(
+            winner.clone(),
+            1,
+            TaskPatch::Title("External winner".into()),
+        ))
+        .unwrap();
+    let store = test_store(before.clone());
+    let patch = TaskPatch::Snooze {
+        until: time::macros::datetime!(2026-10-01 08:00),
+        remember_custom: None,
+    };
+    for task in &before {
+        store.borrow_mut().dispatch(AppEvent::PatchTask {
+            task_id: task.id.clone(),
+            patch: patch.clone(),
+        });
+    }
+    let mut coordinator = test_coordinator(&runtime, &pool, Rc::clone(&store));
+
+    coordinator.submit(PersistenceCommand::BulkPatchTasks {
+        before: before.clone(),
+        patch,
+        expected_revisions: HashMap::new(),
+        selection_invocation: None,
+    });
+    settle(&mut coordinator);
+
+    let persisted = runtime.block_on(service.domain_snapshot()).unwrap().tasks;
+    assert!(
+        persisted
+            .iter()
+            .all(|task| task.state == TaskState::Backlog && task.snoozed_until.is_none())
+    );
+    let state = store.borrow();
+    assert_eq!(
+        state
+            .state()
+            .tasks
+            .iter()
+            .find(|task| task.id == winner)
+            .unwrap()
+            .title,
+        "External winner"
+    );
+    assert!(
+        state
+            .state()
+            .tasks
+            .iter()
+            .all(|task| task.state == TaskState::Backlog)
+    );
+}
+
+#[test]
+fn bulk_in_progress_commit_updates_local_ranks() {
+    let (runtime, pool) = test_database();
+    let service = TuidoService::from_parts(pool.clone(), SqlDialect::Sqlite);
+    persist_task(&runtime, &pool, test_task("first"));
+    persist_task(&runtime, &pool, test_task("second"));
+    persist_task(&runtime, &pool, test_task("third"));
+    let before = runtime.block_on(service.domain_snapshot()).unwrap().tasks;
+    let first = before.iter().find(|task| task.id == "1").unwrap().clone();
+    let third = before.iter().find(|task| task.id == "3").unwrap().clone();
+    let targets = vec![first, third];
+    let store = test_store(before);
+    for task in &targets {
+        store.borrow_mut().dispatch(AppEvent::PatchTask {
+            task_id: task.id.clone(),
+            patch: TaskPatch::State(TaskState::InProgress),
+        });
+    }
+    let mut coordinator = test_coordinator(&runtime, &pool, Rc::clone(&store));
+
+    coordinator.submit(PersistenceCommand::BulkPatchTasks {
+        before: targets.clone(),
+        patch: TaskPatch::State(TaskState::InProgress),
+        expected_revisions: HashMap::new(),
+        selection_invocation: None,
+    });
+    settle(&mut coordinator);
+
+    let persisted = runtime.block_on(service.domain_snapshot()).unwrap().tasks;
+    let state = store.borrow();
+    let task = |id: &str| {
+        state
+            .state()
+            .tasks
+            .iter()
+            .find(|task| task.id == id)
+            .unwrap()
+    };
+    for target in &targets {
+        let persisted = persisted.iter().find(|task| task.id == target.id).unwrap();
+        assert_eq!(task(&target.id).rank, persisted.rank);
+    }
+}
+
+#[test]
+fn failed_bulk_delete_restores_relations_and_selection() {
+    let (runtime, pool) = test_database();
+    let service = TuidoService::from_parts(pool.clone(), SqlDialect::Sqlite);
+    persist_task(&runtime, &pool, test_task("first"));
+    persist_task(&runtime, &pool, test_task("second"));
+    let before = runtime.block_on(service.domain_snapshot()).unwrap().tasks;
+    let first = before[0].clone();
+    let second = before[1].clone();
+    runtime
+        .block_on(service.patch_task(
+            first.id.clone(),
+            1,
+            TaskPatch::Relations(vec![crate::domain::TaskRelation {
+                task_id: second.id.clone(),
+                kind: crate::domain::TaskRelationKind::Blocks,
+            }]),
+        ))
+        .unwrap();
+    let before = runtime.block_on(service.domain_snapshot()).unwrap().tasks;
+    let first = before[0].clone();
+    let second = before[1].clone();
+    let store = test_store(before.clone());
+    store
+        .borrow_mut()
+        .dispatch(AppEvent::TaskDeleted(first.id.clone()));
+    runtime
+        .block_on(service.patch_task(
+            first.id.clone(),
+            2,
+            TaskPatch::Title("External winner".into()),
+        ))
+        .unwrap();
+    let mut coordinator = test_coordinator(&runtime, &pool, Rc::clone(&store));
+
+    coordinator.submit(PersistenceCommand::BulkDeleteTasks {
+        before: vec![first.clone()],
+        expected_revisions: HashMap::new(),
+        selection_invocation: None,
+    });
+    assert!(coordinator.drain(Duration::from_secs(2)));
+
+    let state = store.borrow();
+    assert_eq!(
+        state.state().selected_task_id.as_deref(),
+        Some(first.id.as_str())
+    );
+    let restored = state
+        .state()
+        .tasks
+        .iter()
+        .find(|task| task.id == first.id)
+        .unwrap();
+    let remaining = state
+        .state()
+        .tasks
+        .iter()
+        .find(|task| task.id == second.id)
+        .unwrap();
+    assert_eq!(restored.relations.len(), 1);
+    assert_eq!(remaining.relations.len(), 1);
+}
+
+#[test]
+fn failed_bulk_patch_preserves_later_optimistic_patch() {
+    let (runtime, pool) = test_database();
+    let task = test_task("task-1");
+    let store = test_store(vec![task.clone()]);
+    let mut coordinator = test_coordinator(&runtime, &pool, Rc::clone(&store));
+    let key = CommandKey::Task;
+    coordinator.active.insert(key.clone(), 1);
+    let bulk_patch = TaskPatch::State(TaskState::Done);
+    store.borrow_mut().dispatch(AppEvent::PatchTask {
+        task_id: task.id.clone(),
+        patch: bulk_patch.clone(),
+    });
+    store.borrow_mut().dispatch(AppEvent::PatchTask {
+        task_id: task.id.clone(),
+        patch: TaskPatch::Title("Later title".into()),
+    });
+    coordinator.submit(PersistenceCommand::PatchTask(
+        task.id.clone(),
+        TaskPatch::Title("Later title".into()),
+    ));
+
+    coordinator.finish(Completion {
+        key,
+        sequence: 1,
+        command: PersistenceCommand::BulkPatchTasks {
+            before: vec![task],
+            patch: bulk_patch,
+            expected_revisions: HashMap::new(),
+            selection_invocation: None,
+        },
+        error: Some("conflict".into()),
+        related_revisions: HashMap::new(),
+        task_ranks: Vec::new(),
+        created_task: None,
+        link_title: None,
+        created_note: None,
+        note: None,
+    });
+
+    let state = store.borrow();
+    assert_eq!(state.state().tasks[0].state, TaskState::Backlog);
+    assert_eq!(state.state().tasks[0].title, "Later title");
+}
+
+#[test]
 fn invalid_snoozed_state_patch_reloads_authoritative_task() {
     let (runtime, pool) = test_database();
     let task = test_task("task-1");
@@ -709,6 +962,7 @@ fn failed_active_patch_defers_completion_to_successful_queued_patch() {
         ),
         error: Some("active title failure".to_string()),
         related_revisions: HashMap::new(),
+        task_ranks: Vec::new(),
         created_task: None,
         link_title: None,
         created_note: None,
@@ -757,6 +1011,7 @@ fn custom_snooze_then_state_then_quick_keeps_latest_workflow() {
         command: PersistenceCommand::PatchTask("task-1".into(), TaskPatch::Title("active".into())),
         error: None,
         related_revisions: HashMap::new(),
+        task_ranks: Vec::new(),
         created_task: None,
         link_title: None,
         created_note: None,
@@ -828,6 +1083,7 @@ fn custom_snooze_replaced_before_execution_preserves_remembered_value() {
         ),
         error: None,
         related_revisions: HashMap::new(),
+        task_ranks: Vec::new(),
         created_task: None,
         link_title: None,
         created_note: None,
@@ -929,6 +1185,7 @@ fn other_task_custom_blocks_same_task_quick_from_reordering_global_last() {
         ),
         error: None,
         related_revisions: HashMap::new(),
+        task_ranks: Vec::new(),
         created_task: None,
         link_title: None,
         created_note: None,
@@ -982,6 +1239,7 @@ fn custom_snooze_then_unsnooze_keeps_workflow_without_persisting_last() {
         ),
         error: None,
         related_revisions: HashMap::new(),
+        task_ranks: Vec::new(),
         created_task: None,
         link_title: None,
         created_note: None,
@@ -1036,6 +1294,7 @@ fn failed_active_custom_snooze_is_not_suppressed_by_queued_state() {
         ),
         error: Some("custom snooze failed".into()),
         related_revisions: HashMap::new(),
+        task_ranks: Vec::new(),
         created_task: None,
         link_title: None,
         created_note: None,
@@ -1083,6 +1342,7 @@ fn failed_active_custom_merges_into_queued_quick_compound_snooze() {
         ),
         error: Some("custom snooze failed".into()),
         related_revisions: HashMap::new(),
+        task_ranks: Vec::new(),
         created_task: None,
         link_title: None,
         created_note: None,
@@ -1134,6 +1394,7 @@ fn successful_active_patch_defers_completion_to_failed_queued_patch() {
         ),
         error: None,
         related_revisions: HashMap::new(),
+        task_ranks: Vec::new(),
         created_task: None,
         link_title: None,
         created_note: None,
@@ -1180,6 +1441,47 @@ fn failed_create_discards_queued_delete_and_removes_optimistic_task() {
     assert!(coordinator.drain(Duration::from_secs(2)));
     assert!(!coordinator.has_pending());
     assert!(store.borrow().state().tasks.is_empty());
+}
+
+#[test]
+fn failed_temporary_task_creation_prunes_bulk_targets_without_reordering_queue() {
+    let temporary = test_task("pending-1");
+    let surviving = test_task("2");
+    let mut queue = VecDeque::from([
+        PersistenceCommand::BulkPatchTasks {
+            before: vec![temporary.clone(), surviving.clone()],
+            patch: TaskPatch::Unsnooze,
+            expected_revisions: HashMap::from([
+                (temporary.id.clone(), 0),
+                (surviving.id.clone(), 1),
+            ]),
+            selection_invocation: None,
+        },
+        PersistenceCommand::PatchTask(surviving.id.clone(), TaskPatch::Title("After bulk".into())),
+        PersistenceCommand::BulkDeleteTasks {
+            before: vec![temporary.clone()],
+            expected_revisions: HashMap::from([(temporary.id.clone(), 0)]),
+            selection_invocation: None,
+        },
+    ]);
+
+    remove_queued_task_commands(Some(&mut queue), &temporary.id);
+
+    assert_eq!(queue.len(), 2);
+    assert!(matches!(
+        &queue[0],
+        PersistenceCommand::BulkPatchTasks {
+            before,
+            expected_revisions,
+            ..
+        } if before == &vec![surviving.clone()]
+            && expected_revisions == &HashMap::from([(surviving.id.clone(), 1)])
+    ));
+    assert!(matches!(
+        &queue[1],
+        PersistenceCommand::PatchTask(id, TaskPatch::Title(title))
+            if id == &surviving.id && title == "After bulk"
+    ));
 }
 
 #[test]

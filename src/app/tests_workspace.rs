@@ -1686,11 +1686,52 @@ fn quick_menu_opens_with_visible_task_and_ctrl_z_snoozes_from_table() {
 
     *workspace.visible_selection.borrow_mut() = None;
     let mut hidden = EventCtx::default();
-    assert_eq!(
-        workspace.event(&quick_menu, &mut hidden),
-        EventOutcome::Ignored
+    assert!(workspace.event(&quick_menu, &mut hidden).handled());
+    assert!(matches!(
+        hidden.messages(),
+        [AppMsg::OpenTaskQuickMenu(task_id)] if task_id == "task-1"
+    ));
+}
+
+#[test]
+fn local_refresh_keeps_table_highlight_during_bulk_updates_and_rollback() {
+    let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+        tasks: vec![
+            task_with("first", "First", TaskState::Todo),
+            task_with("second", "Second", TaskState::Todo),
+        ],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut workspace = TaskWorkspace::new(context.clone());
+    workspace.table_mut().highlight_id(&"second".to_string());
+    let mut app = App::new(context.store, context.coordinator);
+
+    app.complete_tasks(
+        vec!["first".into(), "second".into()],
+        TaskState::InProgress,
+        None,
+        &mut EventCtx::default(),
     );
-    assert!(hidden.messages().is_empty());
+    workspace.sync_store_version();
+    assert_eq!(
+        workspace.table().highlighted_id().as_deref(),
+        Some("second")
+    );
+
+    for task_id in ["first", "second"] {
+        store.borrow_mut().dispatch(AppEvent::PatchTask {
+            task_id: task_id.into(),
+            patch: TaskPatch::State(TaskState::Todo),
+        });
+    }
+    workspace.sync_store_version();
+
+    assert_eq!(
+        workspace.table().highlighted_id().as_deref(),
+        Some("second")
+    );
 }
 
 #[test]
@@ -1781,6 +1822,115 @@ fn task_reordering_and_move_to_edge_actions_notify() {
 }
 
 #[test]
+fn task_table_persists_a_shift_selected_block_move() {
+    let tasks = vec![
+        task_with_rank("first", "First", TaskState::Todo, 1),
+        task_with_rank("second", "Second", TaskState::Todo, 2),
+        task_with_rank("third", "Third", TaskState::Todo, 3),
+        task_with_rank("fourth", "Fourth", TaskState::Todo, 4),
+    ];
+    let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+        tasks,
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut workspace = TaskWorkspace::new(context);
+    workspace.table_mut().highlight_id(&"first".to_string());
+    let mut list_ctx = EventCtx::default();
+
+    for key in [
+        KeyEvent {
+            code: Key::Char('j'),
+            modifiers: KeyModifiers::SHIFT,
+        },
+        KeyEvent {
+            code: Key::Char('m'),
+            modifiers: KeyModifiers::CONTROL,
+        },
+        KeyEvent::from(Key::Down),
+        KeyEvent::from(Key::Enter),
+    ] {
+        workspace
+            .task_list_mut()
+            .event(&TuiEvent::Key(key), &mut list_ctx);
+    }
+    workspace.sync_table_events(&mut EventCtx::default());
+
+    let state = store.borrow();
+    let ordered = state
+        .state()
+        .tasks
+        .iter()
+        .map(|task| (task.id.as_str(), task.rank))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ordered,
+        vec![("first", 2), ("second", 3), ("third", 1), ("fourth", 4)]
+    );
+}
+
+#[test]
+fn routed_task_table_persists_a_shift_selected_block_move() {
+    let tasks = vec![
+        task_with_rank("first", "First", TaskState::Todo, 1),
+        task_with_rank("second", "Second", TaskState::Todo, 2),
+        task_with_rank("third", "Third", TaskState::Todo, 3),
+        task_with_rank("fourth", "Fourth", TaskState::Todo, 4),
+    ];
+    let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+        tasks,
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut workspace = TaskWorkspace::new(context);
+    let mut layout = LayoutCtx::new();
+    workspace.layout(Rect::new(0, 0, 120, 40), &mut layout);
+    let task_table = layout
+        .focus_targets()
+        .iter()
+        .find(|target| {
+            target.id.as_str() == "data-view"
+                && target.path.keys().first() == Some(&ChildKey::first())
+        })
+        .expect("task table should be focusable")
+        .clone();
+    workspace.dispatch_focus(&task_table, true, &mut FocusCtx::default());
+
+    for key in [
+        KeyEvent {
+            code: Key::Char('j'),
+            modifiers: KeyModifiers::SHIFT,
+        },
+        KeyEvent {
+            code: Key::Char('m'),
+            modifiers: KeyModifiers::CONTROL,
+        },
+        KeyEvent::from(Key::Down),
+        KeyEvent::from(Key::Enter),
+    ] {
+        workspace.dispatch_event(
+            &EventRoute::new(task_table.path.clone()),
+            &TuiEvent::Key(key),
+            &mut EventCtx::default(),
+        );
+    }
+
+    let state = store.borrow();
+    let ordered = state
+        .state()
+        .tasks
+        .iter()
+        .map(|task| (task.id.as_str(), task.rank))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ordered,
+        vec![("first", 2), ("second", 3), ("third", 1), ("fourth", 4)]
+    );
+}
+
+#[test]
 fn filtered_task_reorder_uses_adjacent_visible_task_as_anchor() {
     let tasks = vec![
         task_with_rank("one", "Match one", TaskState::Todo, 1),
@@ -1866,6 +2016,145 @@ fn calendar_move_to_edge_only_reorders_tasks_at_the_same_time() {
     assert_eq!(rank("second"), 3);
     assert_eq!(rank("third"), 2);
     assert_eq!(rank("later"), 4);
+}
+
+#[test]
+fn calendar_group_move_rejects_mixed_times() {
+    let eight = time::macros::datetime!(2026-07-31 8:00);
+    let nine = time::macros::datetime!(2026-07-31 9:00);
+    let mut tasks = vec![
+        task_with_rank("first", "First", TaskState::Snoozed, 1),
+        task_with_rank("second", "Second", TaskState::Snoozed, 2),
+        task_with_rank("third", "Third", TaskState::Snoozed, 3),
+        task_with_rank("later", "Later", TaskState::Snoozed, 4),
+    ];
+    for task in &mut tasks[..3] {
+        task.snoozed_until = Some(eight);
+    }
+    tasks[3].snoozed_until = Some(nine);
+    let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+        tasks,
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(context.store, context.coordinator);
+
+    app.move_calendar_tasks_to_edge(
+        vec!["third".into(), "first".into(), "later".into()],
+        eight,
+        false,
+        None,
+        &mut EventCtx::default(),
+    );
+
+    let state = store.borrow();
+    let rank = |id: &str| {
+        state
+            .state()
+            .tasks
+            .iter()
+            .find(|task| task.id == id)
+            .unwrap()
+            .rank
+    };
+    assert_eq!(rank("first"), 1);
+    assert_eq!(rank("second"), 2);
+    assert_eq!(rank("third"), 3);
+    assert_eq!(rank("later"), 4);
+}
+
+#[test]
+fn calendar_group_move_preserves_calendar_order() {
+    let eight = time::macros::datetime!(2026-07-31 8:00);
+    let nine = time::macros::datetime!(2026-07-31 9:00);
+    let mut tasks = vec![
+        task_with_rank("first", "First", TaskState::Snoozed, 1),
+        task_with_rank("second", "Second", TaskState::Snoozed, 2),
+        task_with_rank("third", "Third", TaskState::Snoozed, 3),
+        task_with_rank("later", "Later", TaskState::Snoozed, 4),
+    ];
+    for task in &mut tasks[..3] {
+        task.snoozed_until = Some(eight);
+    }
+    tasks[3].snoozed_until = Some(nine);
+    let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+        tasks,
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(context.store, context.coordinator);
+
+    app.move_calendar_tasks_to_edge(
+        vec!["third".into(), "first".into()],
+        eight,
+        false,
+        None,
+        &mut EventCtx::default(),
+    );
+
+    let state = store.borrow();
+    let rank = |id: &str| {
+        state
+            .state()
+            .tasks
+            .iter()
+            .find(|task| task.id == id)
+            .unwrap()
+            .rank
+    };
+    assert_eq!(rank("second"), 1);
+    assert_eq!(rank("first"), 2);
+    assert_eq!(rank("third"), 3);
+    assert_eq!(rank("later"), 4);
+}
+
+#[test]
+fn calendar_bulk_actions_return_to_calendar_or_tabs() {
+    let today = time::OffsetDateTime::now_local()
+        .unwrap_or_else(|_| time::OffsetDateTime::now_utc())
+        .date();
+    let mut first = task_with("first", "First", TaskState::Snoozed);
+    first.snoozed_until = Some(today.with_time(time::macros::time!(8:00)));
+    let mut second = task_with("second", "Second", TaskState::Snoozed);
+    second.snoozed_until = Some(today.with_time(time::macros::time!(9:00)));
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![first, second],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(context.store, context.coordinator);
+    app.active_tab.set(CALENDAR_TAB_INDEX);
+    let mut snooze_ctx = EventCtx::default();
+    app.begin_calendar_bulk_action();
+
+    app.snooze_tasks(
+        vec!["first".into()],
+        today.with_time(time::macros::time!(10:00)),
+        None,
+        None,
+        &mut snooze_ctx,
+    );
+
+    assert_eq!(
+        snooze_ctx.focus_request(),
+        Some(&initial_calendar_focus_request())
+    );
+    let mut complete_ctx = EventCtx::default();
+    app.begin_calendar_bulk_action();
+    app.complete_tasks(
+        vec!["first".into(), "second".into()],
+        TaskState::Done,
+        None,
+        &mut complete_ctx,
+    );
+
+    assert_eq!(
+        complete_ctx.focus_request(),
+        Some(&app_tabs_focus_request())
+    );
 }
 
 #[test]
@@ -2318,6 +2607,126 @@ fn confirmed_delete_removes_task_from_state_immediately() {
 }
 
 #[test]
+fn calendar_single_delete_restores_calendar_or_tabs_focus_on_success_and_stale_target() {
+    let today = time::OffsetDateTime::now_local()
+        .unwrap_or_else(|_| time::OffsetDateTime::now_utc())
+        .date();
+    let mut task = task_with("task-1", "Calendar task", TaskState::Snoozed);
+    task.snoozed_until = Some(today.with_time(time::macros::time!(8:00)));
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![task],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(context.store, context.coordinator);
+    let mut success_ctx = EventCtx::default();
+    app.begin_calendar_bulk_action();
+
+    app.delete_task("task-1".into(), &mut success_ctx);
+
+    assert_eq!(success_ctx.focus_request(), Some(&app_tabs_focus_request()));
+
+    let mut remaining = task_with("remaining", "Remaining", TaskState::Snoozed);
+    remaining.snoozed_until = Some(today.with_time(time::macros::time!(8:00)));
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![remaining],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(context.store, context.coordinator);
+    let mut stale_ctx = EventCtx::default();
+    app.begin_calendar_bulk_action();
+
+    app.delete_task("missing".into(), &mut stale_ctx);
+
+    assert_eq!(
+        stale_ctx.focus_request(),
+        Some(&initial_calendar_focus_request())
+    );
+}
+
+#[test]
+fn stale_calendar_delete_focuses_calendar_when_selected_day_has_entries() {
+    let today = time::OffsetDateTime::now_local()
+        .unwrap_or_else(|_| time::OffsetDateTime::now_utc())
+        .date();
+    let mut remaining = task_with("remaining", "Remaining", TaskState::Snoozed);
+    remaining.snoozed_until = Some(today.with_time(time::macros::time!(8:00)));
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![remaining],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(context.store, context.coordinator);
+    let mut ctx = EventCtx::default();
+
+    app.begin_calendar_bulk_action();
+    app.open_delete_task_dialog("missing", None, &mut ctx);
+
+    assert_eq!(ctx.focus_request(), Some(&initial_calendar_focus_request()));
+}
+
+#[test]
+fn stale_calendar_delete_focuses_tabs_when_selected_day_is_empty() {
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![test_task()],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(context.store, context.coordinator);
+    let mut ctx = EventCtx::default();
+
+    app.begin_calendar_bulk_action();
+    app.open_delete_task_dialog("missing", None, &mut ctx);
+
+    assert_eq!(ctx.focus_request(), Some(&app_tabs_focus_request()));
+}
+
+#[test]
+fn calendar_single_edge_moves_restore_calendar_focus_on_success_and_stale_target() {
+    let today = time::OffsetDateTime::now_local()
+        .unwrap_or_else(|_| time::OffsetDateTime::now_utc())
+        .date();
+    let time = today.with_time(time::macros::time!(8:00));
+
+    for to_top in [true, false] {
+        let mut first = task_with("first", "First", TaskState::Snoozed);
+        first.rank = 1;
+        first.snoozed_until = Some(time);
+        let mut second = task_with("second", "Second", TaskState::Snoozed);
+        second.rank = 2;
+        second.snoozed_until = Some(time);
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks: vec![first, second],
+            people: Vec::new(),
+            workspaces: Vec::new(),
+            tags: Vec::new(),
+        });
+        let mut app = App::new(context.store, context.coordinator);
+        let mut success_ctx = EventCtx::default();
+
+        app.move_calendar_task_to_edge("second", time, to_top, &mut success_ctx);
+
+        assert_eq!(
+            success_ctx.focus_request(),
+            Some(&initial_calendar_focus_request())
+        );
+
+        let mut stale_ctx = EventCtx::default();
+        app.move_calendar_task_to_edge("missing", time, to_top, &mut stale_ctx);
+
+        assert_eq!(
+            stale_ctx.focus_request(),
+            Some(&initial_calendar_focus_request())
+        );
+    }
+}
+
+#[test]
 fn management_create_dialog_layers_over_management_workspace() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: Vec::new(),
@@ -2561,12 +2970,93 @@ fn calendar_quick_menu_completion_returns_calendar_focus() {
     });
     let mut app = App::new(context.store, context.coordinator);
     app.active_tab.set(CALENDAR_TAB_INDEX);
-    app.open_calendar_quick_complete_task("task-1", &mut EventCtx::default());
+    app.open_calendar_complete_task_dialog("task-1", None, &mut EventCtx::default());
     let mut ctx = EventCtx::default();
 
     app.complete_task("task-1".into(), TaskState::Done, &mut ctx);
 
     assert_eq!(ctx.focus_request(), Some(&initial_calendar_focus_request()));
+}
+
+#[test]
+fn calendar_single_progress_returns_calendar_focus() {
+    let today = time::OffsetDateTime::now_local()
+        .unwrap_or_else(|_| time::OffsetDateTime::now_utc())
+        .date();
+    let mut task = test_task();
+    task.state = TaskState::Snoozed;
+    task.snoozed_until = Some(today.with_time(time::macros::time!(8:00)));
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![task],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(context.store, context.coordinator);
+    let mut ctx = EventCtx::default();
+    app.begin_calendar_bulk_action();
+
+    app.toggle_task_progress("task-1".into(), &mut ctx);
+
+    assert_eq!(ctx.focus_request(), Some(&app_tabs_focus_request()));
+}
+
+#[test]
+fn calendar_bulk_stale_target_focuses_calendar_or_tabs() {
+    let today = time::OffsetDateTime::now_local()
+        .unwrap_or_else(|_| time::OffsetDateTime::now_utc())
+        .date();
+    let mut calendar_task = test_task();
+    calendar_task.state = TaskState::Snoozed;
+    calendar_task.snoozed_until = Some(today.with_time(time::macros::time!(8:00)));
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![calendar_task],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(context.store, context.coordinator);
+    let mut calendar_ctx = EventCtx::default();
+
+    app.open_calendar_tasks_quick_menu(
+        vec!["missing".into()],
+        Some(today.with_time(time::macros::time!(8:00))),
+        true,
+        None,
+        &mut calendar_ctx,
+    );
+
+    assert_eq!(
+        calendar_ctx.focus_request(),
+        Some(&initial_calendar_focus_request())
+    );
+    let mut direct_complete_ctx = EventCtx::default();
+
+    app.open_calendar_complete_task_dialog("missing", None, &mut direct_complete_ctx);
+
+    assert_eq!(
+        direct_complete_ctx.focus_request(),
+        Some(&initial_calendar_focus_request())
+    );
+
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![test_task()],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(context.store, context.coordinator);
+    let mut tabs_ctx = EventCtx::default();
+
+    app.open_calendar_tasks_quick_menu(
+        vec!["missing".into()],
+        Some(today.with_time(time::macros::time!(8:00))),
+        true,
+        None,
+        &mut tabs_ctx,
+    );
+
+    assert_eq!(tabs_ctx.focus_request(), Some(&app_tabs_focus_request()));
 }
 
 #[test]
@@ -3343,7 +3833,7 @@ fn desktop_detail_places_state_immediately_after_short_description() {
 }
 
 #[test]
-fn narrow_long_description_uses_scrollable_seventy_five_percent_detail_pane() {
+fn narrow_long_description_fills_available_detail_space() {
     let mut task = test_task();
     task.description = (1..=40)
         .map(|line| format!("Line {line}"))
@@ -3384,7 +3874,7 @@ fn narrow_long_description_uses_scrollable_seventy_five_percent_detail_pane() {
         .expect("description should be focusable");
     let (master, detail) = workspace.layout.child_areas();
 
-    assert_eq!(description.area.height, 8);
+    assert!(description.area.height > 8);
     assert_eq!(master.height, area.height * 25 / 100);
     assert!(detail.y >= master.bottom());
     assert!(detail.height <= area.height - master.height);
@@ -3392,7 +3882,7 @@ fn narrow_long_description_uses_scrollable_seventy_five_percent_detail_pane() {
 }
 
 #[test]
-fn narrow_short_description_stays_natural_without_gap_before_state() {
+fn narrow_short_description_expands_without_gap_before_state() {
     let mut task = test_task();
     task.description = "Line one\nLine two".to_string();
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
@@ -3428,7 +3918,7 @@ fn narrow_short_description_stays_natural_without_gap_before_state() {
         })
         .expect("state should be focusable");
 
-    assert_eq!(description.area.height, 2);
+    assert!(description.area.height > 2);
     assert_eq!(state.area.y, description.area.bottom() + 1);
 }
 
@@ -3476,10 +3966,7 @@ fn title_blur_during_description_hotkey_preserves_description_focus() {
         runtime.handle().clone(),
         None,
     )));
-    let mut workspace = TaskWorkspace::new(AppContext {
-        store: Rc::clone(&store),
-        coordinator,
-    });
+    let mut workspace = TaskWorkspace::new(AppContext::new(Rc::clone(&store), coordinator));
     let area = Rect::new(0, 0, 120, 40);
     let mut layout = LayoutCtx::new();
     workspace.layout(area, &mut layout);

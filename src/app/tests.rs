@@ -511,10 +511,7 @@ pub(crate) fn test_context(
         runtime.handle().clone(),
         None,
     )));
-    let context = AppContext {
-        store: Rc::clone(&store),
-        coordinator,
-    };
+    let context = AppContext::new(Rc::clone(&store), coordinator);
     (runtime, context, store)
 }
 
@@ -1280,6 +1277,1256 @@ fn deleting_a_note_focuses_next_or_falls_back_to_previous() {
 }
 
 #[test]
+fn deleting_the_last_note_focuses_app_tabs() {
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: Vec::new(),
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(context.store, context.coordinator);
+    app.active_tab.set(NOTES_TAB_INDEX);
+    set_notes(&mut app, vec![test_note("note-0", 0)]);
+    let mut ctx = EventCtx::default();
+
+    app.delete_note("note-0".into(), &mut ctx);
+
+    assert!(app.context.store.borrow().state().notes.is_empty());
+    assert_eq!(ctx.focus_request(), Some(&app_tabs_focus_request()));
+}
+
+#[test]
+fn bulk_task_state_update_changes_every_selected_task_with_one_pending_write() {
+    let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+        tasks: vec![
+            task_with("first", "First", TaskState::Todo),
+            task_with("second", "Second", TaskState::Todo),
+        ],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let coordinator = Rc::clone(&context.coordinator);
+    let mut app = App::new(context.store, context.coordinator);
+
+    app.complete_tasks(
+        vec!["second".into(), "first".into()],
+        TaskState::InProgress,
+        None,
+        &mut EventCtx::default(),
+    );
+
+    assert!(
+        store
+            .borrow()
+            .state()
+            .tasks
+            .iter()
+            .all(|task| task.state == TaskState::InProgress)
+    );
+    assert!(coordinator.borrow().has_pending());
+}
+
+#[test]
+fn bulk_snooze_then_unsnooze_updates_the_selected_group() {
+    let until = time::macros::datetime!(2026-08-24 8:00);
+    let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+        tasks: vec![
+            task_with("first", "First", TaskState::Todo),
+            task_with("second", "Second", TaskState::InProgress),
+        ],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(context.store, context.coordinator);
+
+    app.snooze_tasks(
+        vec!["second".into(), "first".into()],
+        until,
+        Some(until),
+        None,
+        &mut EventCtx::default(),
+    );
+    assert!(
+        store
+            .borrow()
+            .state()
+            .tasks
+            .iter()
+            .all(|task| { task.state == TaskState::Snoozed && task.snoozed_until == Some(until) })
+    );
+
+    app.unsnooze_tasks(
+        vec!["first".into(), "second".into()],
+        None,
+        &mut EventCtx::default(),
+    );
+    assert!(
+        store
+            .borrow()
+            .state()
+            .tasks
+            .iter()
+            .all(|task| { task.state == TaskState::Todo && task.snoozed_until.is_none() })
+    );
+}
+
+#[test]
+fn selected_task_helpers_use_source_order_not_selection_order() {
+    let state = AppState::from_snapshot(WorkspaceSnapshot {
+        tasks: vec![
+            task_with("first", "First", TaskState::Todo),
+            task_with("second", "Second", TaskState::Todo),
+            task_with("third", "Third", TaskState::Todo),
+        ],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+
+    let selected = tasks_for_ids(&state, &["third".into(), "first".into()]);
+
+    assert_eq!(
+        selected
+            .iter()
+            .map(|task| task.id.as_str())
+            .collect::<Vec<_>>(),
+        ["first", "third"]
+    );
+    assert_eq!(
+        task_block_edge_availability(
+            &["first".into(), "second".into(), "third".into()],
+            &["third".into(), "first".into()]
+        ),
+        (false, false)
+    );
+    assert_eq!(
+        task_block_edge_availability(
+            &["first".into(), "second".into(), "third".into()],
+            &["second".into(), "first".into()]
+        ),
+        (false, true)
+    );
+    assert_eq!(
+        task_block_edge_availability(
+            &["first".into(), "second".into(), "third".into()],
+            &["third".into(), "second".into()]
+        ),
+        (true, false)
+    );
+}
+
+#[test]
+fn selected_task_copy_payloads_use_rank_order_and_escape_titles() {
+    let workspace = Workspace::new(
+        "workspace".into(),
+        "PER".into(),
+        "Personal".into(),
+        String::new(),
+    );
+    let mut first = task_with_rank("old-45", "First \"quoted\"", TaskState::Todo, 10);
+    first.workspace_id = Some(workspace.id.clone());
+    let mut second = task_with_rank("old-46", "Second \\ path", TaskState::Todo, 20);
+    second.workspace_id = Some(workspace.id.clone());
+    let state = AppState::from_snapshot(WorkspaceSnapshot {
+        tasks: vec![second, first],
+        people: Vec::new(),
+        workspaces: vec![workspace],
+        tags: Vec::new(),
+    });
+    let selected = tasks_for_ids(&state, &["old-46".into(), "old-45".into()]);
+
+    assert_eq!(
+        task_agent_commands_for(&state, &selected, "execute"),
+        Some(r#"Tuido execute PER-45 "First \"quoted\""; PER-46 "Second \\ path""#.into())
+    );
+    assert_eq!(
+        task_agent_commands_for(&state, &selected, "clarify"),
+        Some(r#"Tuido clarify PER-45 "First \"quoted\""; PER-46 "Second \\ path""#.into())
+    );
+    assert_eq!(
+        task_references_for(&state, &selected),
+        r#"Tuido PER-45 "First \"quoted\""; PER-46 "Second \\ path""#
+    );
+}
+
+#[test]
+fn selection_invocation_matrix_clears_task_and_calendar_groups_once_for_accepted_copy() {
+    for source in [
+        TransientSelectionSource::TaskList,
+        TransientSelectionSource::Calendar,
+    ] {
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks: vec![task_with("first", "First", TaskState::Todo)],
+            people: Vec::new(),
+            workspaces: Vec::new(),
+            tags: Vec::new(),
+        });
+        let invocation = context
+            .begin_transient_selection(source, vec!["first".into()], Some("first".into()))
+            .expect("group selection should create an invocation");
+
+        context.accept_transient_clipboard(Some(invocation));
+
+        assert!(context.take_selection_clear_request(invocation));
+        assert!(!context.take_selection_clear_request(invocation));
+    }
+}
+
+#[test]
+fn quick_menu_copy_messages_clear_each_source_once_before_closing() {
+    for source in [
+        TransientSelectionSource::TaskList,
+        TransientSelectionSource::Calendar,
+    ] {
+        for (event, expected) in [
+            (TuiEvent::Yank, "reference"),
+            (
+                TuiEvent::Hotkey(HotkeyEvent::Commit(keys::TASK_AGENT_YANK.hotkey())),
+                "execute",
+            ),
+            (
+                TuiEvent::Hotkey(HotkeyEvent::Commit(keys::TASK_AGENT_YANK_CLARIFY.hotkey())),
+                "clarify",
+            ),
+        ] {
+            let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+                tasks: vec![task_with("first", "First", TaskState::Todo)],
+                people: Vec::new(),
+                workspaces: Vec::new(),
+                tags: Vec::new(),
+            });
+            let mut app = App::new(Rc::clone(&context.store), Rc::clone(&context.coordinator));
+            let invocation = app
+                .context
+                .begin_transient_selection(source, vec!["first".into()], Some("first".into()))
+                .unwrap();
+            let mut menu = TaskQuickMenu::new_multiple(
+                vec!["first".into()],
+                vec![TaskState::Todo],
+                TaskQuickClipboard {
+                    execute: Some("execute".into()),
+                    clarify: Some("clarify".into()),
+                    reference: Some("reference".into()),
+                },
+                false,
+                false,
+            );
+            menu.set_selection_invocation(Some(invocation));
+            let mut message_queue = EventCtx::default();
+
+            assert!(menu.event(&event, &mut message_queue).handled());
+            let (action_invocation, payload) = match message_queue.messages() {
+                [
+                    AppMsg::SelectionAction {
+                        invocation: action_invocation,
+                        action,
+                    },
+                ] if *action_invocation == invocation => match action.as_ref() {
+                    AppMsg::CopyTaskClipboard(payload) => (invocation, payload.clone()),
+                    message => panic!("unexpected quick-menu action: {message:?}"),
+                },
+                messages => panic!("unexpected quick-menu messages: {messages:?}"),
+            };
+            let mut delivery = EventCtx::default();
+            app.dispatch_selection_action(
+                action_invocation,
+                AppMsg::CopyTaskClipboard(payload),
+                &mut delivery,
+            );
+
+            assert_eq!(delivery.clipboard_request(), Some(expected));
+            assert!(app.context.take_selection_clear_request(invocation));
+            assert!(!app.context.take_selection_clear_request(invocation));
+        }
+    }
+}
+
+#[test]
+fn selection_invocation_matrix_cancel_and_pre_submit_failure_preserve_or_clear_as_required() {
+    for source in [
+        TransientSelectionSource::TaskList,
+        TransientSelectionSource::Calendar,
+    ] {
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks: vec![task_with("first", "First", TaskState::Todo)],
+            people: Vec::new(),
+            workspaces: Vec::new(),
+            tags: Vec::new(),
+        });
+        let cancelled = context
+            .begin_transient_selection(source, vec!["first".into()], Some("first".into()))
+            .unwrap();
+
+        context.cancel_transient_selection(cancelled);
+
+        assert!(!context.take_selection_clear_request(cancelled));
+
+        let accepted = context
+            .begin_transient_selection(source, vec!["first".into()], Some("first".into()))
+            .unwrap();
+        context.retire_transient_selection_without_persistence(Some(accepted));
+
+        assert!(context.take_selection_clear_request(accepted));
+        assert!(!context.take_selection_clear_request(accepted));
+    }
+}
+
+#[test]
+fn selection_invocation_matrix_async_rollback_restores_only_the_start_highlight() {
+    for source in [
+        TransientSelectionSource::TaskList,
+        TransientSelectionSource::Calendar,
+    ] {
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks: vec![task_with("first", "First", TaskState::Todo)],
+            people: Vec::new(),
+            workspaces: Vec::new(),
+            tags: Vec::new(),
+        });
+        let invocation = context
+            .begin_transient_selection(source, vec!["first".into()], Some("first".into()))
+            .unwrap();
+        context.accept_transient_mutation(Some(invocation));
+
+        assert!(context.take_selection_clear_request(invocation));
+        context
+            .coordinator
+            .borrow_mut()
+            .record_selection_outcome_for_test(invocation, true);
+        context.resolve_persistence_selection_outcomes();
+
+        assert_eq!(
+            context.rollback_transient_selection_highlight(invocation),
+            Some("first".into())
+        );
+        assert!(!context.take_selection_clear_request(invocation));
+    }
+}
+
+#[test]
+fn selection_invocation_matrix_unrelated_refresh_does_not_clear_a_new_group() {
+    let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+        tasks: vec![
+            task_with("first", "First", TaskState::Todo),
+            task_with("second", "Second", TaskState::Todo),
+        ],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let invocation_a = context
+        .begin_transient_selection(
+            TransientSelectionSource::TaskList,
+            vec!["first".into()],
+            Some("first".into()),
+        )
+        .unwrap();
+    context.accept_transient_mutation(Some(invocation_a));
+    assert!(context.take_selection_clear_request(invocation_a));
+    store
+        .borrow_mut()
+        .dispatch(AppEvent::AppSettingChangeRequested {
+            key: "unrelated".into(),
+            value: "value".into(),
+            generation: 1,
+        });
+    context.resolve_persistence_selection_outcomes();
+    let invocation_b = context
+        .begin_transient_selection(
+            TransientSelectionSource::TaskList,
+            vec!["second".into()],
+            Some("second".into()),
+        )
+        .unwrap();
+
+    assert!(!context.take_selection_clear_request(invocation_b));
+}
+
+#[test]
+fn store_refresh_keeps_transient_task_selection_for_table_actions() {
+    let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+        tasks: vec![
+            task_with("first", "First", TaskState::Todo),
+            task_with("second", "Second", TaskState::Todo),
+            task_with("third", "Third", TaskState::Todo),
+        ],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut workspace = TaskWorkspace::new(context);
+    workspace.table_mut().highlight_id(&"first".to_string());
+    workspace.task_list_mut().event(
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Down,
+            modifiers: KeyModifiers::SHIFT,
+        }),
+        &mut EventCtx::default(),
+    );
+    assert_eq!(
+        workspace.task_list().transient_selected_ids(),
+        ["first", "second"]
+    );
+
+    store
+        .borrow_mut()
+        .dispatch(AppEvent::AppSettingChangeRequested {
+            key: "unrelated".into(),
+            value: "value".into(),
+            generation: 1,
+        });
+    workspace.sync_store_version();
+    assert_eq!(
+        workspace.task_list().transient_selected_ids(),
+        ["first", "second"]
+    );
+    workspace.table_focused = true;
+    let mut action_ctx = EventCtx::default();
+    workspace.handle_workspace_event(
+        EventOutcome::Ignored,
+        &TuiEvent::Key(KeyEvent::from(Key::Char('.'))),
+        &mut action_ctx,
+    );
+
+    assert!(matches!(
+        action_ctx.messages(),
+        [AppMsg::SelectionAction { action, .. }]
+            if matches!(action.as_ref(), AppMsg::OpenTasksQuickMenu(task_ids) if task_ids == &["first", "second"])
+    ));
+}
+
+#[test]
+fn one_item_task_list_selection_routes_every_direct_action_to_group_handlers() {
+    let actions = [
+        (
+            TuiEvent::Key(KeyEvent {
+                code: Key::Char('c'),
+                modifiers: KeyModifiers::CONTROL,
+            }),
+            "complete",
+        ),
+        (
+            TuiEvent::Key(KeyEvent {
+                code: Key::Char('t'),
+                modifiers: KeyModifiers::CONTROL,
+            }),
+            "progress",
+        ),
+        (
+            TuiEvent::Key(KeyEvent {
+                code: Key::Char('x'),
+                modifiers: KeyModifiers::CONTROL,
+            }),
+            "delete",
+        ),
+        (
+            TuiEvent::Key(KeyEvent {
+                code: Key::Char('z'),
+                modifiers: KeyModifiers::CONTROL,
+            }),
+            "snooze",
+        ),
+    ];
+    for (event, action) in actions {
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks: vec![task_with("first", "First", TaskState::Todo)],
+            people: Vec::new(),
+            workspaces: Vec::new(),
+            tags: Vec::new(),
+        });
+        let mut workspace = TaskWorkspace::new(context);
+        workspace.table_mut().highlight_id(&"first".to_string());
+        workspace.task_list_mut().event(
+            &TuiEvent::Key(KeyEvent {
+                code: Key::Char(' '),
+                modifiers: KeyModifiers::CONTROL,
+            }),
+            &mut EventCtx::default(),
+        );
+        assert_eq!(workspace.task_list().transient_selected_ids(), ["first"]);
+        workspace.table_focused = true;
+        let mut ctx = EventCtx::default();
+
+        workspace.handle_workspace_event(EventOutcome::Ignored, &event, &mut ctx);
+
+        let [
+            AppMsg::SelectionAction {
+                action: message, ..
+            },
+        ] = ctx.messages()
+        else {
+            panic!(
+                "unexpected task-list {action} message: {:?}",
+                ctx.messages()
+            );
+        };
+        assert!(match (action, message.as_ref()) {
+            ("complete", AppMsg::OpenCompleteTasks(task_ids))
+            | ("delete", AppMsg::OpenDeleteTasks(task_ids))
+            | ("snooze", AppMsg::OpenTasksSnooze(task_ids)) => {
+                task_ids == &vec![String::from("first")]
+            }
+            (
+                "progress",
+                AppMsg::CompleteTasks {
+                    task_ids,
+                    state: TaskState::InProgress,
+                },
+            ) => task_ids == &vec![String::from("first")],
+            (_, message) => panic!("unexpected task-list {action} message: {message:?}"),
+        });
+    }
+}
+
+#[test]
+fn partial_stale_menu_action_keeps_its_original_selection_guard() {
+    let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+        tasks: vec![
+            task_with("first", "First", TaskState::Todo),
+            task_with("second", "Second", TaskState::Todo),
+        ],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(Rc::clone(&context.store), Rc::clone(&context.coordinator));
+    let task_ids = vec!["first".into(), "second".into()];
+    let invocation = app
+        .context
+        .begin_transient_selection(
+            TransientSelectionSource::TaskList,
+            task_ids.clone(),
+            Some("first".into()),
+        )
+        .unwrap();
+    store
+        .borrow_mut()
+        .dispatch(AppEvent::TaskDeleted("second".into()));
+
+    app.complete_tasks(
+        task_ids,
+        TaskState::Done,
+        Some(invocation),
+        &mut EventCtx::default(),
+    );
+
+    assert!(app.context.take_selection_clear_request(invocation));
+}
+
+#[test]
+fn selection_outcomes_ignore_mismatched_and_unrelated_invocations() {
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![task_with("first", "First", TaskState::Todo)],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let invocation = context
+        .begin_transient_selection(
+            TransientSelectionSource::TaskList,
+            vec!["first".into()],
+            Some("first".into()),
+        )
+        .unwrap();
+    context.accept_transient_mutation(Some(invocation));
+    let coordinator = Rc::clone(&context.coordinator);
+    coordinator.borrow_mut().record_selection_outcome_for_test(
+        PersistenceSelectionInvocation {
+            token: invocation.token,
+            source: PersistenceSelectionSource::Calendar,
+        },
+        true,
+    );
+    coordinator.borrow_mut().record_selection_outcome_for_test(
+        PersistenceSelectionInvocation {
+            token: invocation.token + 1,
+            source: PersistenceSelectionSource::TaskList,
+        },
+        true,
+    );
+
+    context.resolve_persistence_selection_outcomes();
+
+    assert_eq!(
+        context.rollback_transient_selection_highlight(invocation),
+        None
+    );
+}
+
+#[test]
+fn failed_outcome_for_a_restores_its_highlight_after_b_is_queued() {
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![
+            task_with("first", "First", TaskState::Todo),
+            task_with("second", "Second", TaskState::Todo),
+        ],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let invocation_a = context
+        .begin_transient_selection(
+            TransientSelectionSource::TaskList,
+            vec!["first".into()],
+            Some("first".into()),
+        )
+        .unwrap();
+    context.accept_transient_mutation(Some(invocation_a));
+    let _invocation_b = context
+        .begin_transient_selection(
+            TransientSelectionSource::TaskList,
+            vec!["second".into()],
+            Some("second".into()),
+        )
+        .unwrap();
+    context
+        .coordinator
+        .borrow_mut()
+        .record_selection_outcome_for_test(invocation_a, true);
+
+    context.resolve_persistence_selection_outcomes();
+
+    assert_eq!(
+        context.rollback_transient_selection_highlight(invocation_a),
+        Some("first".into())
+    );
+}
+
+#[test]
+fn task_list_quick_menu_keeps_multi_selection_after_focus_moves_to_dialog() {
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![
+            task_with("first", "First", TaskState::Todo),
+            task_with("second", "Second", TaskState::Todo),
+        ],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut workspace = TaskWorkspace::new(context);
+    let area = Rect::new(0, 0, 120, 40);
+    let mut layout = LayoutCtx::new();
+    workspace.layout(area, &mut layout);
+    let table = layout
+        .focus_targets()
+        .iter()
+        .find(|target| target.id.as_str() == "data-view")
+        .expect("task table should be focusable")
+        .clone();
+    let route = EventRoute::new(table.path.clone());
+    workspace.dispatch_focus(&table, true, &mut FocusCtx::default());
+
+    workspace.dispatch_event(
+        &route,
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Down,
+            modifiers: KeyModifiers::SHIFT,
+        }),
+        &mut EventCtx::default(),
+    );
+    let mut quick_menu = EventCtx::default();
+    assert!(
+        workspace
+            .dispatch_event(
+                &route,
+                &TuiEvent::Key(Key::Char('.').into()),
+                &mut quick_menu,
+            )
+            .handled()
+    );
+    assert!(matches!(
+        quick_menu.messages(),
+        [AppMsg::SelectionAction { action, .. }]
+            if matches!(action.as_ref(), AppMsg::OpenTasksQuickMenu(task_ids) if task_ids == &["first", "second"])
+    ));
+
+    workspace.dispatch_focus(&table, false, &mut FocusCtx::default());
+
+    assert_eq!(
+        workspace.task_list().transient_selected_ids(),
+        ["first", "second"]
+    );
+}
+
+#[test]
+fn task_list_group_selection_clears_after_order_independent_completion() {
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![
+            task_with("first", "First", TaskState::Todo),
+            task_with("second", "Second", TaskState::Todo),
+        ],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut workspace = TaskWorkspace::new(context.clone());
+    workspace.table_mut().highlight_id(&"first".to_string());
+    workspace.task_list_mut().event(
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Down,
+            modifiers: KeyModifiers::SHIFT,
+        }),
+        &mut EventCtx::default(),
+    );
+    let action_start_highlight = workspace.table().highlighted_id();
+    workspace.table_focused = true;
+    workspace.handle_workspace_event(
+        EventOutcome::Ignored,
+        &TuiEvent::Key(Key::Char('.').into()),
+        &mut EventCtx::default(),
+    );
+
+    workspace.sync_store_version();
+    assert_eq!(
+        workspace.task_list().transient_selected_ids(),
+        ["first", "second"]
+    );
+
+    for task_id in ["first", "second"] {
+        context.store.borrow_mut().dispatch(AppEvent::PatchTask {
+            task_id: task_id.into(),
+            patch: TaskPatch::State(TaskState::InProgress),
+        });
+    }
+    context.accept_transient_mutation(workspace.active_selection_invocation);
+    workspace.sync_store_version();
+
+    assert!(workspace.task_list().transient_selected_ids().is_empty());
+    assert_eq!(
+        workspace.table().highlighted_id().as_deref(),
+        action_start_highlight.as_deref()
+    );
+}
+
+#[test]
+fn unrelated_refresh_preserves_new_group_selection_after_completed_group_sync() {
+    let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+        tasks: vec![
+            task_with("first", "First", TaskState::InProgress),
+            task_with("second", "Second", TaskState::InProgress),
+            task_with("third", "Third", TaskState::InProgress),
+            task_with("fourth", "Fourth", TaskState::InProgress),
+        ],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut workspace = TaskWorkspace::new(context.clone());
+    workspace.table_mut().highlight_id(&"first".to_string());
+    workspace.task_list_mut().event(
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Down,
+            modifiers: KeyModifiers::SHIFT,
+        }),
+        &mut EventCtx::default(),
+    );
+    workspace.table_focused = true;
+    workspace.handle_workspace_event(
+        EventOutcome::Ignored,
+        &TuiEvent::Key(Key::Char('.').into()),
+        &mut EventCtx::default(),
+    );
+    for task_id in ["first", "second"] {
+        store.borrow_mut().dispatch(AppEvent::PatchTask {
+            task_id: task_id.into(),
+            patch: TaskPatch::State(TaskState::Done),
+        });
+    }
+    context.accept_transient_mutation(workspace.active_selection_invocation);
+    workspace.sync_store_version();
+    assert!(workspace.task_list().transient_selected_ids().is_empty());
+
+    workspace.table_mut().highlight_id(&"third".to_string());
+    workspace.task_list_mut().event(
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Down,
+            modifiers: KeyModifiers::SHIFT,
+        }),
+        &mut EventCtx::default(),
+    );
+    let new_highlight = workspace.table().highlighted_id();
+    assert_eq!(
+        workspace.task_list().transient_selected_ids(),
+        ["third", "fourth"]
+    );
+
+    let state = store.borrow().state().clone();
+    store.borrow_mut().dispatch(AppEvent::WorkspaceRefreshed {
+        snapshot: WorkspaceSnapshot {
+            tasks: state.tasks,
+            people: state.people,
+            workspaces: state.workspaces,
+            tags: state.tags,
+        },
+        revision: state.workspace_revision + 1,
+        entity_revisions: state.entity_revisions,
+    });
+    workspace.sync_store_version();
+
+    assert_eq!(
+        workspace.task_list().transient_selected_ids(),
+        ["third", "fourth"]
+    );
+    assert_eq!(workspace.table().highlighted_id(), new_highlight);
+}
+
+#[test]
+fn archived_group_completion_clears_selection_after_rank_canonicalization() {
+    let mut first = task_with_rank("first", "First", TaskState::Done, 1);
+    first.updated_at = "1".into();
+    let mut second = task_with_rank("second", "Second", TaskState::Done, 2);
+    second.updated_at = "2".into();
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![first, second],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut workspace = TaskWorkspace::new(context.clone());
+    *workspace.pending_task_view.borrow_mut() = Some(TaskView::Archived);
+    assert!(workspace.sync_task_view_change());
+    workspace.table_mut().highlight_id(&"second".to_string());
+    workspace.task_list_mut().event(
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Down,
+            modifiers: KeyModifiers::SHIFT,
+        }),
+        &mut EventCtx::default(),
+    );
+    let action_start_highlight = workspace.table().highlighted_id();
+    workspace.table_focused = true;
+    workspace.handle_workspace_event(
+        EventOutcome::Ignored,
+        &TuiEvent::Key(KeyEvent::from(Key::Char('.'))),
+        &mut EventCtx::default(),
+    );
+    assert_eq!(
+        workspace.task_list().transient_selected_ids(),
+        ["second", "first"]
+    );
+
+    for task_id in ["first", "second"] {
+        context.store.borrow_mut().dispatch(AppEvent::PatchTask {
+            task_id: task_id.into(),
+            patch: TaskPatch::State(TaskState::Rejected),
+        });
+    }
+    context.accept_transient_mutation(workspace.active_selection_invocation);
+    workspace.sync_store_version();
+
+    assert!(workspace.task_list().transient_selected_ids().is_empty());
+    assert_eq!(
+        workspace.table().highlighted_id().as_deref(),
+        action_start_highlight.as_deref()
+    );
+}
+
+fn assert_failed_bulk_action_restores_task_highlight(
+    tasks: Vec<Task>,
+    action: impl FnOnce(&mut App, PersistenceSelectionInvocation, &mut EventCtx<AppMsg>),
+) {
+    let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+        tasks: tasks.clone(),
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(context.store, context.coordinator);
+    let mut workspace = TaskWorkspace::new(app.context.clone());
+    workspace.table_mut().highlight_id(&"second".to_string());
+    let invocation = app
+        .context
+        .begin_transient_selection(
+            TransientSelectionSource::TaskList,
+            vec!["first".into(), "second".into()],
+            Some("second".into()),
+        )
+        .unwrap();
+    workspace.active_selection_invocation = Some(invocation);
+    action(&mut app, invocation, &mut EventCtx::default());
+    workspace.sync_store_version();
+
+    store.borrow_mut().dispatch(AppEvent::TasksRestored(tasks));
+    app.context
+        .coordinator
+        .borrow_mut()
+        .record_selection_outcome_for_test(invocation, true);
+    workspace.sync_store_version();
+
+    assert_eq!(
+        workspace.table().highlighted_id().as_deref(),
+        Some("second")
+    );
+}
+
+#[test]
+fn failed_bulk_delete_restores_action_start_highlight() {
+    assert_failed_bulk_action_restores_task_highlight(
+        vec![
+            task_with("first", "First", TaskState::InProgress),
+            task_with("second", "Second", TaskState::InProgress),
+        ],
+        |app, invocation, ctx| {
+            app.delete_tasks(vec!["first".into(), "second".into()], Some(invocation), ctx)
+        },
+    );
+}
+
+#[test]
+fn failed_bulk_state_change_restores_action_start_highlight() {
+    assert_failed_bulk_action_restores_task_highlight(
+        vec![
+            task_with("first", "First", TaskState::InProgress),
+            task_with("second", "Second", TaskState::InProgress),
+        ],
+        |app, invocation, ctx| {
+            app.complete_tasks(
+                vec!["first".into(), "second".into()],
+                TaskState::Done,
+                Some(invocation),
+                ctx,
+            )
+        },
+    );
+}
+
+#[test]
+fn failed_bulk_snooze_restores_action_start_highlight() {
+    assert_failed_bulk_action_restores_task_highlight(
+        vec![
+            task_with("first", "First", TaskState::InProgress),
+            task_with("second", "Second", TaskState::InProgress),
+        ],
+        |app, invocation, ctx| {
+            app.snooze_tasks(
+                vec!["first".into(), "second".into()],
+                time::macros::datetime!(2026-08-28 09:00),
+                None,
+                Some(invocation),
+                ctx,
+            )
+        },
+    );
+}
+
+#[test]
+fn failed_calendar_bulk_snooze_restores_action_start_highlight() {
+    let today = time::OffsetDateTime::now_local()
+        .unwrap_or_else(|_| time::OffsetDateTime::now_utc())
+        .date();
+    let until = today.with_time(time::macros::time!(8:00));
+    let tasks = ["first", "second"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, id)| {
+            let mut task = task_with_rank(id, id, TaskState::Snoozed, index as i64 + 1);
+            task.snoozed_until = Some(until);
+            task
+        })
+        .collect::<Vec<_>>();
+    let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+        tasks: tasks.clone(),
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(context.store, context.coordinator);
+    let mut workspace = CalendarWorkspace::new(app.context.clone(), true);
+    for key in [
+        KeyEvent::from(Key::Char('D')),
+        KeyEvent {
+            code: Key::Down,
+            modifiers: KeyModifiers::SHIFT,
+        },
+    ] {
+        workspace.event(&TuiEvent::Key(key), &mut EventCtx::default());
+    }
+    assert_eq!(workspace.highlighted_task_id().as_deref(), Some("second"));
+    let invocation = app
+        .context
+        .begin_transient_selection(
+            TransientSelectionSource::Calendar,
+            vec!["first".into(), "second".into()],
+            workspace.highlighted_task_id(),
+        )
+        .unwrap();
+    workspace.set_active_selection_invocation_for_test(Some(invocation));
+
+    app.snooze_tasks(
+        vec!["first".into(), "second".into()],
+        (today + time::Duration::days(1)).with_time(time::macros::time!(8:00)),
+        None,
+        Some(invocation),
+        &mut EventCtx::default(),
+    );
+    workspace.sync_store_version();
+    assert_eq!(workspace.highlighted_task_id(), None);
+
+    store.borrow_mut().dispatch(AppEvent::TasksRestored(tasks));
+    app.context
+        .coordinator
+        .borrow_mut()
+        .record_selection_outcome_for_test(invocation, true);
+    workspace.sync_store_version();
+
+    assert_eq!(workspace.highlighted_task_id().as_deref(), Some("second"));
+}
+
+#[test]
+fn calendar_quick_menu_snapshots_transient_day_selection_and_keeps_it_after_focus_moves() {
+    let today = time::OffsetDateTime::now_local()
+        .unwrap_or_else(|_| time::OffsetDateTime::now_utc())
+        .date();
+    let until = today.with_time(time::macros::time!(8:00));
+    let tasks = ["first", "second", "third"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, id)| {
+            let mut task = task_with_rank(id, id, TaskState::Snoozed, index as i64 + 1);
+            task.snoozed_until = Some(until);
+            task
+        })
+        .collect();
+    let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+        tasks,
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut workspace = CalendarWorkspace::new(context, true);
+    let area = Rect::new(0, 0, 120, 40);
+    let mut layout = LayoutCtx::new();
+    workspace.layout(area, &mut layout);
+    let calendar = layout
+        .focus_targets()
+        .iter()
+        .find(|target| target.id.as_str() == "calendar")
+        .expect("calendar should be focusable")
+        .clone();
+    let route = EventRoute::new(calendar.path.clone());
+    workspace.dispatch_focus(&calendar, true, &mut FocusCtx::default());
+    workspace.dispatch_event(
+        &route,
+        &TuiEvent::Key(Key::Char('D').into()),
+        &mut EventCtx::default(),
+    );
+    workspace.dispatch_event(
+        &route,
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Down,
+            modifiers: KeyModifiers::SHIFT,
+        }),
+        &mut EventCtx::default(),
+    );
+    let mut quick_menu = EventCtx::default();
+    assert!(
+        workspace
+            .dispatch_event(
+                &route,
+                &TuiEvent::Key(Key::Char('.').into()),
+                &mut quick_menu,
+            )
+            .handled()
+    );
+    assert!(matches!(
+        quick_menu.messages(),
+        [AppMsg::SelectionAction { action, .. }]
+            if matches!(action.as_ref(), AppMsg::OpenCalendarTasksQuickMenu {
+                task_ids,
+                time,
+                selection_active: true,
+            } if task_ids == &vec!["first".to_string(), "second".to_string()]
+                && *time == Some(until)
+            )
+    ));
+
+    workspace.dispatch_focus(&calendar, false, &mut FocusCtx::default());
+    workspace.dispatch_focus(&calendar, true, &mut FocusCtx::default());
+    for key in [
+        KeyEvent {
+            code: Key::Char('m'),
+            modifiers: KeyModifiers::CONTROL,
+        },
+        KeyEvent::from(Key::End),
+        KeyEvent::from(Key::Enter),
+    ] {
+        workspace.dispatch_event(&route, &TuiEvent::Key(key), &mut EventCtx::default());
+    }
+
+    let state = store.borrow();
+    let ranks = state
+        .state()
+        .tasks
+        .iter()
+        .map(|task| (task.id.as_str(), task.rank))
+        .collect::<Vec<_>>();
+    assert_eq!(ranks, [("first", 2), ("second", 3), ("third", 1)]);
+}
+
+#[test]
+fn calendar_group_selection_clears_after_order_independent_completion() {
+    let today = time::OffsetDateTime::now_local()
+        .unwrap_or_else(|_| time::OffsetDateTime::now_utc())
+        .date();
+    let until = today.with_time(time::macros::time!(8:00));
+    let tasks = ["first", "second"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, id)| {
+            let mut task = task_with_rank(id, id, TaskState::Snoozed, index as i64 + 1);
+            task.snoozed_until = Some(until);
+            task
+        })
+        .collect();
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks,
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut workspace = CalendarWorkspace::new(context.clone(), true);
+    for key in [
+        KeyEvent::from(Key::Char('D')),
+        KeyEvent {
+            code: Key::Down,
+            modifiers: KeyModifiers::SHIFT,
+        },
+    ] {
+        workspace.event(&TuiEvent::Key(key), &mut EventCtx::default());
+    }
+    workspace.event(
+        &TuiEvent::Key(Key::Char('.').into()),
+        &mut EventCtx::default(),
+    );
+
+    workspace.sync_store_version();
+    assert_eq!(workspace.transient_selected_task_ids(), ["first", "second"]);
+
+    for task_id in ["first", "second"] {
+        context.store.borrow_mut().dispatch(AppEvent::PatchTask {
+            task_id: task_id.into(),
+            patch: TaskPatch::Snooze {
+                until: today.with_time(time::macros::time!(9:00)),
+                remember_custom: None,
+            },
+        });
+    }
+    context.accept_transient_mutation(workspace.active_selection_invocation_for_test());
+    workspace.sync_store_version();
+
+    assert!(workspace.transient_selected_task_ids().is_empty());
+    assert_eq!(workspace.highlighted_task_id().as_deref(), Some("second"));
+}
+
+#[test]
+fn calendar_quick_menu_uses_sparse_selection_time_after_highlight_moves() {
+    let today = time::OffsetDateTime::now_local()
+        .unwrap_or_else(|_| time::OffsetDateTime::now_utc())
+        .date();
+    let eight = today.with_time(time::macros::time!(8:00));
+    let nine = today.with_time(time::macros::time!(9:00));
+    let tasks = [
+        ("first", eight),
+        ("second", eight),
+        ("third", eight),
+        ("later", nine),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, (id, until))| {
+        let mut task = task_with_rank(id, id, TaskState::Snoozed, index as i64 + 1);
+        task.snoozed_until = Some(until);
+        task
+    })
+    .collect();
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks,
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut workspace = CalendarWorkspace::new(context, true);
+    for key in [
+        KeyEvent::from(Key::Char('D')),
+        KeyEvent {
+            code: Key::Down,
+            modifiers: KeyModifiers::CONTROL,
+        },
+        KeyEvent {
+            code: Key::Down,
+            modifiers: KeyModifiers::CONTROL,
+        },
+        KeyEvent {
+            code: Key::Char(' '),
+            modifiers: KeyModifiers::CONTROL,
+        },
+        KeyEvent::from(Key::Down),
+    ] {
+        workspace.event(&TuiEvent::Key(key), &mut EventCtx::default());
+    }
+    let mut ctx = EventCtx::default();
+
+    workspace.event(&TuiEvent::Key(Key::Char('.').into()), &mut ctx);
+
+    assert!(matches!(
+        ctx.messages(),
+        [AppMsg::SelectionAction { action, .. }]
+            if matches!(action.as_ref(), AppMsg::OpenCalendarTasksQuickMenu {
+                task_ids,
+                time,
+                selection_active: true,
+            } if task_ids == &vec!["first".to_string(), "third".to_string()]
+                && *time == Some(eight)
+            )
+    ));
+}
+
+#[test]
+fn calendar_transient_single_selection_routes_progress_as_a_group_action() {
+    let today = time::OffsetDateTime::now_local()
+        .unwrap_or_else(|_| time::OffsetDateTime::now_utc())
+        .date();
+    let mut task = task_with("snoozed", "Snoozed", TaskState::Snoozed);
+    task.snoozed_until = Some(today.with_time(time::macros::time!(8:00)));
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![task],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut workspace = CalendarWorkspace::new(context, true);
+    for key in [
+        KeyEvent::from(Key::Char('D')),
+        KeyEvent {
+            code: Key::Char(' '),
+            modifiers: KeyModifiers::CONTROL,
+        },
+    ] {
+        workspace.event(&TuiEvent::Key(key), &mut EventCtx::default());
+    }
+    let mut ctx = EventCtx::default();
+
+    workspace.event(
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('t'),
+            modifiers: KeyModifiers::CONTROL,
+        }),
+        &mut ctx,
+    );
+
+    assert!(matches!(
+        ctx.messages(),
+        [AppMsg::SelectionAction { action, .. }]
+            if matches!(action.as_ref(), AppMsg::CompleteCalendarTasks {
+                task_ids,
+                state: TaskState::Todo,
+            } if task_ids == &vec!["snoozed".to_string()])
+    ));
+}
+
+#[test]
 fn external_refresh_repopulates_selected_task_detail_once_draft_is_safe() {
     let task = test_task();
     let (_runtime, context, store) = test_context(WorkspaceSnapshot {
@@ -1315,6 +2562,82 @@ fn external_refresh_repopulates_selected_task_detail_once_draft_is_safe() {
         workspace.table().highlighted_id().as_deref(),
         Some("task-1")
     );
+}
+
+#[test]
+fn external_refresh_does_not_rebuild_focused_detail_after_checklist_patch() {
+    let mut task = test_task();
+    let optimistic_checklist = vec![ChecklistItem {
+        id: "item-1".into(),
+        parent_id: None,
+        text: "Keep focus".into(),
+        checked: true,
+    }];
+    task.checklist = vec![ChecklistItem {
+        checked: false,
+        ..optimistic_checklist[0].clone()
+    }];
+    let (runtime, context, store) = test_context(WorkspaceSnapshot {
+        tasks: vec![task],
+        people: vec![],
+        workspaces: vec![],
+        tags: vec![],
+    });
+    let mut workspace = TaskWorkspace::new(context);
+    let area = Rect::new(0, 0, 100, 30);
+    let mut layout = LayoutCtx::new();
+    workspace.layout(area, &mut layout);
+    let detail_focus = layout
+        .focus_targets()
+        .iter()
+        .find(|target| target.path.keys().first() == Some(&ChildKey::second()))
+        .expect("detail should be focusable")
+        .clone();
+    workspace.dispatch_focus(&detail_focus, true, &mut FocusCtx::default());
+    let original_patches = Rc::clone(&workspace.detail().patches);
+
+    workspace
+        .detail_mut()
+        .patches
+        .borrow_mut()
+        .push(TaskPatch::Checklist(optimistic_checklist.clone()));
+    assert!(workspace.sync_detail_changes().changed);
+    assert!(workspace.detail_draft_protected);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let runtime_thread = std::thread::spawn(move || {
+        runtime.block_on(async {
+            let _ = shutdown_rx.await;
+        });
+    });
+    let drained = workspace
+        .context
+        .coordinator
+        .borrow_mut()
+        .drain(Duration::from_secs(1));
+    shutdown_tx
+        .send(())
+        .expect("runtime should still be running");
+    runtime_thread.join().expect("runtime thread should join");
+    assert!(drained);
+    assert!(!workspace.context.coordinator.borrow().has_pending());
+    store.borrow_mut().dispatch(AppEvent::WorkspaceRefreshed {
+        snapshot: WorkspaceSnapshot {
+            tasks: vec![Task {
+                title: "Externally changed".into(),
+                checklist: optimistic_checklist,
+                ..test_task()
+            }],
+            people: vec![],
+            workspaces: vec![],
+            tags: vec![],
+        },
+        revision: 1,
+        entity_revisions: std::collections::HashMap::new(),
+    });
+
+    workspace.layout(area, &mut LayoutCtx::new());
+
+    assert!(Rc::ptr_eq(&original_patches, &workspace.detail().patches));
 }
 
 #[test]
@@ -1863,6 +3186,143 @@ fn agent_yank_copies_workspace_key_task_command() {
         effects.clipboard.as_deref(),
         Some("Tuido execute PROJ-1234 \"Workspace task\"")
     );
+}
+
+#[test]
+fn task_yanks_use_the_table_highlight_over_stale_detail_selection() {
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![
+            task_with("1234", "Stale selection", TaskState::Todo),
+            task_with("5678", "Current highlight", TaskState::Todo),
+        ],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut workspace = TaskWorkspace::new(context);
+    workspace.table_focused = true;
+    workspace.table_mut().highlight_id(&"5678".to_string());
+
+    for (hotkey, expected) in [
+        (
+            keys::TASK_AGENT_YANK.hotkey(),
+            "Tuido execute 5678 \"Current highlight\"",
+        ),
+        (
+            keys::TASK_AGENT_YANK_CLARIFY.hotkey(),
+            "Tuido clarify 5678 \"Current highlight\"",
+        ),
+    ] {
+        let mut ctx = EventCtx::default();
+
+        workspace.event(&TuiEvent::Hotkey(HotkeyEvent::Commit(hotkey)), &mut ctx);
+
+        assert_eq!(ctx.clipboard_request(), Some(expected));
+    }
+
+    let mut ctx = EventCtx::default();
+    workspace.event(&TuiEvent::Yank, &mut ctx);
+
+    assert_eq!(
+        ctx.clipboard_request(),
+        Some("Tuido 5678 \"Current highlight\"")
+    );
+}
+
+#[test]
+fn task_list_group_yanks_copy_all_selected_tasks_then_clear_selection() {
+    let first = task_with_rank("1", "First \"quoted\"", TaskState::Todo, 1);
+    let second = task_with_rank("2", "Second \\ path", TaskState::Todo, 2);
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![first, second],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut workspace = TaskWorkspace::new(context);
+    workspace.table_focused = true;
+
+    for (event, expected) in [
+        (
+            TuiEvent::Hotkey(HotkeyEvent::Commit(keys::TASK_AGENT_YANK.hotkey())),
+            r#"Tuido execute 1 "First \"quoted\""; 2 "Second \\ path""#,
+        ),
+        (
+            TuiEvent::Hotkey(HotkeyEvent::Commit(keys::TASK_AGENT_YANK_CLARIFY.hotkey())),
+            r#"Tuido clarify 1 "First \"quoted\""; 2 "Second \\ path""#,
+        ),
+        (
+            TuiEvent::Yank,
+            r#"Tuido 1 "First \"quoted\""; 2 "Second \\ path""#,
+        ),
+    ] {
+        workspace.table_mut().highlight_id(&"1".to_string());
+        workspace.task_list_mut().event(
+            &TuiEvent::Key(KeyEvent {
+                code: Key::Down,
+                modifiers: KeyModifiers::SHIFT,
+            }),
+            &mut EventCtx::default(),
+        );
+        let mut ctx = EventCtx::default();
+
+        workspace.event(&event, &mut ctx);
+
+        assert_eq!(ctx.clipboard_request(), Some(expected));
+        assert!(workspace.task_list().transient_selected_ids().is_empty());
+    }
+}
+
+#[test]
+fn detail_focused_yanks_prefer_transient_task_group() {
+    let first = task_with_rank("1", "First \"quoted\"", TaskState::Todo, 1);
+    let second = task_with_rank("2", "Second \\ path", TaskState::Todo, 2);
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![first, second],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut workspace = TaskWorkspace::new(context);
+    let mut layout = LayoutCtx::new();
+    workspace.layout(Rect::new(0, 0, 120, 24), &mut layout);
+    let detail_path = layout
+        .focus_targets()
+        .iter()
+        .find(|target| target.path.keys().first() == Some(&ChildKey::second()))
+        .expect("detail control should be focusable")
+        .path
+        .clone();
+
+    for (event, expected) in [
+        (
+            TuiEvent::Hotkey(HotkeyEvent::Commit(keys::TASK_AGENT_YANK.hotkey())),
+            r#"Tuido execute 1 "First \"quoted\""; 2 "Second \\ path""#,
+        ),
+        (
+            TuiEvent::Hotkey(HotkeyEvent::Commit(keys::TASK_AGENT_YANK_CLARIFY.hotkey())),
+            r#"Tuido clarify 1 "First \"quoted\""; 2 "Second \\ path""#,
+        ),
+        (
+            TuiEvent::Yank,
+            r#"Tuido 1 "First \"quoted\""; 2 "Second \\ path""#,
+        ),
+    ] {
+        workspace.table_mut().highlight_id(&"1".to_string());
+        workspace.task_list_mut().event(
+            &TuiEvent::Key(KeyEvent {
+                code: Key::Down,
+                modifiers: KeyModifiers::SHIFT,
+            }),
+            &mut EventCtx::default(),
+        );
+        let mut ctx = EventCtx::default();
+
+        workspace.dispatch_event(&EventRoute::new(detail_path.clone()), &event, &mut ctx);
+
+        assert_eq!(ctx.clipboard_request(), Some(expected));
+        assert!(workspace.task_list().transient_selected_ids().is_empty());
+    }
 }
 
 #[test]

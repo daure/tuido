@@ -18,7 +18,10 @@ use tuicore::{
     LayoutSizeHint, RenderCtx, TickResult, TreePath, TuiEvent, TuiNode, keybindings,
 };
 
-use crate::app::AppMsg;
+use crate::{
+    app::{AppMsg, selection_action},
+    persistence_coordinator::PersistenceSelectionInvocation,
+};
 
 const STORAGE_FORMAT: &[time::format_description::FormatItem<'static>] =
     format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]");
@@ -145,7 +148,14 @@ enum SnoozeMode {
 
 #[derive(Clone)]
 enum SnoozeTarget {
-    Task { task_id: String, is_snoozed: bool },
+    Task {
+        task_id: String,
+        is_snoozed: bool,
+    },
+    Tasks {
+        task_ids: Vec<String>,
+        all_snoozed: bool,
+    },
     CalendarCreate,
 }
 
@@ -156,6 +166,9 @@ impl SnoozeTarget {
             Self::Task {
                 is_snoozed: true,
                 ..
+            } | Self::Tasks {
+                all_snoozed: true,
+                ..
             }
         )
     }
@@ -164,6 +177,11 @@ impl SnoozeTarget {
         match self {
             Self::Task { task_id, .. } => AppMsg::SnoozeTask {
                 task_id: task_id.clone(),
+                until,
+                remember_custom: custom.then_some(until),
+            },
+            Self::Tasks { task_ids, .. } => AppMsg::SnoozeTasks {
+                task_ids: task_ids.clone(),
                 until,
                 remember_custom: custom.then_some(until),
             },
@@ -186,6 +204,7 @@ pub(crate) struct SnoozeDialog {
     picker: DateTimePicker<AppMsg>,
     focus_path: TreePath,
     picker_on_time: bool,
+    selection_invocation: Rc<RefCell<Option<PersistenceSelectionInvocation>>>,
     menu_field_area: Rect,
 }
 
@@ -351,6 +370,21 @@ impl SnoozeDialog {
         Self::with_target(target, now, default_time, last_custom, None)
     }
 
+    pub(crate) fn new_multiple_with_default_time(
+        tasks: Vec<crate::domain::Task>,
+        now: PrimitiveDateTime,
+        default_time: Time,
+        last_custom: Option<PrimitiveDateTime>,
+    ) -> Self {
+        let target = SnoozeTarget::Tasks {
+            all_snoozed: tasks
+                .iter()
+                .all(|task| task.state == crate::domain::TaskState::Snoozed),
+            task_ids: tasks.into_iter().map(|task| task.id).collect(),
+        };
+        Self::with_target(target, now, default_time, last_custom, None)
+    }
+
     pub(crate) fn for_calendar(
         now: PrimitiveDateTime,
         picker_seed: PrimitiveDateTime,
@@ -374,6 +408,8 @@ impl SnoozeDialog {
     ) -> Self {
         let quick = quick_snoozes(now, default_time);
         let picker_target = target.clone();
+        let selection_invocation = Rc::new(RefCell::new(None));
+        let picker_selection_invocation = Rc::clone(&selection_invocation);
         let selected_calendar_day =
             picker_seed.filter(|_| matches!(&target, SnoozeTarget::CalendarCreate));
         let actions = Rc::new(RefCell::new(Vec::new()));
@@ -395,12 +431,33 @@ impl SnoozeDialog {
             mode: SnoozeMode::Menu,
             focus_path: TreePath::default(),
             picker_on_time: false,
+            selection_invocation,
             menu_field_area: Rect::default(),
             picker: DateTimePicker::new()
                 .layout(DateTimePickerLayout::Stepped)
                 .value(Some(picker_seed.unwrap_or(quick.tomorrow)))
-                .on_select(move |until| picker_target.selection_message(until, true)),
+                .on_select(move |until| {
+                    selection_action(
+                        *picker_selection_invocation.borrow(),
+                        picker_target.selection_message(until, true),
+                    )
+                }),
         }
+    }
+
+    pub(crate) fn with_selection_invocation(
+        self,
+        selection_invocation: Option<PersistenceSelectionInvocation>,
+    ) -> Self {
+        *self.selection_invocation.borrow_mut() = selection_invocation;
+        self
+    }
+
+    fn emit_action(&self, action: AppMsg, ctx: &mut EventCtx<AppMsg>) {
+        ctx.emit(selection_action(
+            *self.selection_invocation.borrow(),
+            action,
+        ));
     }
 
     fn activate(&mut self, choice: SnoozeChoice, ctx: &mut EventCtx<AppMsg>) {
@@ -422,14 +479,20 @@ impl SnoozeDialog {
                 None
             }
             SnoozeChoice::Unsnooze => {
-                if let SnoozeTarget::Task { task_id, .. } = &self.target {
-                    ctx.emit(AppMsg::UnsnoozeTask(task_id.clone()));
+                match &self.target {
+                    SnoozeTarget::Task { task_id, .. } => {
+                        self.emit_action(AppMsg::UnsnoozeTask(task_id.clone()), ctx);
+                    }
+                    SnoozeTarget::Tasks { task_ids, .. } => {
+                        self.emit_action(AppMsg::UnsnoozeTasks(task_ids.clone()), ctx);
+                    }
+                    SnoozeTarget::CalendarCreate => {}
                 }
                 None
             }
         };
         if let Some(until) = until {
-            ctx.emit(self.target.selection_message(until, true));
+            self.emit_action(self.target.selection_message(until, true), ctx);
         }
     }
 
@@ -529,7 +592,7 @@ impl TuiNode<AppMsg> for SnoozeDialog {
         };
         if keybindings().focus().unfocus_matches(*key) {
             match self.mode {
-                SnoozeMode::Menu => ctx.emit(AppMsg::CloseSnoozeDialog),
+                SnoozeMode::Menu => self.emit_action(AppMsg::CloseSnoozeDialog, ctx),
                 SnoozeMode::Picker if !self.picker_on_time => {
                     self.mode = SnoozeMode::Menu;
                     ctx.request_layout();
@@ -568,7 +631,7 @@ impl TuiNode<AppMsg> for SnoozeDialog {
         let outcome = self.dropdown.event(event, ctx);
         let activated = self.drain_actions(ctx);
         if was_open && !self.dropdown.is_open() && !activated {
-            ctx.emit(AppMsg::CloseSnoozeDialog);
+            self.emit_action(AppMsg::CloseSnoozeDialog, ctx);
         }
         outcome
     }
@@ -596,7 +659,7 @@ impl TuiNode<AppMsg> for SnoozeDialog {
             let outcome = self.dropdown.dispatch_event(route, event, ctx);
             let activated = self.drain_actions(ctx);
             if was_open && !self.dropdown.is_open() && !activated {
-                ctx.emit(AppMsg::CloseSnoozeDialog);
+                self.emit_action(AppMsg::CloseSnoozeDialog, ctx);
             }
             outcome
         } else {

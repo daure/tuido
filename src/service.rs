@@ -92,6 +92,24 @@ pub(crate) struct TaskRankUpdate {
     pub expected_revision: u64,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct TaskMutationTarget {
+    pub id: String,
+    pub expected_revision: u64,
+}
+
+#[derive(Debug)]
+pub(crate) struct BulkTaskPatchResult {
+    pub revisions: HashMap<String, u64>,
+    pub ranks: Vec<TaskRank>,
+}
+
+struct ClaimedTaskMutationTarget {
+    id: String,
+    number: i64,
+    expected_revision: u64,
+}
+
 pub(crate) struct ConsistentWorkspace {
     pub snapshot: WorkspaceSnapshot,
     pub revision: u64,
@@ -1399,6 +1417,123 @@ impl TuidoService {
         Ok(revisions)
     }
 
+    pub(crate) async fn bulk_patch_tasks(
+        &self,
+        targets: Vec<TaskMutationTarget>,
+        patch: TaskPatch,
+    ) -> ServiceResult<BulkTaskPatchResult> {
+        if targets.is_empty() {
+            return Ok(BulkTaskPatchResult {
+                revisions: HashMap::new(),
+                ranks: Vec::new(),
+            });
+        }
+        match &patch {
+            TaskPatch::Snooze { .. }
+            | TaskPatch::Unsnooze
+            | TaskPatch::State(
+                crate::domain::TaskState::Todo
+                | crate::domain::TaskState::InProgress
+                | crate::domain::TaskState::Done
+                | crate::domain::TaskState::Rejected,
+            ) => {}
+            _ => {
+                return Err(ServiceError::Invalid(
+                    "bulk task mutation supports snooze, todo, in-progress, done, and rejected"
+                        .into(),
+                ));
+            }
+        }
+        validate_task_patch(&patch)?;
+        let targets = self.validate_task_mutation_targets(targets)?;
+        let mut tx = self.pool.begin().await.map_err(storage_error)?;
+        for target in &targets {
+            self.claim_task(&mut tx, &target.id, target.expected_revision)
+                .await?;
+        }
+        for target in &targets {
+            apply_task_patch(&mut tx, self.dialect, &target.id, patch.clone()).await?;
+        }
+        let ranks = if matches!(
+            patch,
+            TaskPatch::State(crate::domain::TaskState::InProgress)
+        ) {
+            self.promote_bulk_in_progress_tasks(&mut tx, &targets)
+                .await?
+        } else {
+            for target in &targets {
+                self.touch_task(&mut tx, target.number).await?;
+            }
+            Vec::new()
+        };
+        bump_workspace(&mut tx, self.dialect).await?;
+        tx.commit().await.map_err(storage_error)?;
+        Ok(BulkTaskPatchResult {
+            revisions: targets
+                .into_iter()
+                .map(|target| (format!("task:{}", target.id), target.expected_revision + 1))
+                .collect(),
+            ranks,
+        })
+    }
+
+    pub(crate) async fn delete_tasks(
+        &self,
+        targets: Vec<TaskMutationTarget>,
+    ) -> ServiceResult<HashMap<String, u64>> {
+        if targets.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let targets = self.validate_task_mutation_targets(targets)?;
+        let target_numbers = targets
+            .iter()
+            .map(|target| target.number)
+            .collect::<HashSet<_>>();
+        let mut tx = self.pool.begin().await.map_err(storage_error)?;
+        for target in &targets {
+            self.claim_task(&mut tx, &target.id, target.expected_revision)
+                .await?;
+        }
+        let mut related = HashSet::new();
+        for target in &targets {
+            related.extend(self.related_task_numbers(&mut tx, target.number).await?);
+        }
+        for target in &targets {
+            let sql = format!(
+                "DELETE FROM tasks WHERE id = {} AND revision = {}",
+                self.dialect.placeholder(1),
+                self.dialect.placeholder(2)
+            );
+            let rows = sqlx::query(AssertSqlSafe(sql.as_str()))
+                .bind(target.number)
+                .bind((target.expected_revision + 1) as i64)
+                .execute(&mut *tx)
+                .await
+                .map_err(storage_error)?
+                .rows_affected();
+            if rows != 1 {
+                return Err(ServiceError::Conflict {
+                    entity: "task",
+                    id: target.id.clone(),
+                    expected: target.expected_revision,
+                    actual: self.actual_task_revision(&mut tx, target.number).await?,
+                });
+            }
+        }
+        let revisions = self
+            .bump_task_revisions(
+                &mut tx,
+                related
+                    .into_iter()
+                    .filter(|number| !target_numbers.contains(number))
+                    .collect(),
+            )
+            .await?;
+        bump_workspace(&mut tx, self.dialect).await?;
+        tx.commit().await.map_err(storage_error)?;
+        Ok(revisions)
+    }
+
     pub async fn set_task_tags_by_label(
         &self,
         id: String,
@@ -1891,6 +2026,117 @@ impl TuidoService {
         })
     }
 
+    fn validate_task_mutation_targets(
+        &self,
+        targets: Vec<TaskMutationTarget>,
+    ) -> ServiceResult<Vec<ClaimedTaskMutationTarget>> {
+        let mut ids = HashSet::new();
+        let mut numbers = HashSet::new();
+        let mut targets = targets
+            .into_iter()
+            .map(|target| {
+                let number = parse_task_number(&target.id)?;
+                if !ids.insert(target.id.clone()) || !numbers.insert(number) {
+                    return Err(ServiceError::Invalid(
+                        "bulk task mutation contains duplicate task IDs".into(),
+                    ));
+                }
+                Ok(ClaimedTaskMutationTarget {
+                    number,
+                    id: target.id,
+                    expected_revision: target.expected_revision,
+                })
+            })
+            .collect::<ServiceResult<Vec<_>>>()?;
+        targets.sort_by(|left, right| left.id.cmp(&right.id));
+        Ok(targets)
+    }
+
+    async fn promote_bulk_in_progress_tasks(
+        &self,
+        tx: &mut Transaction<'_, Any>,
+        targets: &[ClaimedTaskMutationTarget],
+    ) -> ServiceResult<Vec<TaskRank>> {
+        let select_rank = format!(
+            "SELECT rank FROM tasks WHERE id = {}",
+            self.dialect.placeholder(1)
+        );
+        let mut ordered = Vec::with_capacity(targets.len());
+        for target in targets {
+            let rank = sqlx::query(AssertSqlSafe(select_rank.as_str()))
+                .bind(target.number)
+                .fetch_one(&mut **tx)
+                .await
+                .map_err(storage_error)?
+                .try_get::<i64, _>("rank")
+                .map_err(storage_error)?;
+            ordered.push((rank, target));
+        }
+        ordered.sort_by(|(left_rank, left), (right_rank, right)| {
+            left_rank
+                .cmp(right_rank)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        let placeholders = (1..=targets.len())
+            .map(|index| self.dialect.placeholder(index))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let active_rank = format!(
+            "SELECT MIN(rank) AS rank FROM tasks WHERE state IN ('next', 'doing') AND rejected = false AND id NOT IN ({placeholders})"
+        );
+        let mut query = sqlx::query(AssertSqlSafe(active_rank.as_str()));
+        for target in targets {
+            query = query.bind(target.number);
+        }
+        let minimum = query
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(storage_error)?
+            .try_get::<Option<i64>, _>("rank")
+            .map_err(storage_error)?
+            .unwrap_or(0);
+        let first_rank = minimum.checked_sub(targets.len() as i64).ok_or_else(|| {
+            ServiceError::Invalid("cannot promote tasks beyond minimum rank".into())
+        })?;
+        let update = format!(
+            "UPDATE tasks SET rank = {}, updated_at = {} WHERE id = {}",
+            self.dialect.placeholder(1),
+            self.dialect.placeholder(2),
+            self.dialect.placeholder(3)
+        );
+        let mut ranks = Vec::with_capacity(ordered.len());
+        for (index, (_, target)) in ordered.into_iter().enumerate() {
+            let rank = first_rank + index as i64;
+            sqlx::query(AssertSqlSafe(update.as_str()))
+                .bind(rank)
+                .bind(now_text())
+                .bind(target.number)
+                .execute(&mut **tx)
+                .await
+                .map_err(storage_error)?;
+            ranks.push(TaskRank {
+                id: target.id.clone(),
+                rank,
+            });
+        }
+        Ok(ranks)
+    }
+
+    async fn touch_task(&self, tx: &mut Transaction<'_, Any>, number: i64) -> ServiceResult<()> {
+        let sql = format!(
+            "UPDATE tasks SET updated_at = {} WHERE id = {}",
+            self.dialect.placeholder(1),
+            self.dialect.placeholder(2)
+        );
+        sqlx::query(AssertSqlSafe(sql.as_str()))
+            .bind(now_text())
+            .bind(number)
+            .execute(&mut **tx)
+            .await
+            .map_err(storage_error)?;
+        Ok(())
+    }
+
     async fn actual_task_revision(
         &self,
         tx: &mut Transaction<'_, Any>,
@@ -2219,6 +2465,24 @@ impl TuidoService {
         task_id: &str,
         task_numbers: Vec<i64>,
     ) -> ServiceResult<HashMap<String, u64>> {
+        let task_number = parse_task_number(task_id)?;
+        self.bump_task_revisions(
+            tx,
+            task_numbers
+                .into_iter()
+                .filter(|number| *number != task_number)
+                .collect(),
+        )
+        .await
+    }
+
+    async fn bump_task_revisions(
+        &self,
+        tx: &mut Transaction<'_, Any>,
+        mut task_numbers: Vec<i64>,
+    ) -> ServiceResult<HashMap<String, u64>> {
+        task_numbers.sort_unstable();
+        task_numbers.dedup();
         let mut revisions = HashMap::new();
         for number in task_numbers {
             let update = format!(
@@ -2249,12 +2513,10 @@ impl TuidoService {
                             .map_err(storage_error)?,
                     ),
                 );
-                if id != task_id {
-                    revisions.insert(
-                        format!("task:{id}"),
-                        row.try_get::<i64, _>("revision").map_err(storage_error)? as u64,
-                    );
-                }
+                revisions.insert(
+                    format!("task:{id}"),
+                    row.try_get::<i64, _>("revision").map_err(storage_error)? as u64,
+                );
             }
         }
         Ok(revisions)

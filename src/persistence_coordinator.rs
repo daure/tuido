@@ -16,12 +16,33 @@ use crate::{
         TagPatch, Task, TaskField, TaskPatch, TaskRank, Workspace, WorkspaceDeletion,
         WorkspacePatch,
     },
-    service::{NoteCreateResult, NoteInput, NoteView, TaskRankUpdate, TuidoService, Versioned},
+    service::{
+        NoteCreateResult, NoteInput, NoteView, TaskMutationTarget, TaskRankUpdate, TuidoService,
+        Versioned,
+    },
     storage::SqlDialect,
 };
 
 pub(crate) type AppStore =
     Rc<RefCell<Store<AppState, AppEvent, fn(&mut AppState, AppEvent) -> tuicore::DispatchOutcome>>>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PersistenceSelectionSource {
+    TaskList,
+    Calendar,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PersistenceSelectionInvocation {
+    pub(crate) token: u64,
+    pub(crate) source: PersistenceSelectionSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PersistenceSelectionOutcome {
+    pub(crate) invocation: PersistenceSelectionInvocation,
+    pub(crate) failed: bool,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum CommandKey {
@@ -47,6 +68,20 @@ pub(crate) enum PersistenceCommand {
         before: Vec<TaskRank>,
         after: Vec<TaskRank>,
         expected_revisions: HashMap<String, u64>,
+        selection_invocation: Option<PersistenceSelectionInvocation>,
+    },
+    #[allow(dead_code)]
+    BulkPatchTasks {
+        before: Vec<Task>,
+        patch: TaskPatch,
+        expected_revisions: HashMap<String, u64>,
+        selection_invocation: Option<PersistenceSelectionInvocation>,
+    },
+    #[allow(dead_code)]
+    BulkDeleteTasks {
+        before: Vec<Task>,
+        expected_revisions: HashMap<String, u64>,
+        selection_invocation: Option<PersistenceSelectionInvocation>,
     },
     CreatePerson(Person),
     DeletePerson(PersonDeletion),
@@ -89,7 +124,9 @@ impl PersistenceCommand {
             | Self::DeleteTask(_)
             | Self::PatchTask(_, _)
             | Self::FetchTaskLinkTitle { .. }
-            | Self::ReorderTasks { .. } => CommandKey::Task,
+            | Self::ReorderTasks { .. }
+            | Self::BulkPatchTasks { .. }
+            | Self::BulkDeleteTasks { .. } => CommandKey::Task,
             Self::CreatePerson(person) => CommandKey::Person(person.id.clone()),
             Self::DeletePerson(deletion) => CommandKey::Person(deletion.person.id.clone()),
             Self::PatchPerson(id, _) => CommandKey::Person(id.clone()),
@@ -150,6 +187,7 @@ struct Completion {
     command: PersistenceCommand,
     error: Option<String>,
     related_revisions: HashMap<String, u64>,
+    task_ranks: Vec<TaskRank>,
     created_task: Option<Task>,
     link_title: Option<LinkTitleCompletion>,
     created_note: Option<NoteCreateResult>,
@@ -158,6 +196,7 @@ struct Completion {
 
 struct ExecutionResult {
     related_revisions: HashMap<String, u64>,
+    task_ranks: Vec<TaskRank>,
     created_task: Option<Task>,
     link_title: Option<LinkTitleCompletion>,
     created_note: Option<NoteCreateResult>,
@@ -197,6 +236,7 @@ pub(crate) struct PersistenceCoordinator {
     refresh_inflight: bool,
     reconcile_required: bool,
     last_refresh_check: Instant,
+    selection_outcomes: VecDeque<PersistenceSelectionOutcome>,
 }
 
 impl PersistenceCoordinator {
@@ -231,6 +271,7 @@ impl PersistenceCoordinator {
             refresh_inflight: false,
             reconcile_required: false,
             last_refresh_check: Instant::now(),
+            selection_outcomes: VecDeque::new(),
         }
     }
 
@@ -430,6 +471,20 @@ impl PersistenceCoordinator {
         !self.active.is_empty() || !self.queued.is_empty()
     }
 
+    pub(crate) fn take_selection_outcomes(&mut self) -> Vec<PersistenceSelectionOutcome> {
+        self.selection_outcomes.drain(..).collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_selection_outcome_for_test(
+        &mut self,
+        invocation: PersistenceSelectionInvocation,
+        failed: bool,
+    ) {
+        self.selection_outcomes
+            .push_back(PersistenceSelectionOutcome { invocation, failed });
+    }
+
     pub(crate) fn drain(&mut self, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
         while self.has_pending() {
@@ -464,6 +519,27 @@ impl PersistenceCoordinator {
                     .copied()
                     .map(|revision| (rank.id.clone(), revision))
             }));
+        } else if let PersistenceCommand::BulkPatchTasks {
+            before,
+            expected_revisions,
+            ..
+        }
+        | PersistenceCommand::BulkDeleteTasks {
+            before,
+            expected_revisions,
+            ..
+        } = &mut command
+        {
+            let state = self.store.borrow();
+            expected_revisions.clear();
+            expected_revisions.extend(before.iter().filter_map(|task| {
+                state
+                    .state()
+                    .entity_revisions
+                    .get(&format!("task:{}", task.id))
+                    .copied()
+                    .map(|revision| (task.id.clone(), revision))
+            }));
         }
         let key = command.key();
         let sequence = self.next_sequence;
@@ -482,31 +558,41 @@ impl PersistenceCoordinator {
         let tx = self.completion_tx.clone();
         self.runtime.spawn(async move {
             let result = execute(service, command.clone(), expected_revision).await;
-            let (error, related_revisions, created_task, link_title, created_note, note) =
-                match result {
-                    Ok(result) => (
-                        None,
-                        result.related_revisions,
-                        result.created_task,
-                        result.link_title,
-                        result.created_note,
-                        result.note,
-                    ),
-                    Err(error) => (
-                        Some(error.to_string()),
-                        HashMap::new(),
-                        None,
-                        None,
-                        None,
-                        None,
-                    ),
-                };
+            let (
+                error,
+                related_revisions,
+                task_ranks,
+                created_task,
+                link_title,
+                created_note,
+                note,
+            ) = match result {
+                Ok(result) => (
+                    None,
+                    result.related_revisions,
+                    result.task_ranks,
+                    result.created_task,
+                    result.link_title,
+                    result.created_note,
+                    result.note,
+                ),
+                Err(error) => (
+                    Some(error.to_string()),
+                    HashMap::new(),
+                    Vec::new(),
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+            };
             let _ = tx.send(Completion {
                 key,
                 sequence,
                 command,
                 error,
                 related_revisions,
+                task_ranks,
                 created_task,
                 link_title,
                 created_note,
@@ -520,6 +606,12 @@ impl PersistenceCoordinator {
             return false;
         }
         self.active.remove(&completion.key);
+        let selection_outcome = selection_invocation(&completion.command).map(|invocation| {
+            PersistenceSelectionOutcome {
+                invocation,
+                failed: completion.error.is_some(),
+            }
+        });
         let committed_expected = self.active_expected.remove(&completion.sequence).flatten();
         if completion.error.is_none() {
             let revision = completion
@@ -747,6 +839,49 @@ impl PersistenceCoordinator {
                         .dispatch(AppEvent::WorkspaceRevisionCommitted);
                 }
             }
+            PersistenceCommand::BulkPatchTasks { before, .. } => {
+                if let Some(error) = completion.error {
+                    changed |= self.restore_bulk_tasks(before, &completion.key);
+                    changed |= self
+                        .store
+                        .borrow_mut()
+                        .dispatch(AppEvent::RefreshFailed(format!(
+                            "Bulk task mutation failed: {error}"
+                        )))
+                        .changed;
+                } else {
+                    changed |= self
+                        .store
+                        .borrow_mut()
+                        .dispatch(AppEvent::TaskRanksChanged(completion.task_ranks))
+                        .changed;
+                    self.store
+                        .borrow_mut()
+                        .dispatch(AppEvent::BulkTaskMutationCommitted {
+                            revisions: completion.related_revisions,
+                            deleted_task_ids: Vec::new(),
+                        });
+                }
+            }
+            PersistenceCommand::BulkDeleteTasks { before, .. } => {
+                if let Some(error) = completion.error {
+                    changed |= self.restore_bulk_tasks(before, &completion.key);
+                    changed |= self
+                        .store
+                        .borrow_mut()
+                        .dispatch(AppEvent::RefreshFailed(format!(
+                            "Bulk task mutation failed: {error}"
+                        )))
+                        .changed;
+                } else {
+                    self.store
+                        .borrow_mut()
+                        .dispatch(AppEvent::BulkTaskMutationCommitted {
+                            revisions: completion.related_revisions,
+                            deleted_task_ids: before.into_iter().map(|task| task.id).collect(),
+                        });
+                }
+            }
             PersistenceCommand::PatchPerson(id, patch) => {
                 changed |= self
                     .store
@@ -909,6 +1044,61 @@ impl PersistenceCoordinator {
         if let Some(command) = next {
             self.start(command);
         }
+        if let Some(outcome) = selection_outcome {
+            self.selection_outcomes.push_back(outcome);
+        }
+        changed
+    }
+
+    fn restore_bulk_tasks(&mut self, tasks: Vec<Task>, key: &CommandKey) -> bool {
+        let mut changed = self
+            .store
+            .borrow_mut()
+            .dispatch(AppEvent::TasksRestored(tasks))
+            .changed;
+        let queued = self
+            .queued
+            .get(key)
+            .map(|commands| commands.iter().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        for command in queued {
+            let event = match command {
+                PersistenceCommand::PatchTask(task_id, patch) => {
+                    Some(AppEvent::PatchTask { task_id, patch })
+                }
+                PersistenceCommand::DeleteTask(task) => Some(AppEvent::TaskDeleted(task.id)),
+                PersistenceCommand::ReorderTasks { after, .. } => {
+                    Some(AppEvent::TaskRanksChanged(after))
+                }
+                PersistenceCommand::BulkPatchTasks { before, patch, .. } => {
+                    for task in before {
+                        changed |= self
+                            .store
+                            .borrow_mut()
+                            .dispatch(AppEvent::PatchTask {
+                                task_id: task.id,
+                                patch: patch.clone(),
+                            })
+                            .changed;
+                    }
+                    None
+                }
+                PersistenceCommand::BulkDeleteTasks { before, .. } => {
+                    for task in before {
+                        changed |= self
+                            .store
+                            .borrow_mut()
+                            .dispatch(AppEvent::TaskDeleted(task.id))
+                            .changed;
+                    }
+                    None
+                }
+                _ => None,
+            };
+            if let Some(event) = event {
+                changed |= self.store.borrow_mut().dispatch(event).changed;
+            }
+        }
         changed
     }
 }
@@ -951,6 +1141,7 @@ async fn execute(
     let mut link_title = None;
     let mut created_note = None;
     let mut note = None;
+    let mut task_ranks = Vec::new();
     let related_revisions = match command {
         PersistenceCommand::CreateTask(task) => {
             let created = service
@@ -1043,6 +1234,27 @@ async fn execute(
                 .await
                 .map_err(boxed_service_error)
         }
+        PersistenceCommand::BulkPatchTasks {
+            before,
+            patch,
+            expected_revisions,
+            ..
+        } => {
+            let result = service
+                .bulk_patch_tasks(task_mutation_targets(before, expected_revisions)?, patch)
+                .await
+                .map_err(boxed_service_error)?;
+            task_ranks = result.ranks;
+            Ok(result.revisions)
+        }
+        PersistenceCommand::BulkDeleteTasks {
+            before,
+            expected_revisions,
+            ..
+        } => service
+            .delete_tasks(task_mutation_targets(before, expected_revisions)?)
+            .await
+            .map_err(boxed_service_error),
         PersistenceCommand::PatchPerson(id, patch) => service
             .patch_person(id, expected()?, patch)
             .await
@@ -1107,11 +1319,30 @@ async fn execute(
     }?;
     Ok(ExecutionResult {
         related_revisions,
+        task_ranks,
         created_task,
         link_title,
         created_note,
         note,
     })
+}
+
+fn task_mutation_targets(
+    tasks: Vec<Task>,
+    expected_revisions: HashMap<String, u64>,
+) -> Result<Vec<TaskMutationTarget>, Box<dyn std::error::Error + Send + Sync>> {
+    tasks
+        .into_iter()
+        .map(|task| {
+            let expected_revision = expected_revisions.get(&task.id).copied().ok_or_else(|| {
+                format!("missing task revision for {}; refresh required", task.id)
+            })?;
+            Ok(TaskMutationTarget {
+                id: task.id,
+                expected_revision,
+            })
+        })
+        .collect()
 }
 
 fn current_timestamp() -> String {
@@ -1138,6 +1369,9 @@ fn command_entity(command: &PersistenceCommand) -> Option<(&'static str, &str)> 
         PersistenceCommand::PatchTask(id, _) => Some(("task", id)),
         PersistenceCommand::FetchTaskLinkTitle { .. } => None,
         PersistenceCommand::ReorderTasks { .. } => None,
+        PersistenceCommand::BulkPatchTasks { .. } | PersistenceCommand::BulkDeleteTasks { .. } => {
+            None
+        }
         PersistenceCommand::DeletePerson(v) => Some(("person", &v.person.id)),
         PersistenceCommand::PatchPerson(id, _) => Some(("person", id)),
         PersistenceCommand::DeleteWorkspace(v) => Some(("workspace", &v.workspace.id)),
@@ -1150,6 +1384,24 @@ fn command_entity(command: &PersistenceCommand) -> Option<(&'static str, &str)> 
         | PersistenceCommand::DeleteNote { .. }
         | PersistenceCommand::SaveNotesZoom(_)
         | PersistenceCommand::OpenBrowserLink { .. } => None,
+    }
+}
+
+fn selection_invocation(command: &PersistenceCommand) -> Option<PersistenceSelectionInvocation> {
+    match command {
+        PersistenceCommand::ReorderTasks {
+            selection_invocation,
+            ..
+        }
+        | PersistenceCommand::BulkPatchTasks {
+            selection_invocation,
+            ..
+        }
+        | PersistenceCommand::BulkDeleteTasks {
+            selection_invocation,
+            ..
+        } => *selection_invocation,
+        _ => None,
     }
 }
 
@@ -1322,7 +1574,23 @@ fn preserve_failed_active_custom(
 
 fn remove_queued_task_commands(queue: Option<&mut VecDeque<PersistenceCommand>>, task_id: &str) {
     if let Some(queue) = queue {
-        queue.retain(|command| command_task_id(command) != Some(task_id));
+        queue.retain_mut(|command| match command {
+            PersistenceCommand::BulkPatchTasks {
+                before,
+                expected_revisions,
+                ..
+            }
+            | PersistenceCommand::BulkDeleteTasks {
+                before,
+                expected_revisions,
+                ..
+            } => {
+                before.retain(|task| task.id != task_id);
+                expected_revisions.remove(task_id);
+                !before.is_empty()
+            }
+            _ => command_task_id(command) != Some(task_id),
+        });
     }
 }
 
@@ -1347,10 +1615,30 @@ fn remap_queued_task_id(
                 before,
                 after,
                 expected_revisions,
+                ..
             } => {
                 for rank in before.iter_mut().chain(after.iter_mut()) {
                     if rank.id == old_id {
                         rank.id = new_id.to_string();
+                    }
+                }
+                if let Some(revision) = expected_revisions.remove(old_id) {
+                    expected_revisions.insert(new_id.to_string(), revision);
+                }
+            }
+            PersistenceCommand::BulkPatchTasks {
+                before,
+                expected_revisions,
+                ..
+            }
+            | PersistenceCommand::BulkDeleteTasks {
+                before,
+                expected_revisions,
+                ..
+            } => {
+                for task in before {
+                    if task.id == old_id {
+                        task.id = new_id.to_string();
                     }
                 }
                 if let Some(revision) = expected_revisions.remove(old_id) {

@@ -17,12 +17,12 @@ use tuicore::{
 
 use crate::app::{
     ActiveLabelFilter, ActiveWorkspaceFilter, AppContext, AppMsg, SnoozeReturnFocus,
-    persist_task_order, task_agent_clarify_command, task_agent_command, task_detail::detail_escape,
-    task_reference,
+    TransientSelectionSource, persist_task_order, task_agent_commands_for,
+    task_detail::detail_escape, task_references_for,
 };
 use crate::app_keymap::keys;
 use crate::domain::{Task, TaskState, Workspace};
-use crate::persistence_coordinator::PersistenceCommand;
+use crate::persistence_coordinator::{PersistenceCommand, PersistenceSelectionInvocation};
 use crate::ui::responsive_split::ResponsiveSplit;
 use crate::ui::save_status::SaveStatusLine;
 use crate::ui::task_detail::TaskDetailForm;
@@ -86,9 +86,25 @@ pub(crate) struct CalendarWorkspace {
     label_filter: Vec<String>,
     active_workspace_filter: ActiveWorkspaceFilter,
     active_label_filter: ActiveLabelFilter,
+    active_selection_invocation: Option<PersistenceSelectionInvocation>,
 }
 
 impl CalendarWorkspace {
+    #[cfg(test)]
+    pub(crate) fn set_active_selection_invocation_for_test(
+        &mut self,
+        invocation: Option<PersistenceSelectionInvocation>,
+    ) {
+        self.active_selection_invocation = invocation;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn active_selection_invocation_for_test(
+        &self,
+    ) -> Option<PersistenceSelectionInvocation> {
+        self.active_selection_invocation
+    }
+
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn new(context: AppContext, show_weekends: bool) -> Self {
         Self::new_with_create_context(context, show_weekends, CalendarCreateContext::new())
@@ -155,15 +171,26 @@ impl CalendarWorkspace {
             label_filter,
             active_workspace_filter,
             active_label_filter,
+            active_selection_invocation: None,
         }
     }
 
-    fn sync_store_version(&mut self) {
+    pub(crate) fn sync_store_version(&mut self) {
         let state = self.context.store.borrow().state().clone();
         let filter_options_changed = self.sync_filter_options(&state);
+        self.context.resolve_persistence_selection_outcomes();
+        if let Some(invocation) = self.active_selection_invocation
+            && self.context.take_selection_clear_request(invocation)
+        {
+            self.calendar_mut().clear_transient_selection();
+        }
         if self.observed_version == state.version && !filter_options_changed {
             return;
         }
+        let rollback_highlight = self.active_selection_invocation.and_then(|invocation| {
+            self.context
+                .rollback_transient_selection_highlight(invocation)
+        });
         self.observed_version = state.version;
         let entries = filtered_snoozed_task_entries(
             &state.tasks,
@@ -172,6 +199,11 @@ impl CalendarWorkspace {
             &self.label_filter,
         );
         self.set_calendar_entries(entries);
+        if let Some(task_id) = rollback_highlight {
+            if self.visible_entries.iter().any(|entry| entry.id == task_id) {
+                self.calendar_mut().highlight_entry_id(&task_id);
+            }
+        }
         self.select_created_task();
         if let Some(value) = state.app_setting_values.get(SHOW_WEEKENDS_SETTING)
             && let Ok(show) = parse_show_weekends_setting(Some(value))
@@ -340,6 +372,11 @@ impl CalendarWorkspace {
         self.pane.first()
     }
 
+    #[cfg(test)]
+    pub(crate) fn transient_selected_task_ids(&self) -> Vec<String> {
+        self.calendar().transient_selected_ids()
+    }
+
     fn calendar_mut(&mut self) -> &mut TaskCalendar {
         self.pane.first_mut()
     }
@@ -385,7 +422,7 @@ impl CalendarWorkspace {
         self.empty_state.set_message(self.empty_day_message());
     }
 
-    fn highlighted_task_id(&self) -> Option<String> {
+    pub(crate) fn highlighted_task_id(&self) -> Option<String> {
         (self.calendar().current_view() == CalendarView::Day)
             .then(|| self.calendar().highlighted_entry_id())
             .flatten()
@@ -451,7 +488,7 @@ impl CalendarWorkspace {
         for event in calendar_events {
             if let CalendarTypedEvent::EntriesReordered { entry_ids } = event {
                 let state = self.context.store.borrow().state().clone();
-                reordered |= persist_task_order(&self.context, &state, &entry_ids);
+                reordered |= persist_task_order(&self.context, &state, &entry_ids, None);
             }
         }
         if reordered {
@@ -470,7 +507,7 @@ impl CalendarWorkspace {
     }
 
     fn handle_task_shortcut(
-        &self,
+        &mut self,
         outcome: EventOutcome,
         event: &TuiEvent,
         return_focus: Option<tuicore::TreePath>,
@@ -480,49 +517,122 @@ impl CalendarWorkspace {
         if outcome.handled() {
             return outcome;
         }
-        let Some(task_id) = self.highlighted_task_id() else {
+        let Some((task_ids, time, has_selection)) = self.calendar_action_selection() else {
             return outcome;
         };
+        let group_action = keys::TASK_QUICK_MENU.matches(event)
+            || keys::TASK_SNOOZE.matches(event)
+            || keys::TASK_DELETE_CTRL_X.matches(event)
+            || keys::TASK_COMPLETE.matches(event)
+            || keys::TASK_TOGGLE_PROGRESS.matches(event);
+        let selection_invocation = if has_selection && group_action {
+            self.context.begin_transient_selection(
+                TransientSelectionSource::Calendar,
+                task_ids.clone(),
+                self.highlighted_task_id(),
+            )
+        } else {
+            None
+        };
+        self.active_selection_invocation = selection_invocation;
         let message = if keys::TASK_QUICK_MENU.matches(event) {
-            self.context
-                .store
-                .borrow()
-                .state()
-                .tasks
-                .iter()
-                .find(|task| task.id == task_id)
-                .and_then(|task| task.snoozed_until)
-                .map(|time| AppMsg::OpenCalendarTaskQuickMenu { task_id, time })
+            Some(AppMsg::OpenCalendarTasksQuickMenu {
+                task_ids,
+                time,
+                selection_active: has_selection,
+            })
         } else if keys::TASK_SNOOZE.matches(event) {
-            Some(AppMsg::OpenTaskSnooze {
-                task_id,
-                return_focus: snooze_return_focus,
-            })
+            has_selection
+                .then_some(AppMsg::OpenCalendarTasksSnooze(task_ids.clone()))
+                .or_else(|| {
+                    Some(AppMsg::OpenTaskSnooze {
+                        task_id: task_ids[0].clone(),
+                        return_focus: snooze_return_focus,
+                    })
+                })
         } else if keys::TASK_DELETE_CTRL_X.matches(event) {
-            Some(AppMsg::OpenDeleteTask {
-                task_id,
-                return_focus,
-            })
+            has_selection
+                .then_some(AppMsg::OpenCalendarDeleteTasks(task_ids.clone()))
+                .or_else(|| {
+                    Some(AppMsg::OpenCalendarDeleteTask {
+                        task_id: task_ids[0].clone(),
+                        return_focus,
+                    })
+                })
         } else if keys::TASK_COMPLETE.matches(event) {
-            Some(AppMsg::OpenCompleteTask {
-                task_id,
-                return_focus,
-            })
+            has_selection
+                .then_some(AppMsg::OpenCalendarCompleteTasks(task_ids.clone()))
+                .or_else(|| {
+                    Some(AppMsg::OpenCalendarCompleteTask {
+                        task_id: task_ids[0].clone(),
+                        return_focus,
+                    })
+                })
         } else if keys::TASK_TOGGLE_PROGRESS.matches(event) {
-            Some(AppMsg::ToggleTaskProgress(task_id))
+            if has_selection {
+                let state = self.context.store.borrow();
+                let selected = state
+                    .state()
+                    .tasks
+                    .iter()
+                    .filter(|task| task_ids.contains(&task.id))
+                    .collect::<Vec<_>>();
+                let state = if selected.iter().all(|task| task.state == TaskState::Todo) {
+                    TaskState::InProgress
+                } else {
+                    TaskState::Todo
+                };
+                Some(AppMsg::CompleteCalendarTasks { task_ids, state })
+            } else {
+                Some(AppMsg::ToggleCalendarTaskProgress(task_ids[0].clone()))
+            }
         } else {
             None
         };
         if let Some(message) = message {
-            ctx.emit(message);
+            ctx.emit(crate::app::selection_action(selection_invocation, message));
             ctx.stop_propagation();
             return EventOutcome::Handled;
         }
         outcome
     }
 
+    fn calendar_action_selection(&self) -> Option<(Vec<String>, Option<PrimitiveDateTime>, bool)> {
+        let selected = self.calendar().transient_selected_ids();
+        if selected.is_empty() {
+            let task_id = self.highlighted_task_id()?;
+            let time = self
+                .context
+                .store
+                .borrow()
+                .state()
+                .tasks
+                .iter()
+                .find(|task| task.id == task_id)
+                .and_then(|task| task.snoozed_until);
+            Some((vec![task_id], time, false))
+        } else {
+            let state = self.context.store.borrow();
+            let times = selected
+                .iter()
+                .filter_map(|task_id| {
+                    state
+                        .state()
+                        .tasks
+                        .iter()
+                        .find(|task| task.id == *task_id)
+                        .and_then(|task| task.snoozed_until)
+                })
+                .collect::<Vec<_>>();
+            let time = times.first().copied().filter(|time| {
+                times.len() == selected.len() && times.iter().all(|item| item == time)
+            });
+            Some((selected, time, true))
+        }
+    }
+
     fn handle_task_agent_yank(
-        &self,
+        &mut self,
         event: &TuiEvent,
         ctx: &mut EventCtx<AppMsg>,
     ) -> Option<EventOutcome> {
@@ -534,32 +644,70 @@ impl CalendarWorkspace {
         {
             return None;
         }
-        let task_id = self.highlighted_task_id()?;
+        let (task_ids, _, selected_group) = self.calendar_action_selection()?;
         let state = self.context.store.borrow();
+        let tasks = crate::app::tasks_for_ids(state.state(), &task_ids);
         let command = if sequence == &keys::TASK_AGENT_YANK.hotkey() {
-            task_agent_command(state.state(), &task_id)
+            task_agent_commands_for(state.state(), &tasks, "execute")
         } else {
-            task_agent_clarify_command(state.state(), &task_id)
+            task_agent_commands_for(state.state(), &tasks, "clarify")
         };
+        drop(state);
         if let Some(command) = command {
+            let selection_invocation = if selected_group {
+                self.context.begin_transient_selection(
+                    TransientSelectionSource::Calendar,
+                    task_ids.clone(),
+                    self.highlighted_task_id(),
+                )
+            } else {
+                None
+            };
+            self.active_selection_invocation = selection_invocation;
+            self.context
+                .accept_transient_clipboard(selection_invocation);
             ctx.copy_to_clipboard(command);
+            if selection_invocation
+                .is_some_and(|invocation| self.context.take_selection_clear_request(invocation))
+            {
+                self.calendar_mut().clear_transient_selection();
+            }
         }
         ctx.stop_propagation();
         Some(EventOutcome::Handled)
     }
 
     fn handle_task_reference_yank(
-        &self,
+        &mut self,
         event: &TuiEvent,
         ctx: &mut EventCtx<AppMsg>,
     ) -> Option<EventOutcome> {
         if !matches!(event, TuiEvent::Yank) {
             return None;
         }
-        let task_id = self.highlighted_task_id()?;
+        let (task_ids, _, selected_group) = self.calendar_action_selection()?;
         let state = self.context.store.borrow();
-        if let Some(payload) = task_reference(state.state(), &task_id) {
-            ctx.copy_to_clipboard(payload);
+        let tasks = crate::app::tasks_for_ids(state.state(), &task_ids);
+        if !tasks.is_empty() {
+            let selection_invocation = if selected_group {
+                self.context.begin_transient_selection(
+                    TransientSelectionSource::Calendar,
+                    task_ids.clone(),
+                    self.highlighted_task_id(),
+                )
+            } else {
+                None
+            };
+            self.active_selection_invocation = selection_invocation;
+            self.context
+                .accept_transient_clipboard(selection_invocation);
+            ctx.copy_to_clipboard(task_references_for(state.state(), &tasks));
+            drop(state);
+            if selection_invocation
+                .is_some_and(|invocation| self.context.take_selection_clear_request(invocation))
+            {
+                self.calendar_mut().clear_transient_selection();
+            }
         }
         ctx.stop_propagation();
         Some(EventOutcome::Handled)
@@ -673,6 +821,7 @@ fn task_calendar(entries: Vec<SnoozedTaskEntry>) -> TaskCalendar {
         |entry| format!("{} {}", entry.display_id, entry.title),
     )
     .render_entry(|entry| calendar_task_title_line(&entry.display_id, &entry.title))
+    .wrap_day_entries()
     .compact_summary_title(100, |entry| entry.title.clone())
     .hotkey(keys::TASK_AGENT_YANK.hotkey())
     .bordered(false)
@@ -1220,6 +1369,55 @@ mod tests {
     }
 
     #[test]
+    fn calendar_persists_a_shift_selected_day_block_move() {
+        let until = current_date().with_time(Time::from_hms(8, 0, 0).unwrap());
+        let tasks = ["first", "second", "third", "fourth"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, id)| {
+                let mut task = task(id, id, TaskState::Snoozed, Some(until));
+                task.rank = index as i64 + 1;
+                task
+            })
+            .collect();
+        let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+            tasks,
+            people: Vec::new(),
+            workspaces: Vec::new(),
+            tags: Vec::new(),
+        });
+        let mut workspace = CalendarWorkspace::new(context, true);
+        workspace.calendar_mut().on_key(Key::Char('D'));
+
+        for key in [
+            KeyEvent {
+                code: Key::Char('j'),
+                modifiers: KeyModifiers::SHIFT,
+            },
+            KeyEvent {
+                code: Key::Char('m'),
+                modifiers: KeyModifiers::CONTROL,
+            },
+            KeyEvent::from(Key::Down),
+            KeyEvent::from(Key::Enter),
+        ] {
+            workspace.event(&TuiEvent::Key(key), &mut EventCtx::default());
+        }
+
+        let state = store.borrow();
+        let ordered = state
+            .state()
+            .tasks
+            .iter()
+            .map(|task| (task.id.as_str(), task.rank))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ordered,
+            vec![("first", 2), ("second", 3), ("third", 1), ("fourth", 4)]
+        );
+    }
+
+    #[test]
     fn removing_day_view_tasks_selects_next_then_previous_then_nothing() {
         let until = current_date().with_time(Time::from_hms(8, 0, 0).unwrap());
         let tasks = [
@@ -1474,7 +1672,7 @@ mod tests {
     }
 
     #[test]
-    fn day_view_quick_menu_targets_the_highlighted_task() {
+    fn day_view_quick_menu_opens_a_group_menu_for_the_highlighted_task() {
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
             tasks: Vec::new(),
             people: Vec::new(),
@@ -1514,7 +1712,12 @@ mod tests {
         assert!(outcome.handled());
         assert!(matches!(
             ctx.messages(),
-            [AppMsg::OpenCalendarTaskQuickMenu { task_id, time }] if task_id == "highlighted" && *time == until
+            [AppMsg::OpenCalendarTasksQuickMenu {
+                task_ids,
+                time,
+                selection_active: false,
+            }]
+                if task_ids == &vec!["highlighted".to_string()] && *time == Some(until)
         ));
     }
 
@@ -1573,6 +1776,56 @@ mod tests {
             effects.clipboard.as_deref(),
             Some("Tuido 1234 \"Calendar task\"")
         );
+    }
+
+    #[test]
+    fn day_view_group_yanks_copy_selected_tasks_then_clear_selection() {
+        let today = current_date();
+        let until = today.with_time(Time::from_hms(8, 0, 0).unwrap());
+        let mut first = task("1", "First \"quoted\"", TaskState::Snoozed, Some(until));
+        first.rank = 1;
+        let mut second = task("2", "Second \\ path", TaskState::Snoozed, Some(until));
+        second.rank = 2;
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks: vec![first, second],
+            people: Vec::new(),
+            workspaces: Vec::new(),
+            tags: Vec::new(),
+        });
+        let mut workspace = CalendarWorkspace::new(context, true);
+        workspace.calendar_mut().on_key(Key::Char('D'));
+
+        for (event, expected) in [
+            (
+                TuiEvent::Hotkey(HotkeyEvent::Commit(keys::TASK_AGENT_YANK.hotkey())),
+                r#"Tuido execute 1 "First \"quoted\""; 2 "Second \\ path""#,
+            ),
+            (
+                TuiEvent::Hotkey(HotkeyEvent::Commit(keys::TASK_AGENT_YANK_CLARIFY.hotkey())),
+                r#"Tuido clarify 1 "First \"quoted\""; 2 "Second \\ path""#,
+            ),
+            (
+                TuiEvent::Yank,
+                r#"Tuido 1 "First \"quoted\""; 2 "Second \\ path""#,
+            ),
+        ] {
+            workspace
+                .calendar_mut()
+                .highlight_entry_id(&"1".to_string());
+            workspace.event(
+                &TuiEvent::Key(KeyEvent {
+                    code: Key::Down,
+                    modifiers: KeyModifiers::SHIFT,
+                }),
+                &mut EventCtx::default(),
+            );
+            let mut ctx = EventCtx::default();
+
+            workspace.event(&event, &mut ctx);
+
+            assert_eq!(ctx.clipboard_request(), Some(expected));
+            assert!(workspace.transient_selected_task_ids().is_empty());
+        }
     }
 
     #[test]
@@ -1826,7 +2079,7 @@ mod tests {
         assert!(delete.handled());
         assert!(matches!(
             delete_ctx.messages(),
-            [AppMsg::OpenDeleteTask { task_id, return_focus: Some(_) }]
+            [AppMsg::OpenCalendarDeleteTask { task_id, return_focus: Some(_) }]
                 if task_id == "snoozed"
         ));
 
@@ -1835,7 +2088,7 @@ mod tests {
         assert!(complete.handled());
         assert!(matches!(
             complete_ctx.messages(),
-            [AppMsg::OpenCompleteTask { task_id, return_focus: Some(_) }]
+            [AppMsg::OpenCalendarCompleteTask { task_id, return_focus: Some(_) }]
                 if task_id == "snoozed"
         ));
 
@@ -1844,7 +2097,7 @@ mod tests {
         assert!(progress.handled());
         assert!(matches!(
             progress_ctx.messages(),
-            [AppMsg::ToggleTaskProgress(task_id)] if task_id == "snoozed"
+            [AppMsg::ToggleCalendarTaskProgress(task_id)] if task_id == "snoozed"
         ));
     }
 
@@ -1910,13 +2163,67 @@ mod tests {
                     assert_eq!(*date, workspace.today);
                     assert!(!has_other_tasks);
                 }
-                ('x', [AppMsg::OpenDeleteTask { return_focus, .. }])
-                | ('c', [AppMsg::OpenCompleteTask { return_focus, .. }]) => {
+                ('x', [AppMsg::OpenCalendarDeleteTask { return_focus, .. }])
+                | ('c', [AppMsg::OpenCalendarCompleteTask { return_focus, .. }]) => {
                     assert_eq!(return_focus.as_ref(), Some(&calendar_path));
                 }
                 _ => panic!("calendar shortcut should open its task dialog"),
             }
         }
+    }
+
+    #[test]
+    fn calendar_snooze_shortcut_targets_sparse_selection() {
+        let until = workspace_time(8);
+        let tasks = ["first", "second", "third"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, id)| {
+                let mut task = task(id, id, TaskState::Snoozed, Some(until));
+                task.rank = index as i64 + 1;
+                task
+            })
+            .collect();
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks,
+            people: Vec::new(),
+            workspaces: Vec::new(),
+            tags: Vec::new(),
+        });
+        let mut workspace = CalendarWorkspace::new(context, true);
+        workspace.calendar_mut().on_key(Key::Char('D'));
+        for key in [
+            KeyEvent {
+                code: Key::Down,
+                modifiers: KeyModifiers::CONTROL,
+            },
+            KeyEvent {
+                code: Key::Down,
+                modifiers: KeyModifiers::CONTROL,
+            },
+            KeyEvent {
+                code: Key::Char(' '),
+                modifiers: KeyModifiers::CONTROL,
+            },
+        ] {
+            workspace.event(&TuiEvent::Key(key), &mut EventCtx::default());
+        }
+        let mut ctx = EventCtx::default();
+
+        workspace.event(
+            &TuiEvent::Key(KeyEvent {
+                code: Key::Char('z'),
+                modifiers: KeyModifiers::CONTROL,
+            }),
+            &mut ctx,
+        );
+
+        assert!(matches!(
+            ctx.messages(),
+            [AppMsg::SelectionAction { action, .. }]
+                if matches!(action.as_ref(), AppMsg::OpenCalendarTasksSnooze(task_ids)
+                    if task_ids == &vec!["first".to_string(), "third".to_string()])
+        ));
     }
 
     #[test]

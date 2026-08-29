@@ -348,6 +348,28 @@ pub(super) fn delete_task_dialog(task: &Task) -> AppDialog {
     AppDialog::DeleteTask(dialog)
 }
 
+pub(super) fn delete_tasks_dialog(
+    tasks: &[Task],
+    selection_invocation: Option<crate::persistence_coordinator::PersistenceSelectionInvocation>,
+) -> AppDialog {
+    let task_ids = tasks.iter().map(|task| task.id.clone()).collect::<Vec<_>>();
+    let count = task_ids.len();
+    let description = format!("Delete {count} tasks? This cannot be undone.");
+    let dialog = ConfirmationDialog::new(format!("Delete {count} tasks?"), &description)
+        .yes_text("Delete")
+        .yes_hotkey(keys::DELETE_CONFIRM.key_spec())
+        .on_outcome(move |outcome| match outcome {
+            ConfirmationDialogOutcome::Confirmed => crate::app::selection_action(
+                selection_invocation,
+                AppMsg::DeleteTasksConfirmed(task_ids.clone()),
+            ),
+            ConfirmationDialogOutcome::Cancelled | ConfirmationDialogOutcome::Closed(_) => {
+                crate::app::selection_action(selection_invocation, AppMsg::CloseDeleteTaskDialog)
+            }
+        });
+    AppDialog::DeleteTask(dialog)
+}
+
 pub(super) fn delete_note_dialog(note_id: String) -> AppDialog {
     let dialog =
         ConfirmationDialog::new("Delete note?", "Delete this note? This cannot be undone.")
@@ -392,5 +414,58 @@ pub(super) fn complete_task_dialog(task: &Task) -> AppDialog {
                     .on_trigger(|| AppMsg::CloseCompleteTaskDialog),
             ])
             .on_close(|_| AppMsg::CloseCompleteTaskDialog),
+    )
+}
+
+pub(super) fn complete_tasks_dialog(
+    tasks: &[Task],
+    selection_invocation: Option<crate::persistence_coordinator::PersistenceSelectionInvocation>,
+) -> AppDialog {
+    let task_ids = tasks.iter().map(|task| task.id.clone()).collect::<Vec<_>>();
+    let count = task_ids.len();
+    let done_task_ids = task_ids.clone();
+    let rejected_task_ids = task_ids.clone();
+    AppDialog::Generic(
+        Dialog::new()
+            .top_left(format!("Complete {count} tasks?"))
+            .content([format!("Choose an outcome for {count} tasks.")])
+            .keybindings(tuicore::DialogKeyBindings {
+                close: vec![keys::DIALOG_CLOSE.key_spec()],
+            })
+            .actions([
+                tuicore::DialogAction::new("Done")
+                    .hotkey(keys::COMPLETE_DONE.key_spec())
+                    .on_trigger(move || {
+                        crate::app::selection_action(
+                            selection_invocation,
+                            AppMsg::CompleteTasks {
+                                task_ids: done_task_ids.clone(),
+                                state: TaskState::Done,
+                            },
+                        )
+                    }),
+                tuicore::DialogAction::new("Reject")
+                    .hotkey(keys::COMPLETE_REJECT.key_spec())
+                    .on_trigger(move || {
+                        crate::app::selection_action(
+                            selection_invocation,
+                            AppMsg::CompleteTasks {
+                                task_ids: rejected_task_ids.clone(),
+                                state: TaskState::Rejected,
+                            },
+                        )
+                    }),
+                tuicore::DialogAction::new("Cancel")
+                    .hotkey(keys::DIALOG_CANCEL.key_spec())
+                    .on_trigger(move || {
+                        crate::app::selection_action(
+                            selection_invocation,
+                            AppMsg::CloseCompleteTaskDialog,
+                        )
+                    }),
+            ])
+            .on_close(move |_| {
+                crate::app::selection_action(selection_invocation, AppMsg::CloseCompleteTaskDialog)
+            }),
     )
 }

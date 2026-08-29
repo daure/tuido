@@ -215,6 +215,7 @@ pub enum AppEvent {
     },
     TaskCreated(Task),
     TaskDeleted(String),
+    TasksRestored(Vec<Task>),
     TaskRanksChanged(Vec<TaskRank>),
     SelectTask(String),
     PatchTask {
@@ -263,6 +264,10 @@ pub enum AppEvent {
     EntityRevisionCommitted {
         key: String,
         revision: Option<u64>,
+    },
+    BulkTaskMutationCommitted {
+        revisions: HashMap<String, u64>,
+        deleted_task_ids: Vec<String>,
     },
     WorkspaceRevisionCommitted,
     EntityRevisionsMerged(HashMap<String, u64>),
@@ -529,6 +534,54 @@ pub fn reduce_app_state(state: &mut AppState, event: AppEvent) -> DispatchOutcom
             }
             state.version += 1;
             DispatchOutcome::layout()
+        }
+        AppEvent::TasksRestored(tasks) => {
+            let restored_tasks = tasks;
+            let mut changed = false;
+            for task in &restored_tasks {
+                if let Some(existing) = state
+                    .tasks
+                    .iter_mut()
+                    .find(|existing| existing.id == task.id)
+                {
+                    if *existing != *task {
+                        *existing = task.clone();
+                        changed = true;
+                    }
+                } else {
+                    state.tasks.push(task.clone());
+                    changed = true;
+                }
+            }
+            for task in &restored_tasks {
+                for relation in &task.relations {
+                    let inverse = TaskRelation {
+                        task_id: task.id.clone(),
+                        kind: relation.kind.inverse(),
+                    };
+                    if let Some(related) = state
+                        .tasks
+                        .iter_mut()
+                        .find(|related| related.id == relation.task_id)
+                        && !related.relations.contains(&inverse)
+                    {
+                        related.relations.push(inverse);
+                        changed = true;
+                    }
+                }
+            }
+            if state.selected_task_id.is_none()
+                && let Some(task) = restored_tasks.first()
+            {
+                state.selected_task_id = Some(task.id.clone());
+                changed = true;
+            }
+            if changed {
+                state.version += 1;
+                DispatchOutcome::layout()
+            } else {
+                DispatchOutcome::unchanged()
+            }
         }
         AppEvent::TaskRanksChanged(ranks) => {
             let mut changed = false;
@@ -910,6 +963,17 @@ pub fn reduce_app_state(state: &mut AppState, event: AppEvent) -> DispatchOutcom
                 state.entity_revisions.insert(key, revision);
             } else {
                 state.entity_revisions.remove(&key);
+            }
+            state.workspace_revision += 1;
+            DispatchOutcome::unchanged()
+        }
+        AppEvent::BulkTaskMutationCommitted {
+            revisions,
+            deleted_task_ids,
+        } => {
+            state.entity_revisions.extend(revisions);
+            for id in deleted_task_ids {
+                state.entity_revisions.remove(&format!("task:{id}"));
             }
             state.workspace_revision += 1;
             DispatchOutcome::unchanged()

@@ -6,9 +6,9 @@ use std::{
 
 use ratatui::{Frame, layout::Rect};
 use tuicore::{
-    AnimationSettings, EventCtx, EventOutcome, EventRoute, Flex, FlexItem, FocusCtx, FocusId,
-    FocusTarget, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, RenderCtx,
-    ScrollContainer, TickResult, TuiEvent, TuiNode,
+    AnimationSettings, ChildKey, ChildSlot, EventCtx, EventOutcome, EventRoute, Flex, FlexItem,
+    FocusCtx, FocusId, FocusTarget, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint,
+    LifecycleCtx, RenderCtx, ScrollContainer, TickResult, TuiEvent, TuiNode,
 };
 
 use crate::{
@@ -27,7 +27,7 @@ pub(crate) type PatchSink = Rc<RefCell<Vec<TaskPatch>>>;
 pub(crate) type TaskDetailCatalogs<'a> = (&'a [Task], &'a [Person], &'a [Workspace], &'a [Tag]);
 
 pub(crate) struct TaskDetailForm {
-    root: ScrollContainer<Flex<AppMsg>, AppMsg>,
+    root: ScrollContainer<TaskDetailFormBody, AppMsg>,
     pub(crate) task_id: Option<String>,
     pub(crate) task_state: Option<TaskState>,
     pub(crate) task_snapshot: Option<Task>,
@@ -56,19 +56,15 @@ impl TaskDetailForm {
         let save_status = SaveStatusLine::new(save_error);
         let description_max_rows = Rc::new(Cell::new(None));
         Self {
-            root: ScrollContainer::vertical(Flex::column().child(
-                "form",
-                detail_form(
-                    task,
-                    (tasks, people, workspaces, tags),
-                    Rc::clone(&patches),
-                    Rc::clone(&checklist_highlighted_id),
-                    None,
-                    save_status.clone(),
-                    Rc::clone(&description_max_rows),
-                ),
-                FlexItem::content(),
-            ))
+            root: ScrollContainer::vertical(TaskDetailFormBody::new(detail_form(
+                task,
+                (tasks, people, workspaces, tags),
+                Rc::clone(&patches),
+                Rc::clone(&checklist_highlighted_id),
+                None,
+                save_status.clone(),
+                Rc::clone(&description_max_rows),
+            )))
             .focus_reveal(true),
             task_id: task.map(|task| task.id.clone()),
             task_state: task.map(|task| task.state),
@@ -118,23 +114,18 @@ impl TaskDetailForm {
         self.tags_snapshot = tags.to_vec();
         self.save_status = SaveStatusLine::new(save_error);
         let highlighted_issue_link_task_id = self.pending_issue_link_highlight.take();
-        self.root
-            .child_mut()
-            .replace(
-                "form",
-                detail_form(
-                    task,
-                    catalogs,
-                    Rc::clone(&self.patches),
-                    Rc::clone(&self.checklist_highlighted_id),
-                    highlighted_issue_link_task_id.as_deref(),
-                    self.save_status.clone(),
-                    Rc::clone(&self.description_max_rows),
-                ),
-                FlexItem::content(),
-                ctx,
-            )
-            .expect("detail form host should contain form child");
+        self.root.child_mut().replace(
+            detail_form(
+                task,
+                catalogs,
+                Rc::clone(&self.patches),
+                Rc::clone(&self.checklist_highlighted_id),
+                highlighted_issue_link_task_id.as_deref(),
+                self.save_status.clone(),
+                Rc::clone(&self.description_max_rows),
+            ),
+            ctx,
+        );
     }
 
     pub(crate) fn set_save_error(&self, save_error: Option<&str>) {
@@ -145,7 +136,7 @@ impl TaskDetailForm {
         self.pending_issue_link_highlight = Some(task_id);
     }
 
-    pub(crate) fn set_layout_limits(&self, narrow: bool, height: u16) {
+    pub(crate) fn set_layout_limits(&mut self, narrow: bool, height: u16) {
         let max_rows = if narrow {
             usize::from(TASK_DESCRIPTION_NARROW_MAX_CONTENT_ROWS)
         } else {
@@ -154,6 +145,81 @@ impl TaskDetailForm {
                 .max(usize::from(TASK_DESCRIPTION_DESKTOP_MIN_CONTENT_ROWS))
         };
         self.description_max_rows.set(Some(max_rows));
+        self.root.child_mut().set_description_item(if narrow {
+            FlexItem::fill_min(
+                1,
+                TASK_DESCRIPTION_DESKTOP_MIN_CONTENT_ROWS.saturating_add(2),
+            )
+        } else {
+            FlexItem::content().shrink(1)
+        });
+    }
+}
+
+struct TaskDetailFormBody {
+    form: ChildSlot<Flex<AppMsg>, AppMsg>,
+}
+
+impl TaskDetailFormBody {
+    fn new(form: Flex<AppMsg>) -> Self {
+        Self {
+            form: ChildSlot::new(ChildKey::new("form"), form),
+        }
+    }
+
+    fn replace(&mut self, form: Flex<AppMsg>, ctx: &mut EventCtx<AppMsg>) {
+        self.form.replace(form, ctx);
+    }
+
+    fn set_description_item(&mut self, item: FlexItem) {
+        self.form.child_mut().set_item("description", item);
+    }
+}
+
+impl TuiNode<AppMsg> for TaskDetailFormBody {
+    fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
+        self.form.measure(proposal)
+    }
+
+    fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
+        self.form.layout(area, ctx)
+    }
+
+    fn render<'a>(&'a self, frame: &mut Frame, area: Rect, ctx: &mut RenderCtx<'a>) {
+        self.form.render(frame, area, ctx);
+    }
+
+    fn dispatch_event(
+        &mut self,
+        route: &EventRoute,
+        event: &TuiEvent,
+        ctx: &mut EventCtx<AppMsg>,
+    ) -> EventOutcome {
+        self.form.dispatch_event(route, event, ctx)
+    }
+
+    fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<AppMsg>) {
+        self.form.dispatch_focus(target, focused, ctx);
+    }
+
+    fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
+        self.form.tick(dt, settings)
+    }
+
+    fn init(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
+        self.form.init(ctx);
+    }
+
+    fn mount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
+        self.form.mount(ctx);
+    }
+
+    fn unmount(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
+        self.form.unmount(ctx);
+    }
+
+    fn destroy(&mut self, ctx: &mut LifecycleCtx<AppMsg>) {
+        self.form.destroy(ctx);
     }
 }
 

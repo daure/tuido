@@ -19,8 +19,18 @@ impl TaskCopyContext {
     }
 
     pub(super) fn reference(&self, task: &Task) -> String {
-        let title = task.title.replace('\\', "\\\\").replace('"', "\\\"");
-        format!("Tuido {} \"{title}\"", self.display_id(task))
+        format!("Tuido {}", self.entry(task))
+    }
+
+    pub(super) fn references(&self, tasks: &[Task]) -> String {
+        format!(
+            "Tuido {}",
+            tasks
+                .iter()
+                .map(|task| self.entry(task))
+                .collect::<Vec<_>>()
+                .join("; ")
+        )
     }
 
     pub(super) fn display_id(&self, task: &Task) -> String {
@@ -29,5 +39,14 @@ impl TaskCopyContext {
             .as_deref()
             .and_then(|workspace_id| self.workspaces.get(workspace_id));
         task_display_id(task, workspace)
+    }
+
+    fn entry(&self, task: &Task) -> String {
+        format!("{} {}", self.display_id(task), Self::quoted_title(task))
+    }
+
+    pub(super) fn quoted_title(task: &Task) -> String {
+        let title = task.title.replace('\\', "\\\\").replace('"', "\\\"");
+        format!("\"{title}\"")
     }
 }
