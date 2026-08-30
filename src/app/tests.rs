@@ -800,7 +800,10 @@ fn new_note_from_tasks_switches_to_notes_and_focuses_notes_tab_content() {
     let note_id = state.state().notes[0].value.id.clone();
     assert_eq!(
         ctx.focus_request(),
-        Some(&notes_first_child_focus_request())
+        Some(&FocusRequest::Path(note_path(
+            notes_workspace_focus_path(),
+            &note_id,
+        )))
     );
     drop(state);
     let mut layout = LayoutCtx::new();
@@ -1109,10 +1112,7 @@ fn task_creation_from_notes_restores_cancel_focus_and_submission_focuses_tasks()
     let open = dispatcher.dispatch_event(
         &mut app,
         &route,
-        &TuiEvent::Key(KeyEvent {
-            code: Key::Char('k'),
-            modifiers: KeyModifiers::SHIFT,
-        }),
+        &TuiEvent::Hotkey(HotkeyEvent::Commit(keys::TASK_QUICK_CREATE.hotkey())),
         AnimationSettings::default(),
     );
     assert!(open.outcome.handled());
@@ -2721,7 +2721,7 @@ fn rendered_area_has_focus_style(node: &impl TuiNode<AppMsg>, canvas: Rect, area
 }
 
 #[test]
-fn task_header_shows_new_to_the_left_of_filters() {
+fn task_tab_shows_new_actions_and_filters_below_tabs() {
     assert_eq!(
         TaskView::OPTIONS,
         [
@@ -2763,8 +2763,8 @@ fn task_header_shows_new_to_the_left_of_filters() {
         &keys::TASK_LABEL_FILTER.label(),
         "󰲋 Space",
         " Tags",
-        "Task |K|",
-        "Note |N|",
+        &format!("Task |{}|", keys::TASK_QUICK_CREATE.label()),
+        &format!("Note |{}|", keys::NOTE_QUICK_CREATE.label()),
     ] {
         assert!(
             text.contains(expected),
@@ -2775,13 +2775,16 @@ fn task_header_shows_new_to_the_left_of_filters() {
         .find("󰲋 Space")
         .expect("workspace filter should render");
     let labels = text.find(" Tags").expect("tag filter should render");
+    let tabs = text
+        .find("Tasks · Calendar · Notes")
+        .expect("tabs should render");
     let new_task = text
-        .find("Task |K|")
+        .find(&format!("Task |{}|", keys::TASK_QUICK_CREATE.label()))
         .expect("new task button should render");
     let new_note = text
-        .find("Note |N|")
+        .find(&format!("Note |{}|", keys::NOTE_QUICK_CREATE.label()))
         .expect("new note button should render");
-    assert!(new_task < new_note && new_note < workspace && workspace < labels);
+    assert!(tabs < new_task && new_task < new_note && new_note < workspace && workspace < labels);
     assert!(!text.contains("View:"));
     assert!(!text.contains("Resolve"));
     assert!(!text.contains("Permanently"));
@@ -3722,7 +3725,7 @@ fn ctrl_x_removes_highlighted_task_link() {
 }
 
 #[test]
-fn app_header_exposes_separate_task_and_note_actions() {
+fn task_tab_exposes_separate_task_and_note_actions() {
     let (_runtime, context, store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
@@ -3748,7 +3751,7 @@ fn app_header_exposes_separate_task_and_note_actions() {
                 .iter()
                 .any(|part| part.as_str() == "new-task")
         })
-        .expect("missing app header new task button");
+        .expect("missing task tab new task button");
     let note_button = layout
         .focus_targets()
         .iter()
@@ -3759,7 +3762,7 @@ fn app_header_exposes_separate_task_and_note_actions() {
                 .iter()
                 .any(|part| part.as_str() == "new-note")
         })
-        .expect("missing app header new note button");
+        .expect("missing task tab new note button");
     for component in ["workspace", "labels"] {
         let control = layout
             .focus_targets()
@@ -3771,8 +3774,8 @@ fn app_header_exposes_separate_task_and_note_actions() {
                     .iter()
                     .any(|part| part.as_str() == component)
             })
-            .unwrap_or_else(|| panic!("missing app header {component} control"));
-        assert_eq!(control.area.y, area.y);
+            .unwrap_or_else(|| panic!("missing task tab {component} control"));
+        assert_eq!(control.area.y, area.y.saturating_add(1));
         assert!(control.area.x > note_button.area.x);
     }
     let workspace = layout
@@ -3785,12 +3788,12 @@ fn app_header_exposes_separate_task_and_note_actions() {
                 .iter()
                 .any(|part| part.as_str() == "workspace")
         })
-        .expect("missing app header workspace control");
+        .expect("missing task tab workspace control");
     assert!(workspace.area.x > note_button.area.x);
-    assert_eq!(tabs.area.y, area.y.saturating_add(1));
-    assert_eq!(task_button.area.y, area.y);
+    assert_eq!(tabs.area.y, area.y);
+    assert_eq!(task_button.area.y, area.y.saturating_add(1));
     assert_eq!(task_button.area.x, area.x);
-    assert_eq!(note_button.area.y, area.y);
+    assert_eq!(note_button.area.y, area.y.saturating_add(1));
     assert!(note_button.area.x > task_button.area.x);
     let task_button_path = task_button.path.clone();
 
@@ -4143,6 +4146,66 @@ fn escape_from_global_filter_focuses_real_calendar_target() {
             path: calendar.path.clone(),
             id: calendar.id.clone(),
         })
+    );
+}
+
+#[test]
+fn first_tab_switches_focus_calendar_and_note_content() {
+    let note = test_note("note-0", 0);
+    let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+        tasks: vec![test_task()],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(store, context.coordinator);
+    set_notes(&mut app, vec![note]);
+    let area = Rect::new(0, 0, 100, 40);
+    let mut task_layout = LayoutCtx::new();
+    app.layout(area, &mut task_layout);
+    let task_path = task_layout
+        .focus_targets()
+        .iter()
+        .find(|target| target.id.as_str() == "data-view")
+        .expect("task table should be focusable")
+        .path
+        .clone();
+    let mut calendar_switch = EventCtx::default();
+
+    app.dispatch_event(
+        &EventRoute::new(task_path),
+        &TuiEvent::Key(Key::Char(']').into()),
+        &mut calendar_switch,
+    );
+
+    assert_eq!(
+        calendar_switch.focus_request(),
+        Some(&initial_calendar_focus_request())
+    );
+
+    let mut calendar_layout = LayoutCtx::new();
+    app.layout(area, &mut calendar_layout);
+    let calendar_path = calendar_layout
+        .focus_targets()
+        .iter()
+        .find(|target| target.id.as_str() == "calendar")
+        .expect("calendar should be focusable")
+        .path
+        .clone();
+    let mut notes_switch = EventCtx::default();
+
+    app.dispatch_event(
+        &EventRoute::new(calendar_path),
+        &TuiEvent::Key(Key::Char(']').into()),
+        &mut notes_switch,
+    );
+
+    assert_eq!(
+        notes_switch.focus_request(),
+        Some(&FocusRequest::Path(note_path(
+            notes_workspace_focus_path(),
+            "note-0",
+        )))
     );
 }
 

@@ -120,6 +120,69 @@ fn default_snooze_time() -> Time {
     parse_default_snooze_time(None).expect("default snooze time should be valid")
 }
 
+fn new_actions(
+    active_tab: Rc<Cell<usize>>,
+    calendar_create_context: CalendarCreateContext,
+) -> Flex<AppMsg> {
+    Flex::row()
+        .gap(1)
+        .child(
+            "new-task",
+            Button::new("Task")
+                .hotkey(keys::TASK_QUICK_CREATE.hotkey())
+                .hotkey_label_mode(HotkeyLabelMode::Inline)
+                .on_press(move || AppMsg::OpenCreateTask {
+                    calendar_date: (active_tab.get() == CALENDAR_TAB_INDEX)
+                        .then(|| calendar_create_context.selected_date()),
+                }),
+            FlexItem::content(),
+        )
+        .child(
+            "new-note",
+            Button::new("Note")
+                .hotkey(keys::NOTE_QUICK_CREATE.hotkey())
+                .hotkey_label_mode(HotkeyLabelMode::Inline)
+                .on_press(|| AppMsg::CreateNote),
+            FlexItem::content(),
+        )
+}
+
+fn tab_workspace<C>(
+    context: AppContext,
+    active_workspace_filter: ActiveWorkspaceFilter,
+    active_label_filter: ActiveLabelFilter,
+    active_tab: Rc<Cell<usize>>,
+    calendar_create_context: CalendarCreateContext,
+    workspace: C,
+) -> Flex<AppMsg>
+where
+    C: TuiNode<AppMsg> + 'static,
+{
+    let actions = Flex::row()
+        .justify(MainAlign::SpaceBetween)
+        .align(CrossAlign::Center)
+        .gap(1)
+        .child(
+            "new-actions",
+            new_actions(active_tab.clone(), calendar_create_context),
+            FlexItem::content(),
+        )
+        .child(
+            "filters",
+            TaskFilterControls::new(
+                context,
+                active_workspace_filter,
+                active_label_filter,
+                active_tab,
+            ),
+            FlexItem::content(),
+        );
+
+    Flex::column()
+        .child("actions", actions, FlexItem::fixed(1))
+        .child("workspace", workspace, FlexItem::fill(1))
+}
+
 fn stale_link_urls(task: &Task) -> Vec<String> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -805,87 +868,68 @@ impl App {
         let tabs = Tabs::new(vec![
             Tab::new(
                 "Tasks",
-                TaskWorkspace::new_with_filters(
+                tab_workspace(
                     context.clone(),
                     Rc::clone(&active_workspace_filter),
                     Rc::clone(&active_label_filter),
-                    Rc::clone(&pending_task_view),
-                    Rc::clone(&pending_task_navigation),
+                    Rc::clone(&active_tab),
+                    calendar_create_context.clone(),
+                    TaskWorkspace::new_with_filters(
+                        context.clone(),
+                        Rc::clone(&active_workspace_filter),
+                        Rc::clone(&active_label_filter),
+                        Rc::clone(&pending_task_view),
+                        Rc::clone(&pending_task_navigation),
+                    ),
                 ),
             ),
             Tab::new(
                 "Calendar",
-                CalendarWorkspace::new_with_create_context_and_filters(
+                tab_workspace(
                     context.clone(),
-                    show_calendar_weekends,
-                    calendar_create_context.clone(),
                     Rc::clone(&active_workspace_filter),
                     Rc::clone(&active_label_filter),
+                    Rc::clone(&active_tab),
+                    calendar_create_context.clone(),
+                    CalendarWorkspace::new_with_create_context_and_filters(
+                        context.clone(),
+                        show_calendar_weekends,
+                        calendar_create_context.clone(),
+                        Rc::clone(&active_workspace_filter),
+                        Rc::clone(&active_label_filter),
+                    ),
                 ),
             ),
             Tab::new(
                 "Notes",
-                NotesWorkspace::new()
-                    .note_store(Rc::clone(&context.store))
-                    .focus_path_sink(Rc::clone(&note_focus_path))
-                    .focus_note_request(Rc::clone(&focus_note_request))
-                    .new_note_edit_request(Rc::clone(&new_note_edit_request))
-                    .zoom_levels(notes_zoom)
-                    .on_zoom_change(AppMsg::SetNotesZoom)
-                    .on_speed_read(AppMsg::OpenNoteSpeedReader)
-                    .on_create(|| AppMsg::CreateNote)
-                    .on_change(AppMsg::PatchNote)
-                    .on_delete(AppMsg::OpenDeleteNote)
-                    .on_quick_menu(AppMsg::OpenNoteQuickMenu),
+                Flex::column()
+                    .child(
+                        "actions",
+                        new_actions(Rc::clone(&active_tab), calendar_create_context.clone()),
+                        FlexItem::fixed(1),
+                    )
+                    .child(
+                        "workspace",
+                        NotesWorkspace::new()
+                            .note_store(Rc::clone(&context.store))
+                            .focus_path_sink(Rc::clone(&note_focus_path))
+                            .focus_note_request(Rc::clone(&focus_note_request))
+                            .new_note_edit_request(Rc::clone(&new_note_edit_request))
+                            .zoom_levels(notes_zoom)
+                            .on_zoom_change(AppMsg::SetNotesZoom)
+                            .on_speed_read(AppMsg::OpenNoteSpeedReader)
+                            .on_create(|| AppMsg::CreateNote)
+                            .on_change(AppMsg::PatchNote)
+                            .on_delete(AppMsg::OpenDeleteNote)
+                            .on_quick_menu(AppMsg::OpenNoteQuickMenu),
+                        FlexItem::fill(1),
+                    ),
             ),
         ])
         .selected(0)
         .variant(TabsVariant::OneRow)
         .bordered(true);
-        let task_filters = TaskFilterControls::new(
-            context.clone(),
-            active_workspace_filter,
-            active_label_filter,
-            Rc::clone(&active_tab),
-        );
-        let new_actions = Flex::row()
-            .gap(1)
-            .child(
-                "new-task",
-                Button::new("Task")
-                    .hotkey(keys::TASK_QUICK_CREATE.hotkey())
-                    .hotkey_label_mode(HotkeyLabelMode::Inline)
-                    .on_press({
-                        let active_tab = Rc::clone(&active_tab);
-                        let calendar_create_context = calendar_create_context.clone();
-                        move || AppMsg::OpenCreateTask {
-                            calendar_date: (active_tab.get() == CALENDAR_TAB_INDEX)
-                                .then(|| calendar_create_context.selected_date()),
-                        }
-                    }),
-                FlexItem::content(),
-            )
-            .child(
-                "new-note",
-                Button::new("Note")
-                    .hotkey(keys::NOTE_QUICK_CREATE.hotkey())
-                    .hotkey_label_mode(HotkeyLabelMode::Inline)
-                    .on_press(|| AppMsg::CreateNote),
-                FlexItem::content(),
-            );
-        let actions = Flex::row()
-            .justify(MainAlign::SpaceBetween)
-            .align(CrossAlign::Center)
-            .gap(1)
-            .child("new-actions", new_actions, FlexItem::content())
-            .child("filters", task_filters, FlexItem::content());
-        let content = Flex::column()
-            .child("actions", actions, FlexItem::fixed(1))
-            .child(
-                "tabs",
-                TrackedTabs::new(tabs, Rc::clone(&active_tab)),
-                FlexItem::fill(1),
-            );
+        let content = TrackedTabs::new(tabs, Rc::clone(&active_tab));
 
         let root = Flex::column()
             .child("content", content, FlexItem::fill(1))
@@ -1252,7 +1296,10 @@ impl App {
             mode,
             content: None,
         });
-        ctx.focus(notes_first_child_focus_request());
+        ctx.focus(FocusRequest::Path(note_path(
+            notes_workspace_focus_path(),
+            &temporary_id,
+        )));
         self.context
             .coordinator
             .borrow_mut()
@@ -3086,6 +3133,39 @@ impl App {
             .unwrap_or_else(|| route.path.clone())
     }
 
+    fn redirect_initial_tab_focus(&self, ctx: &mut EventCtx<AppMsg>) {
+        let FocusRequest::TargetAt {
+            path: tabs_path,
+            id: tabs_id,
+        } = app_tabs_focus_request()
+        else {
+            unreachable!("app tabs focus request must target the tabs control");
+        };
+        if !matches!(
+            ctx.focus_request(),
+            Some(FocusRequest::FirstChildOf { path, id }) if *path == tabs_path && *id == tabs_id
+        ) {
+            return;
+        }
+        let focus = match self.active_tab.get() {
+            CALENDAR_TAB_INDEX => Some(initial_calendar_focus_request()),
+            NOTES_TAB_INDEX => self
+                .context
+                .store
+                .borrow()
+                .state()
+                .notes
+                .first()
+                .map(|note| {
+                    FocusRequest::Path(note_path(notes_workspace_focus_path(), &note.value.id))
+                }),
+            _ => None,
+        };
+        if let Some(focus) = focus {
+            ctx.focus(focus);
+        }
+    }
+
     fn close_snooze_dialog(&mut self, ctx: &mut EventCtx<AppMsg>) {
         if self.pending_calendar_task.is_some() {
             self.snooze_return_focus = None;
@@ -3207,7 +3287,22 @@ impl TuiNode<AppMsg> for App {
             ctx.request_redraw();
             return EventOutcome::Handled;
         }
+        let task_create_hotkey = keys::TASK_QUICK_CREATE.matches(event)
+            || matches!(
+                event,
+                TuiEvent::Hotkey(HotkeyEvent::Commit(sequence))
+                    if sequence == &keys::TASK_QUICK_CREATE.hotkey()
+            );
+        if self.active_tab.get() == NOTES_TAB_INDEX && task_create_hotkey {
+            self.task_creation_return_focus = Some(self.task_creation_origin(route));
+            ctx.emit(AppMsg::OpenCreateTask {
+                calendar_date: None,
+            });
+            ctx.stop_propagation();
+            return EventOutcome::Handled;
+        }
         let outcome = self.root.dispatch_event(route, event, ctx);
+        self.redirect_initial_tab_focus(ctx);
         if ctx
             .messages()
             .iter()
@@ -3219,12 +3314,6 @@ impl TuiNode<AppMsg> for App {
         if outcome.handled() {
             return outcome;
         }
-        let task_create_hotkey = keys::TASK_QUICK_CREATE.matches(event)
-            || matches!(
-                event,
-                TuiEvent::Hotkey(HotkeyEvent::Commit(sequence))
-                    if sequence == &keys::TASK_QUICK_CREATE.hotkey()
-            );
         if task_create_hotkey {
             self.task_creation_return_focus = Some(self.task_creation_origin(route));
             ctx.emit(AppMsg::OpenCreateTask {
@@ -3553,8 +3642,8 @@ fn initial_task_table_focus_request() -> FocusRequest {
             ChildKey::first(),
             ChildKey::first(),
             ChildKey::new("content"),
-            ChildKey::new("tabs"),
             ChildKey::new("tab-0"),
+            ChildKey::new("workspace"),
             ChildKey::first(),
             ChildKey::second(),
             ChildKey::new("data"),
@@ -3569,8 +3658,8 @@ fn issue_links_focus_request() -> FocusRequest {
             ChildKey::first(),
             ChildKey::first(),
             ChildKey::new("content"),
-            ChildKey::new("tabs"),
             ChildKey::new("tab-0"),
+            ChildKey::new("workspace"),
             ChildKey::second(),
             ChildKey::body(),
             ChildKey::new("form"),
@@ -3587,17 +3676,9 @@ fn app_tabs_focus_request() -> FocusRequest {
             ChildKey::first(),
             ChildKey::first(),
             ChildKey::new("content"),
-            ChildKey::new("tabs"),
         ]),
         id: FocusId::new("tabs"),
     }
-}
-
-fn notes_first_child_focus_request() -> FocusRequest {
-    let FocusRequest::TargetAt { path, id } = app_tabs_focus_request() else {
-        unreachable!("app tabs focus request must target the tabs control");
-    };
-    FocusRequest::FirstChildOf { path, id }
 }
 
 fn notes_workspace_focus_path() -> TreePath {
@@ -3605,6 +3686,7 @@ fn notes_workspace_focus_path() -> TreePath {
         unreachable!("app tabs focus request must target the tabs control");
     };
     path.child(ChildKey::new("tab-2"))
+        .child(ChildKey::new("workspace"))
 }
 
 fn initial_calendar_focus_request() -> FocusRequest {
@@ -3613,8 +3695,8 @@ fn initial_calendar_focus_request() -> FocusRequest {
             ChildKey::first(),
             ChildKey::first(),
             ChildKey::new("content"),
-            ChildKey::new("tabs"),
             ChildKey::new("tab-1"),
+            ChildKey::new("workspace"),
             ChildKey::first(),
         ]),
         id: FocusId::new("calendar"),
@@ -4085,6 +4167,8 @@ struct TaskFilterControls {
     filter_submitted: Rc<Cell<bool>>,
     known_workspaces: Vec<(String, String)>,
     known_tags: Vec<(String, String)>,
+    known_workspace_filter: Option<String>,
+    known_label_filter: Vec<String>,
 }
 
 impl TaskFilterControls {
@@ -4099,6 +4183,8 @@ impl TaskFilterControls {
         let tags = state.state().tags.clone();
         drop(state);
         let filter_submitted = Rc::new(Cell::new(false));
+        let known_workspace_filter = active_workspace_filter.borrow().clone();
+        let known_label_filter = active_label_filter.borrow().clone();
         let controls = Flex::row()
             .align(CrossAlign::Center)
             .gap(1)
@@ -4135,6 +4221,8 @@ impl TaskFilterControls {
                 .iter()
                 .map(|tag| (tag.id.clone(), tag.label.clone()))
                 .collect(),
+            known_workspace_filter,
+            known_label_filter,
         }
     }
 
@@ -4153,7 +4241,10 @@ impl TaskFilterControls {
             .collect::<Vec<_>>();
         let mut ctx = EventCtx::default();
 
-        if known_workspaces != self.known_workspaces {
+        let workspace_filter = self.active_workspace_filter.borrow().clone();
+        if known_workspaces != self.known_workspaces
+            || workspace_filter != self.known_workspace_filter
+        {
             let workspace_ids = workspaces
                 .iter()
                 .map(|workspace| workspace.id.as_str())
@@ -4166,6 +4257,7 @@ impl TaskFilterControls {
             {
                 *self.active_workspace_filter.borrow_mut() = None;
             }
+            self.known_workspace_filter = self.active_workspace_filter.borrow().clone();
             self.controls
                 .replace(
                     "workspace",
@@ -4180,11 +4272,13 @@ impl TaskFilterControls {
                 .expect("task filters should contain workspace filter");
             self.known_workspaces = known_workspaces;
         }
-        if known_tags != self.known_tags {
+        let label_filter = self.active_label_filter.borrow().clone();
+        if known_tags != self.known_tags || label_filter != self.known_label_filter {
             let tag_ids = tags.iter().map(|tag| tag.id.as_str()).collect::<Vec<_>>();
             self.active_label_filter
                 .borrow_mut()
                 .retain(|id| tag_ids.contains(&id.as_str()));
+            self.known_label_filter = self.active_label_filter.borrow().clone();
             self.controls
                 .replace(
                     "labels",
