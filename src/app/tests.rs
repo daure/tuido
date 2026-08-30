@@ -2421,7 +2421,7 @@ fn calendar_group_selection_clears_after_order_independent_completion() {
 }
 
 #[test]
-fn calendar_quick_menu_uses_sparse_selection_time_after_highlight_moves() {
+fn calendar_quick_menu_uses_highlighted_time_after_navigation_clears_selection() {
     let today = time::OffsetDateTime::now_local()
         .unwrap_or_else(|_| time::OffsetDateTime::now_utc())
         .date();
@@ -2472,14 +2472,11 @@ fn calendar_quick_menu_uses_sparse_selection_time_after_highlight_moves() {
 
     assert!(matches!(
         ctx.messages(),
-        [AppMsg::SelectionAction { action, .. }]
-            if matches!(action.as_ref(), AppMsg::OpenCalendarTasksQuickMenu {
-                task_ids,
-                time,
-                selection_active: true,
-            } if task_ids == &vec!["first".to_string(), "third".to_string()]
-                && *time == Some(eight)
-            )
+        [AppMsg::OpenCalendarTasksQuickMenu {
+            task_ids,
+            time,
+            selection_active: false,
+        }] if task_ids == &vec!["later".to_string()] && *time == Some(nine)
     ));
 }
 
@@ -2968,7 +2965,7 @@ fn task_table_shows_current_workspace_key_task_number_and_title() {
 }
 
 #[test]
-fn task_table_shows_horizontal_scrollbar_for_long_titles() {
+fn task_table_wraps_long_titles_without_a_horizontal_scrollbar() {
     let table = task_table(
         vec![task_with(
             "long",
@@ -2992,8 +2989,8 @@ fn task_table_shows_horizontal_scrollbar_for_long_titles() {
         .map(|x| buffer.cell((x, area.height - 1)).unwrap().symbol())
         .collect::<String>();
     assert!(
-        scrollbar.contains('━') || scrollbar.contains('─'),
-        "missing horizontal scrollbar: {scrollbar:?}"
+        !scrollbar.contains('━') && !scrollbar.contains('─'),
+        "unexpected horizontal scrollbar: {scrollbar:?}"
     );
 }
 

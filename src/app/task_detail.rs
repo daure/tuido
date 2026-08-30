@@ -224,6 +224,7 @@ fn task_table_with_copy_context_and_empty(
     .activation_mode(ActivationMode::OnActivateKey)
     .selection_mode(SelectionMode::Single)
     .selection_trigger(SelectionTrigger::OnNavigate)
+    .transient_selection(!allow_reordering)
     .keybindings(keybindings)
     .max_rows(usize::MAX)
     .columns(vec![
