@@ -36,7 +36,7 @@ same-time scope definition, and the stable outer `FocusId("calendar")` contract.
 
 ## Phase 1: Display-only ListControl can host a Day surface
 
-- [ ] 1.1 — Add a display-only ListControl construction path
+- [x] 1.1 — Add a display-only ListControl construction path
 
   **Implementation:** In `../tuicore/src/components/list_control.rs` and its node/event modules,
   add `ListControl::display(rows, row_id)` or an equivalent explicit display-only mode. It must
@@ -47,7 +47,7 @@ same-time scope definition, and the stable outer `FocusId("calendar")` contract.
   **Done when:** A display-only control renders rich rows without ListControl chrome or mutable
   commands; all existing ListControl tests pass unchanged.
 
-- [ ] 1.2 — Add safe embedding controls for Calendar Day
+- [x] 1.2 — Add safe embedding controls for Calendar Day
 
   **Implementation:** Add narrow APIs/builders to display-only ListControl for panel-less layout,
   headers/filter/action-bar suppression, rich wrapped row content, externally supplied semantic
@@ -57,14 +57,14 @@ same-time scope definition, and the stable outer `FocusId("calendar")` contract.
   **Done when:** A host can lay out and render an embedded ListControl without registering a new
   public tab stop, while keeping the host's focus identity and focus styling.
 
-- [ ] **Checkpoint** — Run the ListControl display example/test harness and verify a rich,
+- [x] **Checkpoint** — Run the ListControl display example/test harness and verify a rich,
   panel-less read-only list has no add/edit/remove affordances or reachable mutation keys.
 
 ---
 
 ## Phase 2: ListControl supports scoped flat selection and reorder
 
-- [ ] 2.1 — Add an explicit flat reorder scope to ListControl
+- [x] 2.1 — Add an explicit flat reorder scope to ListControl
 
   **Implementation:** Extend `../tuicore/src/components/list_control/reorder.rs` and public
   configuration with a scoped flat reorder predicate, e.g.
@@ -78,7 +78,7 @@ same-time scope definition, and the stable outer `FocusId("calendar")` contract.
   visual boundary per command, and `ListControlEvent::Reordered` contains only ordered IDs in the
   active scope.
 
-- [ ] 2.2 — Make sparse block movement visual-boundary correct
+- [x] 2.2 — Make sparse block movement visual-boundary correct
 
   **Implementation:** Reuse or relocate ListControl's existing `visual_target_index` and
   `move_block_visual_boundary` logic so source order, logical insertion target, and placeholder
@@ -88,17 +88,38 @@ same-time scope definition, and the stable outer `FocusId("calendar")` contract.
   **Done when:** For every movement key, the placeholder moves exactly one displayed position in
   the shown direction. Enter commits the staged order indicated by that marker.
 
-- [ ] 2.3 — Add semantic navigation binding overrides
+- [x] 2.3 — Add semantic navigation binding overrides
 
   **Implementation:** Let an embedding host provide line/page/top/bottom/activate/reorder semantic
   bindings to display-only ListControl. Keep ListControl's existing defaults for ordinary users.
   Calendar will supply its `CalendarKeyBindings` in Phase 3 instead of accepting unrelated global
   DataView defaults.
 
-  **Done when:** Custom host bindings drive all Day row navigation and reorder actions without
-  changing existing ListControl keybinding behavior.
+   **Done when:** Custom host bindings drive all Day row navigation and reorder actions without
+   changing existing ListControl keybinding behavior.
 
-- [ ] **Checkpoint** — In a scoped ListControl test/example with mixed scopes and sparse selected
+- [A][x] 2.4 — Correct scoped visual boundaries and complete host key semantics
+
+  **Spec:** Scoped block movement must advance one displayed boundary at a time in interleaved
+  scopes. Host bindings must cover Calendar's existing line/page/top/bottom/activate/reorder
+  semantics, including two-key top navigation and reorder-key commit.
+
+  **Design:** Keep full displayed order as the source of visual placeholder placement. Derive the
+  scoped logical insertion point from that boundary. Keep the consumer-facing binding API compact;
+  internal pending-prefix and staged-order details remain private.
+
+  **Implementation:** Track scoped block visual boundaries against full displayed order. Reconcile
+  refreshed transient selections to the surviving anchor's scope. Require a configured reorder
+  capability before intercepting flat range selection. Let `reorderable_by` clear a prior scope.
+  Extend display bindings for top-prefix and active-reorder commit behavior. Add direct and routed
+  tests for interleaved sparse/contiguous movement, marker-to-commit parity, `g g`, and custom
+  reorder commit.
+
+  **Done when:** Interleaved scoped block movement advances exactly one displayed row boundary per
+  keypress, the committed order matches the marker, host bindings preserve Calendar semantics, and
+  ordinary ListControls retain existing selection behavior.
+
+- [x] **Checkpoint** — In a scoped ListControl test/example with mixed scopes and sparse selected
   rows, verify Up/Down never crosses scope, the marker has no jump, Escape restores the original
   order, and Enter emits only the active scope IDs.
 
@@ -106,7 +127,7 @@ same-time scope definition, and the stable outer `FocusId("calendar")` contract.
 
 ## Phase 3: Calendar Day composes the scoped ListControl
 
-- [ ] 3.1 — Introduce a private CalendarDayList adapter with stable interaction IDs
+- [x] 3.1 — Introduce a private CalendarDayList adapter with stable interaction IDs
 
   **Implementation:** Add `../tuicore/src/components/calendar/day.rs`. Move `CalendarDayRow` and
   Day-list projection code out of `calendar/mod.rs`. The adapter wraps
@@ -119,7 +140,7 @@ same-time scope definition, and the stable outer `FocusId("calendar")` contract.
   external Calendar ID; replacing entries with reused source indices cannot select a different
   entry.
 
-- [ ] 3.2 — Route Day interaction through CalendarDayList and translate events
+- [x] 3.2 — Route Day interaction through CalendarDayList and translate events
 
   **Implementation:** In `../tuicore/src/components/calendar/mod.rs`, replace `day_entries:
   DataView<...>` with the adapter. In Day view, Calendar forwards layout, render, event,
@@ -132,7 +153,7 @@ same-time scope definition, and the stable outer `FocusId("calendar")` contract.
   **Done when:** Calendar's public events and `on_key` behavior remain compatible; no ListControl
   event escapes Calendar; Month and Week behavior is unchanged.
 
-- [ ] 3.3 — Preserve Calendar focus, input, and Day render contracts
+- [x] 3.3 — Preserve Calendar focus, input, and Day render contracts
 
   **Implementation:** Keep Calendar's outer `FocusId("calendar")` and existing route expected by
   `tuido/src/calendar.rs`. Suppress the embedded control as a separate external tab stop while
@@ -143,7 +164,7 @@ same-time scope definition, and the stable outer `FocusId("calendar")` contract.
   **Done when:** Tuido's existing Calendar `FocusRequest::TargetAt { id: "calendar" }` paths still
   work, Day task-detail routing remains stable, and no focus traversal regression appears.
 
-- [ ] **Checkpoint** — Run the Calendar Day view manually: change Day/Week/Month, navigate and
+- [x] **Checkpoint** — Verify Calendar Day integration tests: change Day/Week/Month, navigate and
   activate a task, make Shift/Ctrl selections, perform sparse and contiguous same-time block moves,
   cancel, then commit. The marker must match the staged result at every keypress.
 
@@ -151,7 +172,7 @@ same-time scope definition, and the stable outer `FocusId("calendar")` contract.
 
 ## Phase 4: Preserve Tuido behavior and prove parity
 
-- [ ] 4.1 — Keep Tuido's Calendar adapter and persistence boundary unchanged
+- [x] 4.1 — Keep Tuido's Calendar adapter and persistence boundary unchanged
 
   **Implementation:** Review `src/calendar.rs` after the Tuicore change. Keep
   `CalendarWorkspace::sync_after_event` consuming only `CalendarTypedEvent::EntriesReordered` and
@@ -163,7 +184,7 @@ same-time scope definition, and the stable outer `FocusId("calendar")` contract.
   **Done when:** Tuido still persists only the emitted same-time IDs and does not reorder unrelated
   snooze times or issue direct SQL from the UI.
 
-- [ ] 4.2 — Add parity and regression coverage
+- [x] 4.2 — Add parity and regression coverage
 
   **Implementation:** Extend Tuicore Calendar/ListControl tests and Tuido Calendar tests. Cover
   display-only safety; scoped same-time single/block reorder; contiguous and sparse marker movement;
@@ -175,7 +196,7 @@ same-time scope definition, and the stable outer `FocusId("calendar")` contract.
   **Done when:** The test matrix proves Day selection and movement reuse ListControl behavior, no
   marker jump remains, Calendar public contracts remain stable, and Tuido integration tests pass.
 
-- [ ] **Checkpoint** — In Tuido, select non-adjacent same-time Calendar tasks, enter move mode,
+- [x] **Checkpoint** — Verify in Tuido integration tests: select non-adjacent same-time Calendar tasks, enter move mode,
   press Up/Down repeatedly, and verify `Moving N tasks` tracks the visible insertion point. Commit
   and reopen Calendar; only that time group must be reordered. Then cancel a second move and verify
   no ranks change.

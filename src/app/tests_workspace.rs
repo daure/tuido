@@ -4321,7 +4321,7 @@ fn task_dropdown_save_completion_tabs_to_next_control_without_reset() {
         .patches
         .borrow_mut()
         .push(TaskPatch::Size(TaskSize::Big));
-    assert!(workspace.sync_detail_changes().changed);
+    assert!(workspace.sync_detail_changes(None).changed);
     assert_eq!(store.borrow().state().tasks[0].size, TaskSize::Big);
 
     store.borrow_mut().dispatch(AppEvent::SaveCompleted {

@@ -676,7 +676,7 @@ impl TuiNode<AppMsg> for TaskDescriptionInput {
     }
 }
 
-pub(super) fn chip_line(label: &'static str, role: ChipColorRole) -> Line<'static> {
+pub(crate) fn chip_line(label: &'static str, role: ChipColorRole) -> Line<'static> {
     let theme = tuicore::theme();
     let color = match role {
         ChipColorRole::Accent => theme.accent_fg(),
@@ -694,6 +694,12 @@ pub(super) fn chip_line(label: &'static str, role: ChipColorRole) -> Line<'stati
 }
 
 pub(crate) fn task_title_line(display_id: &str, title: &str) -> Line<'static> {
+    let mut spans = task_title_prefix_line(display_id).spans;
+    spans.push(Span::raw(title.to_string()));
+    Line::from(spans)
+}
+
+pub(crate) fn task_title_prefix_line(display_id: &str) -> Line<'static> {
     Line::from(vec![
         Span::styled(
             display_id.to_string(),
@@ -701,7 +707,7 @@ pub(crate) fn task_title_line(display_id: &str, title: &str) -> Line<'static> {
                 .fg(tuicore::theme().subtle_fg())
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(format!(" {title}")),
+        Span::raw(" "),
     ])
 }
 
@@ -716,7 +722,7 @@ pub(super) fn task_state_icon(state: TaskState) -> &'static str {
     }
 }
 
-pub(super) fn priority_icon_line(priority: TaskPriority) -> Line<'static> {
+pub(crate) fn priority_icon_line(priority: TaskPriority) -> Line<'static> {
     let theme = tuicore::theme();
     let color = match priority {
         TaskPriority::Low => theme.accent_fg(),

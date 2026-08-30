@@ -4451,6 +4451,10 @@ impl TaskWorkspace {
     }
 
     fn sync_store_version(&mut self) {
+        self.sync_store_version_with_ctx(&mut EventCtx::default());
+    }
+
+    fn sync_store_version_with_ctx(&mut self, ctx: &mut EventCtx<AppMsg>) {
         let state = self.context.store.borrow().state().clone();
         let external_refresh =
             self.observed_external_refresh_version != state.external_refresh_version;
@@ -4485,6 +4489,7 @@ impl TaskWorkspace {
                 !external_refresh,
                 external_refresh && !protect_detail,
                 rollback_highlight.as_deref(),
+                Some(ctx),
             );
             if selected_new_backlog {
                 self.table_mut().reveal_highlighted();
@@ -4518,6 +4523,7 @@ impl TaskWorkspace {
             false,
             false,
             Some(&navigation.target_task_id),
+            None,
         );
         true
     }
@@ -4529,6 +4535,7 @@ impl TaskWorkspace {
         preserve_position: bool,
         refresh_detail: bool,
         preferred_task_id: Option<&str>,
+        detail_ctx: Option<&mut EventCtx<AppMsg>>,
     ) {
         let external_refresh =
             self.observed_external_refresh_version != state.external_refresh_version;
@@ -4619,11 +4626,12 @@ impl TaskWorkspace {
             || (!external_refresh && detail_options_changed)
             || (refresh_detail && detail_content_changed)
         {
+            let mut default_ctx = EventCtx::default();
             self.detail_mut().set_task(
                 selected_task,
                 (&state.tasks, &state.people, &state.workspaces, &state.tags),
                 save_error.as_deref(),
-                &mut EventCtx::default(),
+                detail_ctx.unwrap_or(&mut default_ctx),
             );
         } else {
             self.detail_mut().task_state = selected_task.map(|task| task.state);
@@ -4675,7 +4683,7 @@ impl TaskWorkspace {
                 &self.label_filter,
             );
         }
-        self.refresh_from_state(&state, !preserve_selected, false, false, None);
+        self.refresh_from_state(&state, !preserve_selected, false, false, None, None);
         true
     }
 
@@ -4687,7 +4695,7 @@ impl TaskWorkspace {
         self.table_mut().clear_search();
         self.label_filter = next_filter;
         let state = self.context.store.borrow().state().clone();
-        self.refresh_from_state(&state, false, false, false, None);
+        self.refresh_from_state(&state, false, false, false, None, None);
         true
     }
 
@@ -4699,7 +4707,7 @@ impl TaskWorkspace {
         self.table_mut().clear_search();
         self.workspace_filter = next_filter;
         let state = self.context.store.borrow().state().clone();
-        self.refresh_from_state(&state, false, false, false, None);
+        self.refresh_from_state(&state, false, false, false, None, None);
         true
     }
 
@@ -4845,7 +4853,7 @@ impl TaskWorkspace {
         changed
     }
 
-    fn sync_detail_changes(&mut self) -> TaskDetailSync {
+    fn sync_detail_changes(&mut self, ctx: Option<&mut EventCtx<AppMsg>>) -> TaskDetailSync {
         if !self.drain_detail_patches() {
             return TaskDetailSync::default();
         }
@@ -4863,7 +4871,7 @@ impl TaskWorkspace {
         detail.people_snapshot = state.people.clone();
         detail.workspaces_snapshot = state.workspaces.clone();
         detail.tags_snapshot = state.tags.clone();
-        self.refresh_from_state(&state, false, true, false, None);
+        self.refresh_from_state(&state, false, true, false, None, ctx);
         let selected_task_id = self.table().highlighted_id();
         TaskDetailSync {
             changed: true,
@@ -5234,7 +5242,7 @@ impl TuiNode<AppMsg> for TaskWorkspace {
     }
 
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<AppMsg>) -> EventOutcome {
-        self.sync_store_version();
+        self.sync_store_version_with_ctx(ctx);
         if let Some(outcome) = self.handle_task_agent_yank(event, ctx) {
             return outcome;
         }
@@ -5245,7 +5253,7 @@ impl TuiNode<AppMsg> for TaskWorkspace {
         let view_changed = self.sync_task_view_change();
         let workspace_filter_changed = self.sync_workspace_filter_change();
         let label_filter_changed = self.sync_label_filter_change();
-        let detail_sync = self.sync_detail_changes();
+        let detail_sync = self.sync_detail_changes(Some(ctx));
         if view_changed || workspace_filter_changed || label_filter_changed || detail_sync.changed {
             ctx.request_layout();
             ctx.request_redraw();
@@ -5272,7 +5280,7 @@ impl TuiNode<AppMsg> for TaskWorkspace {
         event: &TuiEvent,
         ctx: &mut EventCtx<AppMsg>,
     ) -> EventOutcome {
-        self.sync_store_version();
+        self.sync_store_version_with_ctx(ctx);
         if let Some(outcome) = self.handle_task_agent_yank(event, ctx) {
             return outcome;
         }
@@ -5283,7 +5291,7 @@ impl TuiNode<AppMsg> for TaskWorkspace {
         let view_changed = self.sync_task_view_change();
         let workspace_filter_changed = self.sync_workspace_filter_change();
         let label_filter_changed = self.sync_label_filter_change();
-        let detail_sync = self.sync_detail_changes();
+        let detail_sync = self.sync_detail_changes(Some(ctx));
         if view_changed || workspace_filter_changed || label_filter_changed || detail_sync.changed {
             ctx.request_layout();
             ctx.request_redraw();
@@ -5328,7 +5336,7 @@ impl TuiNode<AppMsg> for TaskWorkspace {
             self.detail_draft_protected = false;
         }
         self.layout.dispatch_focus(target, focused, ctx);
-        let detail_sync = self.sync_detail_changes();
+        let detail_sync = self.sync_detail_changes(None);
         if detail_sync.changed {
             ctx.request_redraw();
         }

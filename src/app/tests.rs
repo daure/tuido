@@ -2601,7 +2601,7 @@ fn external_refresh_does_not_rebuild_focused_detail_after_checklist_patch() {
         .patches
         .borrow_mut()
         .push(TaskPatch::Checklist(optimistic_checklist.clone()));
-    assert!(workspace.sync_detail_changes().changed);
+    assert!(workspace.sync_detail_changes(None).changed);
     assert!(workspace.detail_draft_protected);
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     let runtime_thread = std::thread::spawn(move || {
@@ -4617,7 +4617,7 @@ fn detail_state_change_with_no_remaining_tasks_clears_detail() {
         .patches
         .borrow_mut()
         .push(TaskPatch::State(TaskState::Done));
-    assert!(workspace.sync_detail_changes().changed);
+    assert!(workspace.sync_detail_changes(None).changed);
     workspace.layout(area, &mut LayoutCtx::new());
 
     let text = rendered_text(&workspace, area);

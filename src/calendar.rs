@@ -3,25 +3,26 @@ use std::{cell::RefCell, rc::Rc, time::Duration as StdDuration};
 use ratatui::{
     Frame,
     layout::Rect,
-    style::{Modifier, Style},
+    style::Style,
     text::{Line, Span},
     widgets::Clear,
 };
 use time::{Date, Duration, OffsetDateTime, PrimitiveDateTime};
 use tuicore::{
-    AnimationSettings, Calendar, CalendarEntryRole, CalendarKeyBindings, CalendarSpan,
-    CalendarTypedEvent, CalendarView, ChildKey, EventCtx, EventOutcome, EventRoute, FocusCtx,
-    FocusId, FocusRequest, FocusTarget, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint,
-    LifecycleCtx, Propagation, RenderCtx, SeasonalEmptyState, TickResult, TuiEvent, TuiNode,
+    AnimationSettings, Calendar, CalendarKeyBindings, CalendarSpan, CalendarTypedEvent,
+    CalendarView, ChildKey, EventCtx, EventOutcome, EventRoute, FocusCtx, FocusId, FocusRequest,
+    FocusTarget, Key, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx,
+    Propagation, RenderCtx, SeasonalEmptyState, TickResult, TuiEvent, TuiNode,
 };
 
 use crate::app::{
     ActiveLabelFilter, ActiveWorkspaceFilter, AppContext, AppMsg, SnoozeReturnFocus,
     TransientSelectionSource, persist_task_order, task_agent_commands_for,
-    task_detail::detail_escape, task_references_for,
+    task_detail::{chip_line, detail_escape, priority_icon_line, task_title_prefix_line},
+    task_references_for,
 };
 use crate::app_keymap::keys;
-use crate::domain::{Task, TaskState, Workspace};
+use crate::domain::{Task, TaskPriority, TaskSize, TaskState, Workspace};
 use crate::persistence_coordinator::{PersistenceCommand, PersistenceSelectionInvocation};
 use crate::ui::responsive_split::ResponsiveSplit;
 use crate::ui::save_status::SaveStatusLine;
@@ -66,6 +67,8 @@ struct SnoozedTaskEntry {
     id: String,
     title: String,
     display_id: String,
+    priority: TaskPriority,
+    size: TaskSize,
     until: PrimitiveDateTime,
     rank: i64,
 }
@@ -176,6 +179,10 @@ impl CalendarWorkspace {
     }
 
     pub(crate) fn sync_store_version(&mut self) {
+        self.sync_store_version_with_ctx(&mut EventCtx::default());
+    }
+
+    fn sync_store_version_with_ctx(&mut self, ctx: &mut EventCtx<AppMsg>) -> bool {
         let state = self.context.store.borrow().state().clone();
         let filter_options_changed = self.sync_filter_options(&state);
         self.context.resolve_persistence_selection_outcomes();
@@ -185,7 +192,7 @@ impl CalendarWorkspace {
             self.calendar_mut().clear_transient_selection();
         }
         if self.observed_version == state.version && !filter_options_changed {
-            return;
+            return false;
         }
         let rollback_highlight = self.active_selection_invocation.and_then(|invocation| {
             self.context
@@ -216,7 +223,7 @@ impl CalendarWorkspace {
                 .get(SHOW_WEEKENDS_SETTING)
                 .map(String::as_str),
         );
-        self.sync_detail(&state, &mut EventCtx::default());
+        self.sync_detail(&state, ctx)
     }
 
     fn sync_filter_options(&mut self, state: &crate::domain::AppState) -> bool {
@@ -478,7 +485,12 @@ impl CalendarWorkspace {
         changed
     }
 
-    fn sync_after_event(&mut self, calendar_handled_event: bool, ctx: &mut EventCtx<AppMsg>) {
+    fn sync_after_event(
+        &mut self,
+        calendar_handled_event: bool,
+        calendar_path: tuicore::TreePath,
+        ctx: &mut EventCtx<AppMsg>,
+    ) {
         let mut reordered = false;
         let calendar_events = self.calendar_mut().take_events();
         let focus_detail = calendar_handled_event
@@ -494,11 +506,23 @@ impl CalendarWorkspace {
         if reordered {
             self.sync_store_version();
         }
-        let detail_changed = self.sync_calendar_detail(ctx);
         let patches_changed = self.drain_detail_patches();
+        let detail_changed = if patches_changed {
+            self.sync_store_version_with_ctx(ctx)
+        } else if calendar_handled_event {
+            self.sync_calendar_detail(ctx)
+        } else {
+            false
+        };
         if detail_changed || patches_changed || reordered {
             ctx.request_layout();
             ctx.request_redraw();
+        }
+        if patches_changed && detail_changed {
+            ctx.focus(FocusRequest::TargetAt {
+                path: calendar_path,
+                id: FocusId::new("calendar"),
+            });
         }
         if focus_detail && self.pane.is_second_visible() {
             ctx.focus_next();
@@ -797,6 +821,8 @@ fn snoozed_task_entry(task: &Task, workspaces: &[Workspace]) -> Option<SnoozedTa
         id: task.id.clone(),
         title: task.title.clone(),
         display_id: crate::domain::task_display_id(task, workspace),
+        priority: task.priority,
+        size: task.size,
         until: task.snoozed_until?,
         rank: task.rank,
     })
@@ -820,7 +846,16 @@ fn task_calendar(entries: Vec<SnoozedTaskEntry>) -> TaskCalendar {
         |entry| CalendarSpan::timed(entry.until, entry.until + Duration::minutes(1)),
         |entry| format!("{} {}", entry.display_id, entry.title),
     )
-    .render_entry(|entry| calendar_task_title_line(&entry.display_id, &entry.title))
+    .render_entry(|entry| {
+        calendar_task_title_line(entry.priority, entry.size, &entry.display_id, &entry.title)
+    })
+    .day_entry_wrap_continuation_indent_by(|entry| {
+        tuicore::line_width(&calendar_task_metadata_line(
+            entry.priority,
+            entry.size,
+            &entry.display_id,
+        ))
+    })
     .wrap_day_entries()
     .compact_summary_title(100, |entry| entry.title.clone())
     .hotkey(keys::TASK_AGENT_YANK.hotkey())
@@ -828,18 +863,34 @@ fn task_calendar(entries: Vec<SnoozedTaskEntry>) -> TaskCalendar {
     .entry_order(compare_snoozed_task_entries)
     .reorderable(|left, right| left.until == right.until)
     .keybindings(CalendarKeyBindings::default().reorder([keys::TASK_MOVE_MODE.key_spec()]))
-    .role(|_| Some(CalendarEntryRole::Muted))
     .event_marker(|_| SNOOZE_ICON)
 }
 
-fn calendar_task_title_line(display_id: &str, title: &str) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(
-            display_id.to_string(),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(format!(" {title}")),
-    ])
+fn calendar_task_title_line(
+    priority: TaskPriority,
+    size: TaskSize,
+    display_id: &str,
+    title: &str,
+) -> Line<'static> {
+    let mut spans = calendar_task_metadata_line(priority, size, display_id).spans;
+    spans.push(Span::styled(
+        title.to_string(),
+        Style::default().fg(tuicore::theme().text_fg()),
+    ));
+    Line::from(spans)
+}
+
+fn calendar_task_metadata_line(
+    priority: TaskPriority,
+    size: TaskSize,
+    display_id: &str,
+) -> Line<'static> {
+    let mut spans = priority_icon_line(priority).spans;
+    spans.push(Span::raw(" "));
+    spans.extend(chip_line(size.label(), size.role()).spans);
+    spans.push(Span::raw(" "));
+    spans.extend(task_title_prefix_line(display_id).spans);
+    Line::from(spans)
 }
 
 fn compare_snoozed_task_entries(
@@ -871,6 +922,19 @@ fn is_calendar_view_hotkey(event: &TuiEvent) -> bool {
         .chain(&bindings.week_view)
         .chain(&bindings.day_view)
         .any(|binding| binding.matches(*key))
+}
+
+fn is_task_detail_hotkey_prefix(event: &TuiEvent) -> bool {
+    let TuiEvent::Key(key) = event else {
+        return false;
+    };
+    let Key::Char(prefix) = key.code else {
+        return false;
+    };
+    key.modifiers.is_empty()
+        && [keys::TASK_PRIORITY_FIELD, keys::TASK_PEOPLE_FIELD]
+            .into_iter()
+            .any(|binding| binding.hotkey().starts_with(prefix))
 }
 
 fn unbordered_calendar_content_area(area: Rect) -> Rect {
@@ -965,6 +1029,9 @@ impl TuiNode<AppMsg> for CalendarWorkspace {
     }
 
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<AppMsg>) -> EventOutcome {
+        if self.pane.is_second_visible() && is_task_detail_hotkey_prefix(event) {
+            return EventOutcome::Ignored;
+        }
         if let Some(outcome) = self.handle_month_escape(event, ctx) {
             return outcome;
         }
@@ -979,8 +1046,8 @@ impl TuiNode<AppMsg> for CalendarWorkspace {
         self.sync_selected_date();
         self.sync_empty_day_message();
         self.persist_weekend_visibility_change(previous);
-        self.sync_after_event(true, ctx);
         let calendar_path = ctx.current_path();
+        self.sync_after_event(true, calendar_path.clone(), ctx);
         let snooze_return_focus = self.calendar_snooze_return_focus(calendar_path.clone());
         self.handle_task_shortcut(
             outcome,
@@ -997,6 +1064,10 @@ impl TuiNode<AppMsg> for CalendarWorkspace {
         event: &TuiEvent,
         ctx: &mut EventCtx<AppMsg>,
     ) -> EventOutcome {
+        let detail_route = route.path.keys().first() == Some(&ChildKey::second());
+        if self.pane.is_second_visible() && !detail_route && is_task_detail_hotkey_prefix(event) {
+            return EventOutcome::Ignored;
+        }
         if let Some(outcome) = self.handle_month_escape(event, ctx) {
             return outcome;
         }
@@ -1006,7 +1077,6 @@ impl TuiNode<AppMsg> for CalendarWorkspace {
         if let Some(outcome) = self.handle_task_reference_yank(event, ctx) {
             return outcome;
         }
-        let detail_route = route.path.keys().first() == Some(&ChildKey::second());
         let previous = self.calendar().is_showing_weekends();
         let mut calendar_event = !detail_route;
         let mut outcome = if detail_route {
@@ -1025,15 +1095,14 @@ impl TuiNode<AppMsg> for CalendarWorkspace {
         self.sync_selected_date();
         self.sync_empty_day_message();
         self.persist_weekend_visibility_change(previous);
-        self.sync_after_event(calendar_event, ctx);
+        let calendar_path = Self::workspace_path(route, ctx).child(ChildKey::first());
+        self.sync_after_event(calendar_event, calendar_path.clone(), ctx);
         if detail_route && detail_escape(event) {
             Self::focus_calendar(route, ctx);
             return EventOutcome::Handled;
         }
         let return_focus = ctx.current_path();
-        let snooze_return_focus = self.calendar_snooze_return_focus(
-            Self::workspace_path(route, ctx).child(ChildKey::first()),
-        );
+        let snooze_return_focus = self.calendar_snooze_return_focus(calendar_path);
         self.handle_task_shortcut(
             outcome,
             event,
@@ -1120,7 +1189,7 @@ mod tests {
     }
 
     #[test]
-    fn calendar_shows_task_reference_only_in_day_view() {
+    fn calendar_day_rows_use_task_dataview_priority_and_title_styling() {
         let date = Date::from_calendar_date(2026, Month::July, 24).unwrap();
         let until = date.with_time(Time::from_hms(8, 0, 0).unwrap());
         let workspace = Workspace::new(
@@ -1131,6 +1200,8 @@ mod tests {
         );
         let mut snoozed = task("OLD-30", "Follow up", TaskState::Snoozed, Some(until));
         snoozed.workspace_id = Some(workspace.id.clone());
+        snoozed.priority = TaskPriority::High;
+        snoozed.size = TaskSize::Medium;
         let entries = filtered_snoozed_task_entries(
             &[
                 snoozed,
@@ -1150,7 +1221,7 @@ mod tests {
         let text = rendered_text(&calendar, area);
 
         assert!(text.contains(SNOOZE_ICON));
-        assert!(text.contains("IF-30 Follow up"));
+        assert!(text.contains("󰅃 MED IF-30 Follow up"));
         assert!(!text.contains("Still active"));
         assert!(!text.contains("Missing return date"));
 
@@ -1161,10 +1232,66 @@ mod tests {
             .windows(5)
             .position(|cells| cells.iter().map(|cell| cell.symbol()).collect::<String>() == "IF-30")
             .expect("calendar task display ID should render");
+        let title_start = cells
+            .windows(9)
+            .position(|cells| {
+                cells.iter().map(|cell| cell.symbol()).collect::<String>() == "Follow up"
+            })
+            .expect("calendar task title should render");
+        let time_start = cells
+            .windows(5)
+            .position(|cells| cells.iter().map(|cell| cell.symbol()).collect::<String>() == "08:00")
+            .expect("calendar task time should render");
+        let priority_start = cells
+            .iter()
+            .position(|cell| cell.symbol() == "󰅃")
+            .expect("calendar task priority glyph should render");
+        let size_start = cells
+            .windows(3)
+            .position(|cells| cells.iter().map(|cell| cell.symbol()).collect::<String>() == "MED")
+            .expect("calendar task size chip should render");
+        let snooze_marker = SNOOZE_ICON.to_string();
+        let snooze_start = cells
+            .iter()
+            .position(|cell| cell.symbol() == snooze_marker)
+            .expect("calendar task snooze marker should render");
+        assert!(
+            snooze_start < priority_start,
+            "snooze marker should precede the task priority glyph"
+        );
+        assert!(
+            priority_start < size_start && size_start < id_start,
+            "size chip should follow priority before the task reference"
+        );
+        assert_eq!(
+            cells[time_start].fg,
+            tuicore::theme().accent_fg(),
+            "calendar task time should use the Calendar accent foreground"
+        );
+        assert_eq!(
+            cells[snooze_start].fg,
+            tuicore::theme().text_fg(),
+            "calendar task snooze marker should use the normal text foreground"
+        );
         assert_eq!(
             cells[id_start].fg,
-            cells[id_start + 6].fg,
-            "highlighted task ID should use the same readable foreground as its title"
+            tuicore::theme().subtle_fg(),
+            "task display ID should use the DataView subtle foreground"
+        );
+        assert_eq!(
+            cells[title_start].fg,
+            tuicore::theme().text_fg(),
+            "task title should use the semantic text foreground"
+        );
+        assert_eq!(
+            cells[priority_start].fg,
+            tuicore::theme().error_fg(),
+            "high-priority task glyph should use the DataView semantic foreground"
+        );
+        assert_eq!(
+            cells[size_start].fg,
+            tuicore::theme().accent_fg(),
+            "medium size chip should use the DataView semantic foreground"
         );
         assert!(
             cells[id_start]
@@ -1172,7 +1299,12 @@ mod tests {
                 .contains(ratatui::style::Modifier::BOLD)
         );
         assert!(
-            !cells[id_start + 8]
+            !cells[title_start]
+                .modifier
+                .contains(ratatui::style::Modifier::BOLD)
+        );
+        assert!(
+            cells[size_start]
                 .modifier
                 .contains(ratatui::style::Modifier::BOLD)
         );
@@ -1197,34 +1329,50 @@ mod tests {
     }
 
     #[test]
-    fn highlighted_calendar_task_id_uses_title_foreground() {
+    fn calendar_day_wraps_task_titles_under_the_title_after_metadata() {
         let date = Date::from_calendar_date(2026, Month::July, 24).unwrap();
         let until = date.with_time(Time::from_hms(8, 0, 0).unwrap());
-        let entries = filtered_snoozed_task_entries(
-            &[task(
-                "1234",
-                "Readable title",
-                TaskState::Snoozed,
-                Some(until),
-            )],
-            &[],
-            None,
-            &[],
+        let mut entry = task(
+            "task",
+            "Support prepares production validation",
+            TaskState::Snoozed,
+            Some(until),
         );
-        let mut calendar = task_calendar(entries).cursor(date).view(CalendarView::Day);
-        let area = Rect::new(0, 0, 100, 28);
+        entry.priority = TaskPriority::High;
+        entry.size = TaskSize::Big;
+        let mut calendar = task_calendar(vec![snoozed_task_entry(&entry, &[]).unwrap()])
+            .cursor(date)
+            .view(CalendarView::Day);
+        let area = Rect::new(0, 0, 38, 12);
         calendar.layout(area, &mut LayoutCtx::new());
         let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
-
         terminal.draw(|frame| calendar.render(frame, area)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let word_position = |word: &str| {
+            (0..area.height)
+                .find_map(|y| {
+                    let symbols = (0..area.width)
+                        .map(|x| buffer.cell((x, y)).unwrap().symbol())
+                        .collect::<Vec<_>>();
+                    symbols
+                        .windows(word.len())
+                        .position(|symbols| symbols.concat() == word)
+                        .map(|x| (x, y))
+                })
+                .expect("wrapped task word should render")
+        };
 
-        let cells = terminal.backend().buffer().content();
-        let id_start = cells
-            .windows(4)
-            .position(|cells| cells.iter().map(|cell| cell.symbol()).collect::<String>() == "1234")
-            .expect("calendar task display ID should render");
-        assert_eq!(cells[id_start].fg, cells[id_start + 5].fg);
-        assert!(cells[id_start].modifier.contains(Modifier::BOLD));
+        let support = word_position("Support");
+        let production = word_position("production");
+
+        assert!(
+            support.1 < production.1,
+            "title should wrap: {support:?} {production:?}"
+        );
+        assert_eq!(
+            support.0, production.0,
+            "continuation should align under the task title"
+        );
     }
 
     #[test]
@@ -2013,6 +2161,273 @@ mod tests {
         workspace.event(&TuiEvent::Key(Key::Enter.into()), &mut ctx);
 
         assert_eq!(ctx.focus_request(), Some(&tuicore::FocusRequest::Next));
+    }
+
+    #[test]
+    fn calendar_detail_dropdown_hotkeys_follow_the_calendar_detail_lifecycle() {
+        let area = Rect::new(0, 0, 80, 30);
+        enum Expected {
+            State(TaskState),
+            Priority(TaskPriority),
+            Size(TaskSize),
+            Workspace(&'static str),
+            People(&'static [&'static str]),
+            Tags(&'static [&'static str]),
+            Unchanged,
+        }
+        let cases = [
+            (
+                "state",
+                keys::TASK_STATE_FIELD.hotkey(),
+                'b',
+                Expected::State(TaskState::Backlog),
+            ),
+            (
+                "priority",
+                keys::TASK_PRIORITY_FIELD.hotkey(),
+                'h',
+                Expected::Priority(TaskPriority::High),
+            ),
+            (
+                "size",
+                keys::TASK_SIZE_FIELD.hotkey(),
+                'e',
+                Expected::Size(TaskSize::Medium),
+            ),
+            (
+                "workspaces",
+                keys::TASK_WORKSPACES_FIELD.hotkey(),
+                'a',
+                Expected::Workspace("workspace"),
+            ),
+            (
+                "people",
+                keys::TASK_PEOPLE_FIELD.hotkey(),
+                'a',
+                Expected::People(&["person"]),
+            ),
+            (
+                "tags",
+                keys::TASK_TAGS_FIELD.hotkey(),
+                'a',
+                Expected::Tags(&["tag"]),
+            ),
+            (
+                "snoozed-until",
+                keys::TASK_SNOOZED_UNTIL_FIELD.hotkey(),
+                ' ',
+                Expected::Unchanged,
+            ),
+        ];
+
+        for (field, hotkey, selection, expected) in cases {
+            let until = current_date().with_time(Time::from_hms(8, 0, 0).unwrap());
+            let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+                tasks: vec![task(
+                    "snoozed",
+                    "Follow up",
+                    TaskState::Snoozed,
+                    Some(until),
+                )],
+                people: vec![crate::domain::Person::new(
+                    "person".into(),
+                    "Ada".into(),
+                    "ada@example.com".into(),
+                )],
+                workspaces: vec![Workspace::new(
+                    "workspace".into(),
+                    "APP".into(),
+                    "Application".into(),
+                    String::new(),
+                )],
+                tags: vec![Tag::new("tag".into(), "API".into())],
+            });
+            let mut workspace = CalendarWorkspace::new(context, true);
+            workspace.calendar_mut().on_key(Key::Char('D'));
+            workspace.sync_calendar_detail(&mut EventCtx::default());
+            let mut layout = LayoutCtx::new();
+            workspace.layout(area, &mut layout);
+            let focus_id = match field {
+                "tags" => "tag-input",
+                "snoozed-until" => "date-time-picker-dropdown",
+                _ => "field",
+            };
+            let dropdown = layout
+                .focus_targets()
+                .iter()
+                .find(|target| {
+                    target.id.as_str() == focus_id
+                        && target.path.keys().iter().any(|key| key.as_str() == field)
+                })
+                .expect("calendar detail field should be focusable")
+                .clone();
+            let mut dispatcher = TreeDispatcher::new();
+
+            if field == "priority" {
+                let calendar = layout
+                    .focus_targets()
+                    .iter()
+                    .find(|target| target.id.as_str() == "calendar")
+                    .expect("Calendar Day should be focusable");
+                assert_eq!(
+                    workspace.dispatch_event(
+                        &EventRoute::new(calendar.path.clone()),
+                        &TuiEvent::Key(Key::Char('p').into()),
+                        &mut EventCtx::default()
+                    ),
+                    EventOutcome::Ignored,
+                    "Calendar Day must leave the priority hotkey prefix for the global matcher"
+                );
+            }
+
+            let open = dispatcher.dispatch_event(
+                &mut workspace,
+                &EventRoute::new(dropdown.path.clone()),
+                &TuiEvent::Hotkey(HotkeyEvent::Commit(hotkey.clone())),
+                AnimationSettings::default(),
+            );
+            assert!(open.layout, "{field} hotkey should request a popup layout");
+            let mut open_layout = LayoutCtx::new();
+            workspace.layout(area, &mut open_layout);
+            assert!(
+                (field == "tags") || !open_layout.overlays().is_empty(),
+                "{field} should register its popup overlay"
+            );
+            assert!(
+                !rendered_text(&workspace, area).is_empty(),
+                "{field} popup should render without terminating the workspace"
+            );
+            if matches!(expected, Expected::Unchanged) {
+                let close = dispatcher.dispatch_event(
+                    &mut workspace,
+                    &EventRoute::new(dropdown.path),
+                    &TuiEvent::Key(Key::Esc.into()),
+                    AnimationSettings::default(),
+                );
+                assert!(close.layout, "{field} escape should close its popup");
+                let mut closed_layout = LayoutCtx::new();
+                workspace.layout(area, &mut closed_layout);
+                assert!(closed_layout.overlays().is_empty());
+                continue;
+            }
+            let focus_request = open
+                .focus_request
+                .as_ref()
+                .expect("field hotkey should request input focus");
+            let mut focus = FocusManager::new();
+            let transition = focus
+                .apply_request(focus_request, open_layout.focus_targets())
+                .expect("popup input focus should apply");
+            dispatcher.dispatch_focus(&mut workspace, transition, AnimationSettings::default());
+            let popup_focus_id = match field {
+                "tags" => "tag-input",
+                "snoozed-until" => "date-time-picker-dropdown",
+                _ => "input",
+            };
+            assert_eq!(
+                focus.current().map(|target| target.id.as_str()),
+                Some(popup_focus_id)
+            );
+
+            let close = dispatcher.dispatch_event(
+                &mut workspace,
+                &EventRoute::new(focus.current_path()),
+                &TuiEvent::Key(Key::Esc.into()),
+                AnimationSettings::default(),
+            );
+            assert!(close.layout, "{field} escape should close its popup");
+            let mut closed_layout = LayoutCtx::new();
+            workspace.layout(area, &mut closed_layout);
+            assert!(
+                (field == "tags") || closed_layout.overlays().is_empty(),
+                "{field} close should remove its popup overlay"
+            );
+            if let Some(transition) = focus.validate(closed_layout.focus_targets()) {
+                dispatcher.dispatch_focus(&mut workspace, transition, AnimationSettings::default());
+            }
+            let reopen = dispatcher.dispatch_event(
+                &mut workspace,
+                &EventRoute::new(dropdown.path),
+                &TuiEvent::Hotkey(HotkeyEvent::Commit(hotkey)),
+                AnimationSettings::default(),
+            );
+            let mut reopen_layout = LayoutCtx::new();
+            workspace.layout(area, &mut reopen_layout);
+            if let Some(transition) = focus.apply_request(
+                reopen
+                    .focus_request
+                    .as_ref()
+                    .expect("field reopen should request input focus"),
+                reopen_layout.focus_targets(),
+            ) {
+                dispatcher.dispatch_focus(&mut workspace, transition, AnimationSettings::default());
+            }
+
+            dispatcher.dispatch_event(
+                &mut workspace,
+                &EventRoute::new(focus.current_path()),
+                &TuiEvent::Key(Key::Char(selection).into()),
+                AnimationSettings::default(),
+            );
+            if field == "people" {
+                dispatcher.dispatch_event(
+                    &mut workspace,
+                    &EventRoute::new(focus.current_path()),
+                    &TuiEvent::Key(Key::Enter.into()),
+                    AnimationSettings::default(),
+                );
+            }
+            let commit_key = if field == "people" {
+                KeyEvent {
+                    code: Key::Enter,
+                    modifiers: KeyModifiers::CONTROL,
+                }
+            } else {
+                Key::Enter.into()
+            };
+            let commit = dispatcher.dispatch_event(
+                &mut workspace,
+                &EventRoute::new(focus.current_path()),
+                &TuiEvent::Key(commit_key),
+                AnimationSettings::default(),
+            );
+            {
+                let state = store.borrow();
+                let task = &state.state().tasks[0];
+                match expected {
+                    Expected::State(state) => assert_eq!(task.state, state),
+                    Expected::Priority(priority) => assert_eq!(task.priority, priority),
+                    Expected::Size(size) => assert_eq!(task.size, size),
+                    Expected::Workspace(id) => assert_eq!(task.workspace_id.as_deref(), Some(id)),
+                    Expected::People(ids) => assert_eq!(
+                        task.people_ids
+                            .iter()
+                            .map(String::as_str)
+                            .collect::<Vec<_>>(),
+                        ids
+                    ),
+                    Expected::Tags(ids) => assert_eq!(
+                        task.tag_ids.iter().map(String::as_str).collect::<Vec<_>>(),
+                        ids
+                    ),
+                    Expected::Unchanged => {}
+                }
+            }
+            let mut committed_layout = LayoutCtx::new();
+            workspace.layout(area, &mut committed_layout);
+            assert!(!committed_layout.focus_targets().iter().any(|target| {
+                target.id.as_str() == "input"
+                    && target.path.keys().iter().any(|key| key.as_str() == field)
+            }));
+
+            if field == "state" {
+                assert!(matches!(
+                    commit.focus_request,
+                    Some(FocusRequest::TargetAt { id, .. }) if id.as_str() == "calendar"
+                ));
+                assert!(!workspace.pane.is_second_visible());
+            }
+        }
     }
 
     #[test]
