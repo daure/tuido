@@ -10,8 +10,8 @@ usage() {
     cat <<'EOF'
 Usage: ./scripts/release.sh [major|minor|patch]
 
-Bump Tuido (default: minor), validate, commit, tag, and publish to crates.io.
-Latest stable Tuicore is selected from crates.io. This script never pushes.
+Bump Tuido (default: minor), validate, commit, tag, publish to crates.io, and push to origin.
+Latest stable Tuicore is selected from crates.io.
 EOF
 }
 
@@ -376,6 +376,6 @@ if ! cargo publish --locked --registry crates-io; then
 fi
 
 trap - EXIT
-printf '\nPublished %s. Push release commit and tag when ready:\n' "$tag"
-printf 'git push origin %s\n' "$branch"
-printf 'git push origin %s\n' "$tag"
+printf '\nPublished %s. Pushing release commit and tag to origin...\n' "$tag"
+git push origin "$branch"
+git push origin "$tag"
