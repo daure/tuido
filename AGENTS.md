@@ -15,3 +15,5 @@ MCP: stdio stdout is protocol-only; diagnostics go to stderr. HTTP binds loopbac
 Migrations: whenever the domain model changes, explicitly assess whether persisted schema or data must change and add a migration when required. Schema changes go in new ordered files under `migrations/` and must work for SQLite and Postgres. SQLite connections enable foreign keys, busy timeout, and WAL where supported.
 
 Lifecycle: `serve` stays foreground. Linux lifecycle uses systemd-user; macOS uses launchd; unsupported platforms return explicit errors. Install/uninstall should tolerate repeated use where practical. Never claim authentication that transport does not enforce.
+
+Crash logs (TUI and MCP): `$XDG_STATE_HOME/tuido/logs` (default `~/.local/state/tuido/logs`) or macOS `~/Library/Application Support/tuido/logs`; entries include PID and mode. For Linux services also check `journalctl --user -u tuido-mcp.service -e`.

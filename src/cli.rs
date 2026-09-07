@@ -83,6 +83,10 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                         && let Err(error) =
                             rt.block_on(crate::mcp::run_http_with_startup(bind, startup_tx))
                     {
+                        crate::diagnostics::record_error(
+                            "development HTTP MCP stopped",
+                            error.as_ref(),
+                        );
                         eprintln!("HTTP MCP stopped: {error}");
                     }
                 })?;
@@ -224,14 +228,14 @@ fn write_owner_only(path: &std::path::Path, contents: &str) -> Result<(), Box<dy
 
 #[cfg(any(target_os = "linux", test))]
 fn systemd_definition(exe: &std::path::Path, database_url: Option<&str>) -> String {
-    let environment = database_url.map_or_else(String::new, |url| {
+    let database_environment = database_url.map_or_else(String::new, |url| {
         format!(
             "Environment={}\n",
             systemd_quote_arg(&format!("TUIDO_DATABASE_URL={url}"))
         )
     });
     format!(
-        "[Unit]\nDescription=Tuido MCP service\n\n[Service]\n{environment}ExecStart={} serve\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\n",
+        "[Unit]\nDescription=Tuido MCP service\n\n[Service]\nEnvironment=\"TUIDO_PROCESS_MODE=mcp-service\"\n{database_environment}ExecStart={} serve\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\n",
         systemd_quote_arg(&exe.to_string_lossy())
     )
 }
@@ -260,14 +264,14 @@ fn xml_escape(value: &str) -> String {
 
 #[cfg(any(target_os = "macos", test))]
 fn launchd_definition(exe: &std::path::Path, database_url: Option<&str>) -> String {
-    let environment = database_url.map_or_else(String::new, |url| {
+    let database_environment = database_url.map_or_else(String::new, |url| {
         format!(
-            "<key>EnvironmentVariables</key><dict><key>TUIDO_DATABASE_URL</key><string>{}</string></dict>",
+            "<key>TUIDO_DATABASE_URL</key><string>{}</string>",
             xml_escape(url)
         )
     });
     format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\"><plist version=\"1.0\"><dict><key>Label</key><string>dev.tuido.mcp</string><key>ProgramArguments</key><array><string>{}</string><string>serve</string></array>{environment}<key>KeepAlive</key><true/></dict></plist>",
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\"><plist version=\"1.0\"><dict><key>Label</key><string>dev.tuido.mcp</string><key>ProgramArguments</key><array><string>{}</string><string>serve</string></array><key>EnvironmentVariables</key><dict><key>TUIDO_PROCESS_MODE</key><string>mcp-service</string>{database_environment}</dict><key>KeepAlive</key><true/></dict></plist>",
         xml_escape(&exe.to_string_lossy())
     )
 }
@@ -300,6 +304,7 @@ mod tests {
                 "Environment=\"TUIDO_DATABASE_URL=postgres://user:p%%ss@host/db\\\"name\""
             )
         );
+        assert!(systemd.contains("Environment=\"TUIDO_PROCESS_MODE=mcp-service\""));
         assert!(systemd.contains("ExecStart=\"/tmp/tuido %%i\" serve"));
 
         let launchd = launchd_definition(
@@ -307,6 +312,7 @@ mod tests {
             Some("postgres://user:p<&@host/db"),
         );
         assert!(launchd.contains("<string>/tmp/tuido&amp;bin</string>"));
+        assert!(launchd.contains("<key>TUIDO_PROCESS_MODE</key><string>mcp-service</string>"));
         assert!(launchd.contains(
             "<key>TUIDO_DATABASE_URL</key><string>postgres://user:p&lt;&amp;@host/db</string>"
         ));

@@ -4,6 +4,7 @@ mod calendar;
 pub mod cli;
 mod create_management_dialog;
 mod create_task_dialog;
+pub mod diagnostics;
 mod domain;
 mod link_icons;
 mod link_title;
