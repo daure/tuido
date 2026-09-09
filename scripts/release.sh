@@ -15,15 +15,6 @@ Latest stable Tuicore is selected from crates.io.
 EOF
 }
 
-confirm() {
-    local prompt="$1"
-    local answer
-
-    [[ -t 0 ]] || return 1
-    read -r -p "$prompt [y/N] " answer || return 1
-    [[ "$answer" =~ ^[Yy]([Ee][Ss])?$ ]]
-}
-
 crates_io_version_state() {
     local crate_name="$1"
     local version="$2"
@@ -337,10 +328,7 @@ cargo publish --locked --allow-dirty --dry-run --registry crates-io
 printf '\nTuido: %s -> %s\n' "$old_version" "$new_version"
 printf 'Tuicore: %s -> %s (latest crates.io)\n' "$declared_tuicore" "$latest_tuicore"
 git --no-pager diff -- Cargo.toml Cargo.lock
-if ! confirm "Commit, tag, and publish Tuido $new_version with Tuicore $latest_tuicore?"; then
-    printf 'Release canceled; dependency/version changes remain in working tree.\n' >&2
-    exit 1
-fi
+printf 'Creating commit %q, then tagging and publishing to crates.io.\n' "release: $tag"
 
 git add Cargo.toml Cargo.lock
 git commit -m "release: $tag"
