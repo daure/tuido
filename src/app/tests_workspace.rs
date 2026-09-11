@@ -288,6 +288,49 @@ fn task_search_hides_detail_and_clearing_search_restores_it() {
 }
 
 #[test]
+fn returning_to_active_tasks_selects_and_reveals_the_first_row() {
+    let tasks = (0..40)
+        .map(|rank| {
+            task_with_rank(
+                &format!("task-{rank}"),
+                &format!("Task {rank}"),
+                TaskState::Todo,
+                rank,
+            )
+        })
+        .collect();
+    let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+        tasks,
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut workspace = TaskWorkspace::new(context);
+    let area = Rect::new(0, 0, 100, 12);
+    workspace.layout(area, &mut LayoutCtx::new());
+
+    workspace.table_mut().on_key(KeyEvent::from(Key::End), area);
+    workspace.workspace_filter = Some("workspace".into());
+    *workspace.active_workspace_filter.borrow_mut() = Some("workspace".into());
+    workspace.label_filter = vec!["tag".into()];
+    *workspace.active_label_filter.borrow_mut() = vec!["tag".into()];
+    workspace.return_to_active_tasks.set(true);
+    workspace.layout(area, &mut LayoutCtx::new());
+
+    assert_eq!(
+        workspace.table().highlighted_id().as_deref(),
+        Some("task-0")
+    );
+    assert_eq!(
+        store.borrow().state().selected_task_id.as_deref(),
+        Some("task-0")
+    );
+    assert_eq!(workspace.workspace_filter, None);
+    assert!(workspace.label_filter.is_empty());
+    assert!(rendered_text(&workspace, area).contains("Task 0"));
+}
+
+#[test]
 fn task_search_matches_task_titles() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![task_with("task-1", "Support screenshots", TaskState::Todo)],

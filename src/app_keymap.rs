@@ -179,6 +179,7 @@ impl AppKeymap {
         runtime: &tuicore::RuntimeKeyBindings,
     ) -> Result<(), AppKeymapError> {
         for binding in [
+            keys::APP_RETURN_TO_ACTIVE_TASKS,
             keys::TASK_TOGGLE_PROGRESS,
             keys::TASK_COMPLETE,
             keys::COMPLETE_DONE,
@@ -223,6 +224,17 @@ fn validate_contexts(
                     return Err(AppKeymapError::conflict(context.name, *first, *second));
                 }
             }
+        }
+    }
+    let global = keys::APP_RETURN_TO_ACTIVE_TASKS;
+    for binding in keys::ALL {
+        if binding.name == global.name {
+            continue;
+        }
+        let global_pattern = binding_pattern(global, &bindings[global.name]);
+        let pattern = binding_pattern(*binding, &bindings[binding.name]);
+        if is_prefix(&global_pattern, &pattern) || is_prefix(&pattern, &global_pattern) {
+            return Err(AppKeymapError::conflict("global", global, *binding));
         }
     }
     Ok(())
@@ -348,6 +360,8 @@ pub mod keys {
 
     pub const APP_TASKS_TAB: AppBinding = AppBinding::new("APP_TASKS_TAB", "t");
     pub const APP_CALENDAR_TAB: AppBinding = AppBinding::new("APP_CALENDAR_TAB", "c");
+    pub const APP_RETURN_TO_ACTIVE_TASKS: AppBinding =
+        AppBinding::new("APP_RETURN_TO_ACTIVE_TASKS", "shift+h");
     pub const NOTES_MOVE_LEFT: AppBinding = AppBinding::new("NOTES_MOVE_LEFT", "h");
     pub const NOTES_MOVE_DOWN: AppBinding = AppBinding::new("NOTES_MOVE_DOWN", "j");
     pub const NOTES_MOVE_UP: AppBinding = AppBinding::new("NOTES_MOVE_UP", "k");
@@ -517,6 +531,7 @@ pub mod keys {
     pub const ALL: &[AppBinding] = &[
         APP_TASKS_TAB,
         APP_CALENDAR_TAB,
+        APP_RETURN_TO_ACTIVE_TASKS,
         NOTES_MOVE_LEFT,
         NOTES_MOVE_DOWN,
         NOTES_MOVE_UP,
@@ -923,6 +938,7 @@ mod tests {
         let keymap = AppKeymap::from_overrides(std::iter::empty::<(String, String)>()).unwrap();
         for (name, expected) in [
             ("TASK_VIEW_MENU", "shift+f"),
+            ("APP_RETURN_TO_ACTIVE_TASKS", "shift+h"),
             ("TASK_WORKSPACE_FILTER", "shift+p"),
             ("TASK_LABEL_FILTER", "shift+a"),
             ("TASK_QUICK_CREATE", "shift+s"),
@@ -987,6 +1003,14 @@ mod tests {
             .unwrap_err();
 
         assert!(error.to_string().contains("app create actions context"));
+    }
+
+    #[test]
+    fn global_shortcut_rejects_colliding_bindings() {
+        let error =
+            AppKeymap::from_overrides([("TASK_VIEW_MENU".into(), "shift+h".into())]).unwrap_err();
+
+        assert!(error.to_string().contains("global context"));
     }
 
     #[test]

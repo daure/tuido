@@ -754,6 +754,7 @@ struct App {
     focus_note_request: Rc<RefCell<Option<String>>>,
     new_note_edit_request: Rc<RefCell<Option<NewNoteEditRequest>>>,
     pending_task_view: TaskViewChange,
+    return_to_active_tasks: ReturnToActiveTasks,
     pending_task_navigation: PendingTaskNavigation,
     pending_focus_request: Option<FocusRequest>,
 }
@@ -861,6 +862,7 @@ impl App {
         let focus_note_request = Rc::new(RefCell::new(None));
         let new_note_edit_request = Rc::new(RefCell::new(None));
         let pending_task_view = Rc::new(RefCell::new(None));
+        let return_to_active_tasks = Rc::new(Cell::new(false));
         let pending_task_navigation = Rc::new(RefCell::new(None));
         let active_workspace_filter = Rc::new(RefCell::new(None));
         let active_label_filter = Rc::new(RefCell::new(Vec::new()));
@@ -879,6 +881,7 @@ impl App {
                         Rc::clone(&active_workspace_filter),
                         Rc::clone(&active_label_filter),
                         Rc::clone(&pending_task_view),
+                        Rc::clone(&return_to_active_tasks),
                         Rc::clone(&pending_task_navigation),
                     ),
                 ),
@@ -982,6 +985,7 @@ impl App {
             focus_note_request,
             new_note_edit_request,
             pending_task_view,
+            return_to_active_tasks,
             pending_task_navigation,
             pending_focus_request: None,
         }
@@ -3301,6 +3305,15 @@ impl TuiNode<AppMsg> for App {
             ctx.stop_propagation();
             return EventOutcome::Handled;
         }
+        if keys::APP_RETURN_TO_ACTIVE_TASKS.matches(event) {
+            self.return_to_active_tasks.set(true);
+            self.active_tab.set(TASKS_TAB_INDEX);
+            ctx.focus(initial_task_table_focus_request());
+            ctx.stop_propagation();
+            ctx.request_layout();
+            ctx.request_redraw();
+            return EventOutcome::Handled;
+        }
         let outcome = self.root.dispatch_event(route, event, ctx);
         self.redirect_initial_tab_focus(ctx);
         if ctx
@@ -3518,6 +3531,7 @@ impl TuiNode<AppMsg> for TaskMaster {
 type TaskWorkspaceLayout = ResponsiveSplit<TaskMaster, TaskDetail>;
 type TaskViewChange = Rc<RefCell<Option<TaskView>>>;
 type ActiveTaskView = Rc<RefCell<TaskView>>;
+type ReturnToActiveTasks = Rc<Cell<bool>>;
 type PendingTaskNavigation = Rc<RefCell<Option<TaskNavigation>>>;
 pub(crate) type ActiveWorkspaceFilter = Rc<RefCell<Option<String>>>;
 pub(crate) type ActiveLabelFilter = Rc<RefCell<Vec<String>>>;
@@ -4408,6 +4422,7 @@ struct TaskWorkspace {
     task_view: TaskView,
     pending_task_view: TaskViewChange,
     active_task_view: ActiveTaskView,
+    return_to_active_tasks: ReturnToActiveTasks,
     workspace_filter: Option<String>,
     active_workspace_filter: ActiveWorkspaceFilter,
     label_filter: Vec<String>,
@@ -4438,6 +4453,7 @@ impl TaskWorkspace {
             Rc::new(RefCell::new(None)),
             Rc::new(RefCell::new(Vec::new())),
             Rc::new(RefCell::new(None)),
+            Rc::new(Cell::new(false)),
             Rc::new(RefCell::new(None)),
         )
     }
@@ -4447,6 +4463,7 @@ impl TaskWorkspace {
         active_workspace_filter: ActiveWorkspaceFilter,
         active_label_filter: ActiveLabelFilter,
         pending_task_view: TaskViewChange,
+        return_to_active_tasks: ReturnToActiveTasks,
         pending_navigation: PendingTaskNavigation,
     ) -> Self {
         let task_view = TaskView::Active;
@@ -4499,6 +4516,7 @@ impl TaskWorkspace {
             task_view,
             pending_task_view,
             active_task_view,
+            return_to_active_tasks,
             workspace_filter,
             active_workspace_filter,
             label_filter,
@@ -4778,6 +4796,38 @@ impl TaskWorkspace {
             );
         }
         self.refresh_from_state(&state, !preserve_selected, false, false, None, None);
+        true
+    }
+
+    fn sync_return_to_active_tasks(&mut self) -> bool {
+        if !self.return_to_active_tasks.replace(false) {
+            return false;
+        }
+        let reorderability_changed = self.task_view == TaskView::Archived;
+        self.task_list_mut().clear_transient_selection();
+        self.table_mut().clear_search();
+        self.task_view = TaskView::Active;
+        *self.active_task_view.borrow_mut() = TaskView::Active;
+        self.workspace_filter = None;
+        *self.active_workspace_filter.borrow_mut() = None;
+        self.label_filter.clear();
+        self.active_label_filter.borrow_mut().clear();
+        if reorderability_changed {
+            let toolbar = task_toolbar(
+                Rc::clone(&self.pending_task_view),
+                Rc::clone(&self.active_task_view),
+            );
+            self.layout = task_workspace_layout(
+                toolbar,
+                &self.context.store,
+                self.task_view,
+                self.workspace_filter.as_deref(),
+                &self.label_filter,
+            );
+        }
+        let state = self.context.store.borrow().state().clone();
+        self.refresh_from_state(&state, true, false, false, None, None);
+        self.table_mut().reveal_highlighted();
         true
     }
 
@@ -5321,6 +5371,7 @@ impl TuiNode<AppMsg> for TaskWorkspace {
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
         self.sync_navigation();
         self.sync_task_view_change();
+        self.sync_return_to_active_tasks();
         self.sync_store_version();
         self.sync_workspace_filter_change();
         self.sync_label_filter_change();

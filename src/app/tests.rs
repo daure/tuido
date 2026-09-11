@@ -605,6 +605,60 @@ fn app_task_navigation_chooses_the_view_for_each_task_state() {
 }
 
 #[test]
+fn global_h_returns_to_active_tasks_and_selects_the_first_row() {
+    let (_runtime, context, store) = test_context(WorkspaceSnapshot {
+        tasks: vec![
+            task_with_rank("backlog", "Backlog task", TaskState::Backlog, 0),
+            task_with_rank("second", "Second active", TaskState::Todo, 20),
+            task_with_rank("first", "First active", TaskState::InProgress, 10),
+        ],
+        people: vec![],
+        workspaces: vec![],
+        tags: vec![],
+    });
+    let mut app = App::new(context.store, context.coordinator);
+    *app.pending_task_view.borrow_mut() = Some(TaskView::Backlog);
+    let mut layout = LayoutCtx::new();
+    app.layout(Rect::new(0, 0, 120, 30), &mut layout);
+    let task_table_path = layout
+        .focus_targets()
+        .iter()
+        .find(|target| {
+            target.id.as_str() == "data-view"
+                && !target
+                    .path
+                    .keys()
+                    .iter()
+                    .any(|part| matches!(part.as_str(), "checklist" | "links"))
+        })
+        .expect("task table should be focusable")
+        .path
+        .clone();
+    let mut ctx = EventCtx::default();
+
+    let outcome = app.dispatch_event(
+        &EventRoute::new(task_table_path),
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('H'),
+            modifiers: KeyModifiers::SHIFT,
+        }),
+        &mut ctx,
+    );
+    app.layout(Rect::new(0, 0, 120, 30), &mut LayoutCtx::new());
+
+    assert!(outcome.handled());
+    assert_eq!(app.active_tab.get(), TASKS_TAB_INDEX);
+    assert_eq!(
+        store.borrow().state().selected_task_id.as_deref(),
+        Some("first")
+    );
+    let text = rendered_text(&app, Rect::new(0, 0, 120, 30));
+    assert!(text.contains("Active"));
+    assert!(text.contains("First active"));
+    assert!(!text.contains("Backlog task"));
+}
+
+#[test]
 fn task_navigation_focuses_reverse_issue_link_on_destination_task() {
     let mut source = test_task();
     source.id = "source".into();
