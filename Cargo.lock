@@ -10609,7 +10609,7 @@ dependencies = [
 
 [[package]]
 name = "tuicore"
-version = "0.36.0"
+version = "0.37.0"
 dependencies = [
  "ansi-to-tui",
  "base64 0.22.1",
@@ -10635,7 +10635,7 @@ dependencies = [
 
 [[package]]
 name = "tuitodo"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "axum",
  "clap",

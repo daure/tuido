@@ -94,7 +94,7 @@ fn note_panel_shows_its_creation_time_in_the_top_right() {
         reduce_app_state as fn(&mut AppState, AppEvent) -> tuicore::DispatchOutcome,
     )));
     let mut workspace = NotesWorkspace::<()>::new().note_store(store);
-    let area = Rect::new(0, 0, 100, 30);
+    let area = Rect::new(0, 0, 120, 30);
     workspace.layout(area, &mut LayoutCtx::new());
     let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
 
