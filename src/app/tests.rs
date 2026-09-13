@@ -2766,7 +2766,8 @@ fn rendered_area_has_focus_style(node: &impl TuiNode<AppMsg>, canvas: Rect, area
     (area.y..area.bottom()).any(|y| {
         (area.x..area.right()).any(|x| {
             let cell = buffer.cell((x, y)).expect("focused area cell should exist");
-            cell.fg == theme.highlight_fg() && cell.bg == theme.highlight_bg()
+            (cell.fg == theme.highlight_fg() && cell.bg == theme.highlight_bg())
+                || (cell.bg == theme.selected_bg() && cell.modifier.contains(Modifier::BOLD))
         })
     })
 }
@@ -3016,6 +3017,17 @@ fn task_table_shows_current_workspace_key_task_number_and_title() {
     assert!(cells[id_start].modifier.contains(Modifier::BOLD));
     assert!(!cells[id_start + 10].modifier.contains(Modifier::BOLD));
     assert!(rendered_text(&table, area).contains("CORE-42 Ship it"));
+
+    table.data_view_mut().set_focused(true);
+    terminal
+        .draw(|frame| {
+            <TaskTable as TuiNode<AppMsg>>::render(&table, frame, area, &mut RenderCtx::new())
+        })
+        .unwrap();
+    let focused_cells = terminal.backend().buffer().content();
+    assert_eq!(focused_cells[id_start].fg, tuicore::theme().subtle_fg());
+    assert_eq!(focused_cells[id_start].bg, tuicore::theme().selected_bg());
+    assert!(focused_cells[id_start].modifier.contains(Modifier::BOLD));
 }
 
 #[test]
