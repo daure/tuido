@@ -89,6 +89,7 @@ pub(crate) struct NotesWorkspace<M = ()> {
     preserve_selected_until_focus_returns: bool,
     new_note_edit_request: Option<Rc<RefCell<Option<NewNoteEditRequest>>>>,
     focus_note_request: Option<Rc<RefCell<Option<String>>>>,
+    home_reset_request: Option<Rc<Cell<bool>>>,
     pending_scroll_offset: Option<ScrollOffset>,
     grid_scroll_offset: ScrollOffset,
     reveal_after_rebuild: bool,
@@ -171,6 +172,7 @@ impl<M: 'static> NotesWorkspace<M> {
             preserve_selected_until_focus_returns: false,
             new_note_edit_request: None,
             focus_note_request: None,
+            home_reset_request: None,
             pending_scroll_offset: None,
             grid_scroll_offset: ScrollOffset::default(),
             reveal_after_rebuild: false,
@@ -253,6 +255,11 @@ impl<M: 'static> NotesWorkspace<M> {
         self
     }
 
+    pub(crate) fn home_reset_request(mut self, request: Rc<Cell<bool>>) -> Self {
+        self.home_reset_request = Some(request);
+        self
+    }
+
     fn base_columns_for(width: u16) -> usize {
         if width < NARROW_BREAKPOINT { 2 } else { 6 }
     }
@@ -267,6 +274,7 @@ impl<M: 'static> NotesWorkspace<M> {
 
     fn sync_layout(&mut self, width: u16) -> bool {
         let notes_changed = self.sync_notes();
+        let home_reset = self.take_home_reset_request();
         let focus_requested = self.take_focus_note_request();
         self.base_columns = Self::base_columns_for(width);
         let available_columns = Self::available_columns(self.base_columns);
@@ -275,13 +283,33 @@ impl<M: 'static> NotesWorkspace<M> {
         if self.columns != columns || self.panel_height != panel_height {
             self.columns = columns;
             self.panel_height = panel_height;
-            self.rebuild_grid(focus_requested);
+            self.rebuild_grid(focus_requested || home_reset);
+            if home_reset {
+                self.pending_scroll_offset = Some(ScrollOffset::default());
+            }
             return true;
         }
-        if notes_changed || focus_requested {
-            self.rebuild_grid(focus_requested);
+        if notes_changed || focus_requested || home_reset {
+            self.rebuild_grid(focus_requested || home_reset);
+            if home_reset {
+                self.pending_scroll_offset = Some(ScrollOffset::default());
+            }
         }
-        notes_changed
+        notes_changed || home_reset
+    }
+
+    fn take_home_reset_request(&mut self) -> bool {
+        if !self
+            .home_reset_request
+            .as_ref()
+            .is_some_and(|request| request.replace(false))
+        {
+            return false;
+        }
+        self.focused_note_id = self.note_ids.first().cloned();
+        self.selected_target = None;
+        self.preserve_selected_until_focus_returns = false;
+        true
     }
 
     fn take_focus_note_request(&mut self) -> bool {
@@ -1317,6 +1345,39 @@ mod tests {
         workspace.layout(area, &mut LayoutCtx::new());
 
         assert!(workspace.scroll.offset().y > 0);
+    }
+
+    #[test]
+    fn home_reset_selects_the_first_note_and_returns_to_the_top() {
+        let reset = Rc::new(Cell::new(false));
+        let mut workspace = NotesWorkspace::<()>::new()
+            .note_source(note_source(12))
+            .home_reset_request(reset.clone());
+        let area = Rect::new(0, 0, 120, 15);
+        let mut layout = LayoutCtx::new();
+        workspace.layout(area, &mut layout);
+        let target = layout
+            .focus_targets()
+            .iter()
+            .find(|target| target.path.keys().last() == Some(&test_panel_key(6)))
+            .expect("second-row note should be focusable")
+            .clone();
+        workspace.dispatch_focus(
+            &target,
+            true,
+            &mut FocusCtx::new(AnimationSettings {
+                enabled: false,
+                ..AnimationSettings::default()
+            }),
+        );
+        workspace.layout(area, &mut LayoutCtx::new());
+        assert!(workspace.scroll.offset().y > 0);
+
+        reset.set(true);
+        workspace.layout(area, &mut LayoutCtx::new());
+
+        assert_eq!(workspace.focused_note_id.as_deref(), Some("note-0"));
+        assert_eq!(workspace.scroll.offset(), ScrollOffset::default());
     }
 
     #[test]

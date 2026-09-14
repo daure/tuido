@@ -2920,6 +2920,7 @@ fn complete_dialog_has_done_reject_and_cancel_actions() {
         (Key::Char('d'), Some(TaskState::Done)),
         (Key::Char('r'), Some(TaskState::Rejected)),
         (Key::Char('c'), None),
+        (Key::Char('x'), None),
         (Key::Esc, None),
     ] {
         let mut dialog = complete_task_dialog(&test_task());
@@ -2942,6 +2943,7 @@ fn complete_dialog_has_done_reject_and_cancel_actions() {
     assert!(text.contains("Done (d)"));
     assert!(text.contains("Reject (r)"));
     assert!(text.contains("Cancel (c)"));
+    assert!(text.contains("x"));
 }
 
 #[test]

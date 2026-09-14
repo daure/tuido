@@ -1,4 +1,8 @@
-use std::{cell::RefCell, rc::Rc, time::Duration as StdDuration};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+    time::Duration as StdDuration,
+};
 
 use ratatui::{
     Frame,
@@ -90,6 +94,7 @@ pub(crate) struct CalendarWorkspace {
     active_workspace_filter: ActiveWorkspaceFilter,
     active_label_filter: ActiveLabelFilter,
     active_selection_invocation: Option<PersistenceSelectionInvocation>,
+    home_reset_request: Option<Rc<Cell<bool>>>,
 }
 
 impl CalendarWorkspace {
@@ -175,7 +180,13 @@ impl CalendarWorkspace {
             active_workspace_filter,
             active_label_filter,
             active_selection_invocation: None,
+            home_reset_request: None,
         }
+    }
+
+    pub(crate) fn home_reset_request(mut self, request: Rc<Cell<bool>>) -> Self {
+        self.home_reset_request = Some(request);
+        self
     }
 
     pub(crate) fn sync_store_version(&mut self) {
@@ -372,6 +383,23 @@ impl CalendarWorkspace {
         }
         self.today = today;
         self.calendar_mut().set_today(today);
+        true
+    }
+
+    fn sync_home_reset(&mut self) -> bool {
+        if !self
+            .home_reset_request
+            .as_ref()
+            .is_some_and(|request| request.replace(false))
+        {
+            return false;
+        }
+        self.sync_today(current_date());
+        self.calendar_mut().on_key(Key::Char('M'));
+        self.calendar_mut().on_key(Key::Char('T'));
+        self.sync_selected_date();
+        self.sync_empty_day_message();
+        self.sync_calendar_detail(&mut EventCtx::default());
         true
     }
 
@@ -952,6 +980,7 @@ impl TuiNode<AppMsg> for CalendarWorkspace {
     }
 
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
+        self.sync_home_reset();
         self.sync_store_version();
         self.sync_filter_change();
         let has_error = self
@@ -1666,6 +1695,28 @@ mod tests {
             assert_eq!(workspace.calendar().cursor_date(), workspace.today);
             assert_eq!(ctx.propagation(), Propagation::Stopped);
         }
+    }
+
+    #[test]
+    fn home_reset_returns_calendar_to_today_in_month_view() {
+        let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+            tasks: Vec::new(),
+            people: Vec::new(),
+            workspaces: Vec::new(),
+            tags: Vec::new(),
+        });
+        let reset = Rc::new(Cell::new(false));
+        let mut workspace = CalendarWorkspace::new(context, true).home_reset_request(reset.clone());
+        let area = Rect::new(0, 0, 80, 20);
+
+        workspace.calendar_mut().on_key(Key::Char('D'));
+        workspace.calendar_mut().on_key(Key::Right);
+        reset.set(true);
+        workspace.layout(area, &mut LayoutCtx::new());
+
+        assert_eq!(workspace.calendar().current_view(), CalendarView::Month);
+        assert_eq!(workspace.calendar().cursor_date(), workspace.today);
+        assert_eq!(workspace.create_context.selected_date(), workspace.today);
     }
 
     #[test]

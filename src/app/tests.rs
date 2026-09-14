@@ -64,6 +64,78 @@ fn status_bar_enables_weather_and_exposes_forecast_menu() {
 }
 
 #[test]
+fn home_hotkey_requests_all_workspace_startup_resets() {
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![test_task()],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(context.store, context.coordinator);
+    let mut layout = LayoutCtx::new();
+    app.layout(Rect::new(0, 0, 100, 30), &mut layout);
+    let task_path = layout
+        .focus_targets()
+        .iter()
+        .find(|target| target.id.as_str() == "data-view")
+        .expect("task table should be focusable")
+        .path
+        .clone();
+    let mut ctx = EventCtx::default();
+
+    let outcome = app.dispatch_event(
+        &EventRoute::new(task_path),
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('H'),
+            modifiers: KeyModifiers::SHIFT,
+        }),
+        &mut ctx,
+    );
+
+    assert!(outcome.handled());
+    assert_eq!(app.active_tab.get(), TASKS_TAB_INDEX);
+    assert!(app.return_to_active_tasks.get());
+    assert!(app.calendar_home_reset.get());
+    assert!(app.notes_home_reset.get());
+    assert_eq!(
+        ctx.focus_request(),
+        Some(&initial_task_table_focus_request())
+    );
+}
+
+#[test]
+fn home_reset_replaces_remembered_note_focus_with_the_first_note() {
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: Vec::new(),
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut app = App::new(context.store, context.coordinator);
+    set_notes(
+        &mut app,
+        vec![test_note("note-0", 0), test_note("note-1", 1)],
+    );
+    app.active_tab.set(NOTES_TAB_INDEX);
+    app.notes_home_reset.set(true);
+    let mut ctx = EventCtx::default();
+    ctx.focus(FocusRequest::Path(note_path(
+        notes_workspace_focus_path(),
+        "note-1",
+    )));
+
+    app.redirect_initial_tab_focus(&mut ctx);
+
+    assert_eq!(
+        ctx.focus_request(),
+        Some(&FocusRequest::Path(note_path(
+            notes_workspace_focus_path(),
+            "note-0",
+        )))
+    );
+}
+
+#[test]
 fn task_move_mode_uses_configured_control_m_and_emits_completed_order() {
     let mut table = task_table(
         vec![

@@ -755,6 +755,8 @@ struct App {
     new_note_edit_request: Rc<RefCell<Option<NewNoteEditRequest>>>,
     pending_task_view: TaskViewChange,
     return_to_active_tasks: ReturnToActiveTasks,
+    calendar_home_reset: Rc<Cell<bool>>,
+    notes_home_reset: Rc<Cell<bool>>,
     pending_task_navigation: PendingTaskNavigation,
     pending_focus_request: Option<FocusRequest>,
 }
@@ -863,6 +865,8 @@ impl App {
         let new_note_edit_request = Rc::new(RefCell::new(None));
         let pending_task_view = Rc::new(RefCell::new(None));
         let return_to_active_tasks = Rc::new(Cell::new(false));
+        let calendar_home_reset = Rc::new(Cell::new(false));
+        let notes_home_reset = Rc::new(Cell::new(false));
         let pending_task_navigation = Rc::new(RefCell::new(None));
         let active_workspace_filter = Rc::new(RefCell::new(None));
         let active_label_filter = Rc::new(RefCell::new(Vec::new()));
@@ -900,7 +904,8 @@ impl App {
                         calendar_create_context.clone(),
                         Rc::clone(&active_workspace_filter),
                         Rc::clone(&active_label_filter),
-                    ),
+                    )
+                    .home_reset_request(Rc::clone(&calendar_home_reset)),
                 ),
             ),
             Tab::new(
@@ -917,6 +922,7 @@ impl App {
                             .note_store(Rc::clone(&context.store))
                             .focus_path_sink(Rc::clone(&note_focus_path))
                             .focus_note_request(Rc::clone(&focus_note_request))
+                            .home_reset_request(Rc::clone(&notes_home_reset))
                             .new_note_edit_request(Rc::clone(&new_note_edit_request))
                             .zoom_levels(notes_zoom)
                             .on_zoom_change(AppMsg::SetNotesZoom)
@@ -986,6 +992,8 @@ impl App {
             new_note_edit_request,
             pending_task_view,
             return_to_active_tasks,
+            calendar_home_reset,
+            notes_home_reset,
             pending_task_navigation,
             pending_focus_request: None,
         }
@@ -3138,6 +3146,15 @@ impl App {
     }
 
     fn redirect_initial_tab_focus(&self, ctx: &mut EventCtx<AppMsg>) {
+        if self.active_tab.get() == NOTES_TAB_INDEX && self.notes_home_reset.get() {
+            if let Some(note) = self.context.store.borrow().state().notes.first() {
+                ctx.focus(FocusRequest::Path(note_path(
+                    notes_workspace_focus_path(),
+                    &note.value.id,
+                )));
+            }
+            return;
+        }
         let FocusRequest::TargetAt {
             path: tabs_path,
             id: tabs_id,
@@ -3307,6 +3324,8 @@ impl TuiNode<AppMsg> for App {
         }
         if keys::APP_RETURN_TO_ACTIVE_TASKS.matches(event) {
             self.return_to_active_tasks.set(true);
+            self.calendar_home_reset.set(true);
+            self.notes_home_reset.set(true);
             self.active_tab.set(TASKS_TAB_INDEX);
             ctx.focus(initial_task_table_focus_request());
             ctx.stop_propagation();

@@ -393,9 +393,6 @@ pub(super) fn complete_task_dialog(task: &Task) -> AppDialog {
         Dialog::new()
             .top_left("Complete task?")
             .content([format!("Choose an outcome for “{}”.", task.title)])
-            .keybindings(tuicore::DialogKeyBindings {
-                close: vec![keys::DIALOG_CLOSE.key_spec()],
-            })
             .actions([
                 tuicore::DialogAction::new("Done")
                     .hotkey(keys::COMPLETE_DONE.key_spec())
@@ -429,9 +426,6 @@ pub(super) fn complete_tasks_dialog(
         Dialog::new()
             .top_left(format!("Complete {count} tasks?"))
             .content([format!("Choose an outcome for {count} tasks.")])
-            .keybindings(tuicore::DialogKeyBindings {
-                close: vec![keys::DIALOG_CLOSE.key_spec()],
-            })
             .actions([
                 tuicore::DialogAction::new("Done")
                     .hotkey(keys::COMPLETE_DONE.key_spec())
