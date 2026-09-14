@@ -217,10 +217,10 @@ impl CalendarWorkspace {
             &self.label_filter,
         );
         self.set_calendar_entries(entries);
-        if let Some(task_id) = rollback_highlight {
-            if self.visible_entries.iter().any(|entry| entry.id == task_id) {
-                self.calendar_mut().highlight_entry_id(&task_id);
-            }
+        if let Some(task_id) = rollback_highlight
+            && self.visible_entries.iter().any(|entry| entry.id == task_id)
+        {
+            self.calendar_mut().highlight_entry_id(&task_id);
         }
         self.select_created_task();
         if let Some(value) = state.app_setting_values.get(SHOW_WEEKENDS_SETTING)

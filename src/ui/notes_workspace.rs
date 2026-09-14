@@ -382,11 +382,12 @@ impl<M: 'static> NotesWorkspace<M> {
                 previous.get(&note.value.id)
                 && editing.get()
             {
-                self.note_revisions.push(
-                    (note.value.content == *base_content)
-                        .then_some(note.revision)
-                        .unwrap_or(*revision),
-                );
+                self.note_revisions
+                    .push(if note.value.content == *base_content {
+                        note.revision
+                    } else {
+                        *revision
+                    });
                 self.notes.push(Rc::clone(content));
                 self.base_contents.push(base_content.clone());
                 self.placeholders.push(placeholder.clone());
@@ -600,6 +601,10 @@ impl<M> NotesWorkspace<M> {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Grid composition consumes parallel note state and event sinks without taking ownership"
+)]
 fn notes_grid<M: 'static>(
     columns: usize,
     panel_height: u16,
@@ -1038,12 +1043,12 @@ impl<M: 'static> TuiNode<M> for NotesWorkspace<M> {
             }
             return outcome;
         }
-        if keys::NOTE_QUICK_CREATE.matches(event) {
-            if let Some(sink) = &self.create_sink {
-                ctx.emit(sink());
-                ctx.stop_propagation();
-                return EventOutcome::Handled;
-            }
+        if keys::NOTE_QUICK_CREATE.matches(event)
+            && let Some(sink) = &self.create_sink
+        {
+            ctx.emit(sink());
+            ctx.stop_propagation();
+            return EventOutcome::Handled;
         }
         if keys::NOTES_QUICK_MENU.matches(event)
             && let Some(index) = self.focused_index()

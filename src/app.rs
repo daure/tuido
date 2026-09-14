@@ -3891,11 +3891,9 @@ impl AppContext {
     ) -> Option<PersistenceSelectionInvocation> {
         let persistence_invocation = persistence_invocation?;
         let mut invocations = self.selection_invocations.borrow_mut();
-        let Some(invocation) = invocations.iter_mut().find(|invocation| {
+        let invocation = invocations.iter_mut().find(|invocation| {
             !invocation.clear_requested && invocation.invocation == persistence_invocation
-        }) else {
-            return None;
-        };
+        })?;
         invocation.clear_requested = true;
         if persistence_guard {
             invocation.persistence_invocation = Some(persistence_invocation);

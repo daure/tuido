@@ -31,6 +31,10 @@ pub(crate) struct SettingsDialog {
 }
 
 impl SettingsDialog {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Dialog initialization receives independent persisted settings"
+    )]
     pub(crate) fn new(
         store: AppStore,
         show_calendar_weekends: bool,
@@ -506,7 +510,7 @@ mod tests {
             },
             KeyEvent::from(Key::Enter),
         ] {
-            dialog.dispatch_event(&route, &TuiEvent::Key(key.into()), &mut ctx);
+            dialog.dispatch_event(&route, &TuiEvent::Key(key), &mut ctx);
         }
 
         assert!(matches!(
