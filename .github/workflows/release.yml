@@ -1,0 +1,106 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') ||
+      (github.ref == 'refs/heads/main' &&
+      (github.event_name == 'workflow_dispatch' || !startsWith(github.event.head_commit.message, 'release:')))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: full
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Validate tag and dependency source
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, re, tomllib
+          manifest = tomllib.loads(pathlib.Path("Cargo.toml").read_text())
+          tag = os.environ["RELEASE_TAG"]
+          if os.environ["GITHUB_REF_TYPE"] == "tag":
+              assert re.fullmatch(r"v\d+\.\d+\.\d+", tag), "Expected a stable version tag"
+              assert tag == "v" + manifest["package"]["version"], "Tag must match Cargo.toml"
+          lock = tomllib.loads(pathlib.Path("Cargo.lock").read_text())
+          tuicore = next(p for p in lock["package"] if p["name"] == "tuicore")
+          assert tuicore["source"] == "registry+https://github.com/rust-lang/crates.io-index"
+          assert tuicore["checksum"], "Tuicore requires a registry checksum"
+          PY
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal --component clippy,rustfmt
+          rustup default 1.96.0
+      - name: Restore compiled dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: ubuntu-24.04-x86_64-no-lto
+          cache-bin: "false"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Check formatting and release command
+        run: |
+          cargo fmt --all --check
+          cargo fmt --manifest-path tools/release-command/Cargo.toml --check
+          python3 -m unittest discover -s scripts/tests
+      - name: Lint
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --locked
+      - name: Install cargo-dist
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-installer.sh -o "$RUNNER_TEMP/install-dist.sh"
+          sh "$RUNNER_TEMP/install-dist.sh"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Build distribution
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: dist build --artifacts=all --target=x86_64-unknown-linux-gnu --tag="$RELEASE_TAG"
+      - name: Warm optimized dependency cache
+        if: github.ref == 'refs/heads/main'
+        run: cargo build --locked --profile dist --target x86_64-unknown-linux-gnu --workspace
+      - name: Verify archive and executable
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          cd target/distrib
+          sha256sum --check tuitodo-x86_64-unknown-linux-gnu.tar.xz.sha256
+          mkdir smoke
+          tar -xJf tuitodo-x86_64-unknown-linux-gnu.tar.xz -C smoke
+          smoke/tuitodo-x86_64-unknown-linux-gnu/tuido --help
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --verify-tag --draft --generate-notes --title "$RELEASE_TAG"
+          fi
+          gh release upload "$RELEASE_TAG" target/distrib/tuitodo-x86_64-unknown-linux-gnu.tar.xz target/distrib/tuitodo-x86_64-unknown-linux-gnu.tar.xz.sha256 target/distrib/tuitodo-installer.sh --clobber
+          gh release edit "$RELEASE_TAG" --draft=false
+      - name: Remove temporary package copies before caching
+        if: always() && github.ref == 'refs/heads/main'
+        run: rm -rf -- target/package
