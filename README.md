@@ -51,7 +51,11 @@ The installer places `tuido` in `$CARGO_HOME/bin` (default `~/.cargo/bin`). Add 
 
 ### Update
 
-Close running Tuido sessions, then rerun the installer commands above to download the latest stable binary. If you installed the background MCP service, run `tuido service stop` before updating and `tuido service start` afterwards. Restart stdio MCP clients to load the updated executable. Your settings and database stay in their normal data directories; back up the database before an upgrade or rollback because older binaries may not support newer database schemas.
+Close running Tuido TUI sessions, then rerun the installer commands above to download the latest stable binary. On Ubuntu, the installer automatically stops an already-running `tuido-mcp.service` after download, verification, and staging, then starts it after replacing the executable. It checks that the service is active and uses the installed executable. Identical installations skip an unnecessary restart; inactive, failed, or uninstalled services stay as they are. The installer preserves the service definition, enablement, credentials, and database URL.
+
+Automatic restart applies only when the service uses the destination executable. Services using another path are left untouched with a warning; unavailable user systemd also produces a manual-restart notice. Set `TUIDO_NO_SERVICE_RESTART=1` on the installer process to disable service management. If installation is interrupted after stopping a service, the installer attempts to start it again; a restart failure returns an error with recovery guidance. It does not roll back binaries or database migrations automatically.
+
+Stdio MCP servers are owned by the MCP client: reconnect them after updating; the installer prints a reminder and does not kill them. Your settings and database stay in their normal data directories; back up the database before an upgrade or rollback because older binaries may not support newer database schemas.
 
 ## Build from source
 
@@ -70,6 +74,8 @@ For source-based updates, run these commands inside the checkout:
 git pull --ff-only
 cargo install --path . --locked --force
 ```
+
+Source-based installations and manual binary copies require manual MCP service restarts.
 
 After installation:
 
