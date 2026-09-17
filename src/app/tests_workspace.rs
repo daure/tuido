@@ -540,10 +540,7 @@ fn delete_shortcuts_open_confirmation_from_focused_task_table() {
     for key in [
         KeyEvent::from(Key::Delete),
         KeyEvent::from(Key::Backspace),
-        KeyEvent {
-            code: Key::Char('x'),
-            modifiers: KeyModifiers::CONTROL,
-        },
+        KeyEvent::from(Key::Char('x')),
     ] {
         let mut ctx = EventCtx::default();
         let outcome = workspace.event(&TuiEvent::Key(key), &mut ctx);
@@ -557,7 +554,7 @@ fn delete_shortcuts_open_confirmation_from_focused_task_table() {
 }
 
 #[test]
-fn ctrl_c_opens_complete_dialog_from_focused_task_table() {
+fn c_opens_complete_dialog_from_focused_task_table() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
@@ -568,13 +565,7 @@ fn ctrl_c_opens_complete_dialog_from_focused_task_table() {
     workspace.table_focused = true;
     let mut ctx = EventCtx::default();
 
-    let outcome = workspace.event(
-        &TuiEvent::Key(KeyEvent {
-            code: Key::Char('c'),
-            modifiers: KeyModifiers::CONTROL,
-        }),
-        &mut ctx,
-    );
+    let outcome = workspace.event(&TuiEvent::Key(Key::Char('c').into()), &mut ctx);
 
     assert!(outcome.handled());
     assert!(matches!(
@@ -584,7 +575,7 @@ fn ctrl_c_opens_complete_dialog_from_focused_task_table() {
 }
 
 #[test]
-fn ctrl_t_requests_direct_progress_transition_for_every_task_state() {
+fn m_requests_direct_progress_transition_for_every_task_state() {
     for (state, view) in [
         (TaskState::Backlog, TaskView::Backlog),
         (TaskState::Todo, TaskView::Active),
@@ -607,13 +598,7 @@ fn ctrl_t_requests_direct_progress_transition_for_every_task_state() {
         workspace.table_focused = true;
         let mut ctx = EventCtx::default();
 
-        let outcome = workspace.event(
-            &TuiEvent::Key(KeyEvent {
-                code: Key::Char('t'),
-                modifiers: KeyModifiers::CONTROL,
-            }),
-            &mut ctx,
-        );
+        let outcome = workspace.event(&TuiEvent::Key(Key::Char('m').into()), &mut ctx);
 
         assert!(outcome.handled(), "{state:?} should transition");
         assert!(matches!(
@@ -956,7 +941,7 @@ fn externally_changed_note_opens_notes_tab_and_focuses_the_note() {
 }
 
 #[test]
-fn ctrl_t_is_inert_without_a_highlighted_task() {
+fn m_is_inert_without_a_highlighted_task() {
     let (_runtime, context, store) = test_context(WorkspaceSnapshot {
         tasks: Vec::new(),
         people: Vec::new(),
@@ -967,13 +952,7 @@ fn ctrl_t_is_inert_without_a_highlighted_task() {
     workspace.table_focused = true;
     let mut ctx = EventCtx::default();
 
-    let outcome = workspace.event(
-        &TuiEvent::Key(KeyEvent {
-            code: Key::Char('t'),
-            modifiers: KeyModifiers::CONTROL,
-        }),
-        &mut ctx,
-    );
+    let outcome = workspace.event(&TuiEvent::Key(Key::Char('m').into()), &mut ctx);
 
     assert_eq!(outcome, EventOutcome::Ignored);
     assert!(store.borrow().state().tasks.is_empty());
@@ -982,11 +961,8 @@ fn ctrl_t_is_inert_without_a_highlighted_task() {
 }
 
 #[test]
-fn ctrl_c_from_task_detail_preserves_full_path_and_child_ownership() {
-    let complete = TuiEvent::Key(KeyEvent {
-        code: Key::Char('c'),
-        modifiers: KeyModifiers::CONTROL,
-    });
+fn c_from_task_detail_preserves_full_path_and_child_ownership() {
+    let complete = TuiEvent::Key(Key::Char('c').into());
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
@@ -1033,11 +1009,8 @@ fn ctrl_c_from_task_detail_preserves_full_path_and_child_ownership() {
 }
 
 #[test]
-fn ctrl_x_from_task_detail_opens_delete_except_under_links() {
-    let ctrl_x = TuiEvent::Key(KeyEvent {
-        code: Key::Char('x'),
-        modifiers: KeyModifiers::CONTROL,
-    });
+fn x_from_task_detail_opens_delete_except_under_links() {
+    let delete = TuiEvent::Key(Key::Char('x').into());
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
@@ -1056,7 +1029,7 @@ fn ctrl_x_from_task_detail_opens_delete_except_under_links() {
     let effects = TreeDispatcher::new().dispatch_event(
         &mut workspace,
         &EventRoute::new(title.path.clone()),
-        &ctrl_x,
+        &delete,
         AnimationSettings::default(),
     );
 
@@ -1075,7 +1048,7 @@ fn ctrl_x_from_task_detail_opens_delete_except_under_links() {
         workspace.handle_detail_delete_shortcut(
             EventOutcome::Handled,
             &title_route,
-            &ctrl_x,
+            &delete,
             &mut handled_ctx,
         ),
         None
@@ -1088,7 +1061,7 @@ fn ctrl_x_from_task_detail_opens_delete_except_under_links() {
         workspace.handle_detail_delete_shortcut(
             EventOutcome::Ignored,
             &title_route,
-            &ctrl_x,
+            &delete,
             &mut stopped_ctx,
         ),
         None
@@ -1099,7 +1072,6 @@ fn ctrl_x_from_task_detail_opens_delete_except_under_links() {
         Vec::new(),
         vec![crate::domain::TaskLink::new("https://example.com".into())],
     ] {
-        let populated = !links.is_empty();
         let mut task = test_task();
         task.links = links;
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
@@ -1123,13 +1095,10 @@ fn ctrl_x_from_task_detail_opens_delete_except_under_links() {
         let effects = TreeDispatcher::new().dispatch_event(
             &mut workspace,
             &EventRoute::new(links.path.clone()),
-            &ctrl_x,
+            &delete,
             AnimationSettings::default(),
         );
 
-        if populated {
-            assert!(effects.outcome.handled());
-        }
         assert!(
             !effects
                 .messages
@@ -1185,7 +1154,7 @@ fn ctrl_x_from_task_detail_opens_delete_except_under_links() {
         let effects = TreeDispatcher::new().dispatch_event(
             &mut workspace,
             &EventRoute::new(editor.path.clone()),
-            &ctrl_x,
+            &delete,
             AnimationSettings::default(),
         );
 
@@ -1316,10 +1285,7 @@ fn detail_dialog_cancel_restores_resolvable_full_app_focus_path() {
     let effects = TreeDispatcher::new().dispatch_event(
         &mut app,
         &EventRoute::new(description_path.clone()),
-        &TuiEvent::Key(KeyEvent {
-            code: Key::Char('z'),
-            modifiers: KeyModifiers::CONTROL,
-        }),
+        &TuiEvent::Key(Key::Char('n').into()),
         AnimationSettings::default(),
     );
     let [
@@ -1363,10 +1329,7 @@ fn detail_dialog_cancel_restores_resolvable_full_app_focus_path() {
     let delete_effects = TreeDispatcher::new().dispatch_event(
         &mut app,
         &EventRoute::new(description_path.clone()),
-        &TuiEvent::Key(KeyEvent {
-            code: Key::Char('x'),
-            modifiers: KeyModifiers::CONTROL,
-        }),
+        &TuiEvent::Key(Key::Char('x').into()),
         AnimationSettings::default(),
     );
     let [
@@ -1684,7 +1647,7 @@ fn missing_task_dialog_targets_clear_origin_and_focus_task_table() {
 }
 
 #[test]
-fn quick_menu_opens_with_visible_task_and_ctrl_z_snoozes_from_table() {
+fn quick_menu_opens_with_visible_task_and_n_snoozes_from_table() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
@@ -1692,10 +1655,7 @@ fn quick_menu_opens_with_visible_task_and_ctrl_z_snoozes_from_table() {
         tags: Vec::new(),
     });
     let mut workspace = TaskWorkspace::new(context);
-    let snooze = TuiEvent::Key(KeyEvent {
-        code: Key::Char('z'),
-        modifiers: KeyModifiers::CONTROL,
-    });
+    let snooze = TuiEvent::Key(Key::Char('n').into());
     let quick_menu = TuiEvent::Key(KeyEvent::from(Key::Char('.')));
 
     let mut detail = EventCtx::default();
@@ -3605,7 +3565,7 @@ fn created_task_state_hotkey_focuses_open_dropdown() {
 }
 
 #[test]
-fn focused_dropdown_search_allows_ctrl_z_to_snooze_task() {
+fn focused_dropdown_search_treats_task_action_keys_as_text() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],
         people: Vec::new(),
@@ -3652,24 +3612,33 @@ fn focused_dropdown_search_allows_ctrl_z_to_snooze_task() {
         .expect("dropdown search should become focused");
     let focused_path = focused.path.clone();
 
-    let effects = dispatcher.dispatch_event(
-        &mut workspace,
-        &EventRoute::new(focused_path.clone()),
-        &TuiEvent::Key(KeyEvent {
-            code: Key::Char('z'),
-            modifiers: KeyModifiers::CONTROL,
-        }),
-        AnimationSettings::default(),
-    );
-
-    assert!(effects.outcome.handled());
-    assert!(matches!(
-        effects.messages.as_slice(),
-        [AppMsg::OpenTaskSnooze {
-            task_id,
-            return_focus: Some(return_focus),
-        }] if task_id == "task-1" && return_focus == &SnoozeReturnFocus::Path(focused_path.clone())
-    ));
+    for key in ['x', 'c', 'm', 'n'] {
+        let effects = dispatcher.dispatch_event(
+            &mut workspace,
+            &EventRoute::new(focused_path.clone()),
+            &TuiEvent::Key(Key::Char(key).into()),
+            AnimationSettings::default(),
+        );
+        assert!(effects.outcome.handled());
+        assert!(effects.messages.is_empty());
+    }
+    LayoutCtx::new().with_overlay_bounds(area, |ctx| workspace.layout(area, ctx));
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut ctx = RenderCtx::new();
+            workspace.render(frame, area, &mut ctx);
+            ctx.flush(frame);
+        })
+        .unwrap();
+    let text = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(text.contains("xcmn"), "rendered dropdown search: {text:?}");
 }
 
 #[test]
@@ -3682,6 +3651,59 @@ fn task_state_switcher_excludes_snoozed() {
     assert_eq!(
         choice_ids,
         ["backlog", "todo", "in_progress", "done", "rejected"]
+    );
+}
+
+#[test]
+fn description_search_owns_n_until_search_is_closed() {
+    let mut task = test_task();
+    task.description = "needle first\nneedle second".into();
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![task],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut workspace = TaskWorkspace::new(context);
+    let mut layout = LayoutCtx::new();
+    workspace.layout(Rect::new(0, 0, 120, 40), &mut layout);
+    let description = layout
+        .focus_targets()
+        .iter()
+        .find(|target| {
+            target.id.as_str() == "textarea"
+                && target
+                    .path
+                    .keys()
+                    .iter()
+                    .any(|key| key.as_str() == "description")
+        })
+        .unwrap()
+        .clone();
+    workspace.dispatch_focus(&description, true, &mut FocusCtx::default());
+    let route = EventRoute::new(description.path);
+    for key in "/needle"
+        .chars()
+        .map(Key::Char)
+        .chain([Key::Enter, Key::Char('n')])
+    {
+        let mut ctx = EventCtx::default();
+        assert!(
+            workspace
+                .dispatch_event(&route, &TuiEvent::Key(key.into()), &mut ctx)
+                .handled()
+        );
+        assert!(ctx.messages().is_empty());
+    }
+    workspace.dispatch_event(
+        &route,
+        &TuiEvent::Key(Key::Esc.into()),
+        &mut EventCtx::default(),
+    );
+    let mut ctx = EventCtx::default();
+    workspace.dispatch_event(&route, &TuiEvent::Key(Key::Char('n').into()), &mut ctx);
+    assert!(
+        matches!(ctx.messages(), [AppMsg::OpenTaskSnooze { task_id, .. }] if task_id == "task-1")
     );
 }
 
@@ -3759,7 +3781,7 @@ fn task_description_shows_speed_read_hotkey() {
 }
 
 #[test]
-fn ctrl_t_toggles_task_progress_when_focused_inside_detail_view() {
+fn m_toggles_task_progress_when_focused_inside_detail_view() {
     let task = test_task();
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: vec![task],
@@ -3782,10 +3804,7 @@ fn ctrl_t_toggles_task_progress_when_focused_inside_detail_view() {
     let effects = TreeDispatcher::new().dispatch_event(
         &mut workspace,
         &EventRoute::new(title_input.path.clone()),
-        &TuiEvent::Key(tuicore::KeyEvent {
-            code: tuicore::Key::Char('t'),
-            modifiers: tuicore::KeyModifiers::CONTROL,
-        }),
+        &TuiEvent::Key(Key::Char('m').into()),
         AnimationSettings::default(),
     );
 

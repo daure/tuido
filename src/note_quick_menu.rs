@@ -139,6 +139,16 @@ impl NoteQuickMenu {
         handled
     }
 
+    fn delete_hotkey(&mut self, event: &TuiEvent, ctx: &mut EventCtx<AppMsg>) -> bool {
+        if !self.dropdown.search_query().is_empty() || !keys::NOTES_DELETE.matches(event) {
+            return false;
+        }
+        self.actions.borrow_mut().push(NoteQuickAction::Delete);
+        self.drain_actions(ctx);
+        ctx.stop_propagation();
+        true
+    }
+
     fn centered_field_area(&self, area: Rect) -> Rect {
         let width = MENU_FIELD_WIDTH.min(area.width);
         let hint = <Dropdown<NoteQuickOption, NoteQuickAction> as TuiNode<AppMsg>>::measure(
@@ -189,6 +199,9 @@ impl TuiNode<AppMsg> for NoteQuickMenu {
     }
 
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<AppMsg>) -> EventOutcome {
+        if self.delete_hotkey(event, ctx) {
+            return EventOutcome::Handled;
+        }
         if let TuiEvent::Key(key) = event
             && keybindings().focus().unfocus_matches(*key)
         {
@@ -207,6 +220,9 @@ impl TuiNode<AppMsg> for NoteQuickMenu {
         event: &TuiEvent,
         ctx: &mut EventCtx<AppMsg>,
     ) -> EventOutcome {
+        if self.delete_hotkey(event, ctx) {
+            return EventOutcome::Handled;
+        }
         let was_open = self.dropdown.is_open();
         let outcome = self.dropdown.dispatch_event(route, event, ctx);
         self.finish_event(was_open, outcome, ctx)
@@ -244,6 +260,39 @@ impl TuiNode<AppMsg> for NoteQuickMenu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn note_menu_x_requests_delete_confirmation_unless_searching() {
+        for routed in [false, true] {
+            let mut menu = NoteQuickMenu::new("note-1".into());
+            let mut layout = LayoutCtx::new();
+            menu.layout(Rect::new(0, 0, 80, 24), &mut layout);
+            let target = layout.focus_targets().last().unwrap().clone();
+            menu.dispatch_focus(&target, true, &mut FocusCtx::default());
+            let event = TuiEvent::Key(tuicore::Key::Char('x').into());
+            let mut ctx = EventCtx::default();
+            if routed {
+                menu.dispatch_event(&EventRoute::new(target.path.clone()), &event, &mut ctx);
+            } else {
+                menu.event(&event, &mut ctx);
+            }
+            assert!(matches!(ctx.messages(), [AppMsg::OpenDeleteNote(id)] if id == "note-1"));
+            assert_eq!(ctx.propagation(), tuicore::Propagation::Stopped);
+
+            menu.event(
+                &TuiEvent::Key(tuicore::Key::Char('e').into()),
+                &mut EventCtx::default(),
+            );
+            let mut ctx = EventCtx::default();
+            if routed {
+                menu.dispatch_event(&EventRoute::new(target.path), &event, &mut ctx);
+            } else {
+                menu.event(&event, &mut ctx);
+            }
+            assert!(ctx.messages().is_empty());
+            assert_eq!(menu.dropdown.search_query(), "ex");
+        }
+    }
 
     #[test]
     fn quick_menu_copies_selected_note_process_command() {

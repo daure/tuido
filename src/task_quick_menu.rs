@@ -166,6 +166,7 @@ struct TaskQuickOption {
 pub(crate) struct TaskQuickMenu {
     task_ids: Vec<String>,
     multiple: bool,
+    progress_action: TaskQuickAction,
     dropdown: Dropdown<TaskQuickOption, TaskQuickAction>,
     actions: Rc<RefCell<Vec<TaskQuickAction>>>,
     time: Option<PrimitiveDateTime>,
@@ -233,6 +234,7 @@ impl TaskQuickMenu {
         Self {
             task_ids: vec![task_id],
             multiple: false,
+            progress_action: TaskQuickAction::ToggleProgress,
             dropdown,
             actions,
             time,
@@ -357,6 +359,11 @@ impl TaskQuickMenu {
         Self {
             task_ids,
             multiple: true,
+            progress_action: if task_states.iter().all(|state| *state == TaskState::Todo) {
+                TaskQuickAction::MarkInProgress
+            } else {
+                TaskQuickAction::MarkTodo
+            },
             dropdown,
             actions,
             time,
@@ -484,7 +491,24 @@ impl TaskQuickMenu {
         )
     }
 
-    fn copy_hotkey(&self, event: &TuiEvent, ctx: &mut EventCtx<AppMsg>) -> bool {
+    fn action_hotkey(&mut self, event: &TuiEvent, ctx: &mut EventCtx<AppMsg>) -> bool {
+        let action = if keys::TASK_COMPLETE.matches(event) {
+            Some(TaskQuickAction::CompleteReject)
+        } else if keys::TASK_TOGGLE_PROGRESS.matches(event) {
+            Some(self.progress_action)
+        } else if keys::TASK_SNOOZE.matches(event) {
+            Some(TaskQuickAction::Snooze)
+        } else if keys::TASK_DELETE_CTRL_X.matches(event) {
+            Some(TaskQuickAction::Delete)
+        } else {
+            None
+        };
+        if let Some(action) = action
+            && self.dropdown.search_query().is_empty()
+        {
+            self.actions.borrow_mut().push(action);
+            return self.drain_actions(ctx);
+        }
         match event {
             TuiEvent::Yank => self.copy_to_clipboard(self.clipboard.reference.as_ref(), ctx),
             TuiEvent::Hotkey(tuicore::HotkeyEvent::Commit(sequence))
@@ -539,7 +563,7 @@ impl TuiNode<AppMsg> for TaskQuickMenu {
     }
 
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<AppMsg>) -> EventOutcome {
-        if self.copy_hotkey(event, ctx) {
+        if self.action_hotkey(event, ctx) {
             ctx.stop_propagation();
             return EventOutcome::Handled;
         }
@@ -561,7 +585,7 @@ impl TuiNode<AppMsg> for TaskQuickMenu {
         event: &TuiEvent,
         ctx: &mut EventCtx<AppMsg>,
     ) -> EventOutcome {
-        if self.copy_hotkey(event, ctx) {
+        if self.action_hotkey(event, ctx) {
             ctx.stop_propagation();
             return EventOutcome::Handled;
         }
@@ -603,6 +627,107 @@ impl TuiNode<AppMsg> for TaskQuickMenu {
 mod tests {
     use super::*;
     use tuicore::{Key, KeyEvent};
+
+    #[test]
+    fn task_menu_shortcuts_target_single_tasks_and_selected_groups() {
+        for multiple in [false, true] {
+            for routed in [false, true] {
+                for key in ['x', 'c', 'm', 'n'] {
+                    let mut menu = if multiple {
+                        TaskQuickMenu::new_multiple(
+                            vec!["task-1".into(), "task-2".into()],
+                            vec![TaskState::Todo, TaskState::Todo],
+                            clipboard(),
+                            true,
+                            true,
+                        )
+                    } else {
+                        TaskQuickMenu::new(
+                            "task-1".into(),
+                            TaskState::Todo,
+                            clipboard(),
+                            true,
+                            true,
+                        )
+                    };
+                    let mut layout = LayoutCtx::new();
+                    menu.layout(Rect::new(0, 0, 80, 24), &mut layout);
+                    let target = layout.focus_targets().last().unwrap().clone();
+                    menu.dispatch_focus(&target, true, &mut FocusCtx::default());
+                    let event = TuiEvent::Key(Key::Char(key).into());
+                    let mut ctx = EventCtx::default();
+                    let outcome = if routed {
+                        menu.dispatch_event(&EventRoute::new(target.path), &event, &mut ctx)
+                    } else {
+                        menu.event(&event, &mut ctx)
+                    };
+                    assert!(outcome.handled());
+                    assert_eq!(ctx.propagation(), tuicore::Propagation::Stopped);
+                    match (multiple, key, ctx.messages()) {
+                        (false, 'x', [AppMsg::OpenDeleteTask { task_id, .. }])
+                        | (false, 'c', [AppMsg::OpenCompleteTask { task_id, .. }])
+                        | (false, 'n', [AppMsg::OpenTaskSnooze { task_id, .. }])
+                        | (
+                            false,
+                            'm',
+                            [AppMsg::ToggleTaskProgress(task_id), AppMsg::CloseDialog],
+                        ) => {
+                            assert_eq!(task_id, "task-1");
+                        }
+                        (true, 'x', [AppMsg::OpenDeleteTasks(task_ids)])
+                        | (true, 'c', [AppMsg::OpenCompleteTasks(task_ids)])
+                        | (true, 'n', [AppMsg::OpenTasksSnooze(task_ids)])
+                        | (
+                            true,
+                            'm',
+                            [
+                                AppMsg::CompleteTasks {
+                                    task_ids,
+                                    state: TaskState::InProgress,
+                                },
+                            ],
+                        ) => {
+                            assert_eq!(task_ids, &["task-1", "task-2"]);
+                        }
+                        _ => panic!("unexpected action for {key}: {:?}", ctx.messages()),
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn task_menu_progress_shortcut_marks_mixed_selection_as_todo() {
+        let mut menu = TaskQuickMenu::new_multiple(
+            vec!["task-1".into(), "task-2".into()],
+            vec![TaskState::Todo, TaskState::InProgress],
+            clipboard(),
+            true,
+            true,
+        );
+        let mut ctx = EventCtx::default();
+        menu.event(&TuiEvent::Key(Key::Char('m').into()), &mut ctx);
+        assert!(
+            matches!(ctx.messages(), [AppMsg::CompleteTasks { task_ids, state: TaskState::Todo }]
+            if task_ids == &["task-1", "task-2"])
+        );
+    }
+
+    #[test]
+    fn task_menu_search_keeps_action_letters_as_query_text() {
+        let mut menu =
+            TaskQuickMenu::new("task-1".into(), TaskState::Todo, clipboard(), true, true);
+        menu.event(
+            &TuiEvent::Key(Key::Char('e').into()),
+            &mut EventCtx::default(),
+        );
+        for key in ['x', 'c', 'm', 'n'] {
+            let mut ctx = EventCtx::default();
+            menu.event(&TuiEvent::Key(Key::Char(key).into()), &mut ctx);
+            assert!(ctx.messages().is_empty());
+        }
+        assert_eq!(menu.dropdown.search_query(), "excmn");
+    }
 
     fn clipboard() -> TaskQuickClipboard {
         TaskQuickClipboard {

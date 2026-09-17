@@ -1826,34 +1826,10 @@ fn store_refresh_keeps_transient_task_selection_for_table_actions() {
 #[test]
 fn one_item_task_list_selection_routes_every_direct_action_to_group_handlers() {
     let actions = [
-        (
-            TuiEvent::Key(KeyEvent {
-                code: Key::Char('c'),
-                modifiers: KeyModifiers::CONTROL,
-            }),
-            "complete",
-        ),
-        (
-            TuiEvent::Key(KeyEvent {
-                code: Key::Char('t'),
-                modifiers: KeyModifiers::CONTROL,
-            }),
-            "progress",
-        ),
-        (
-            TuiEvent::Key(KeyEvent {
-                code: Key::Char('x'),
-                modifiers: KeyModifiers::CONTROL,
-            }),
-            "delete",
-        ),
-        (
-            TuiEvent::Key(KeyEvent {
-                code: Key::Char('z'),
-                modifiers: KeyModifiers::CONTROL,
-            }),
-            "snooze",
-        ),
+        (TuiEvent::Key(Key::Char('c').into()), "complete"),
+        (TuiEvent::Key(Key::Char('m').into()), "progress"),
+        (TuiEvent::Key(Key::Char('x').into()), "delete"),
+        (TuiEvent::Key(Key::Char('n').into()), "snooze"),
     ];
     for (event, action) in actions {
         let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
@@ -2631,13 +2607,7 @@ fn calendar_transient_single_selection_routes_progress_as_a_group_action() {
     }
     let mut ctx = EventCtx::default();
 
-    workspace.event(
-        &TuiEvent::Key(KeyEvent {
-            code: Key::Char('t'),
-            modifiers: KeyModifiers::CONTROL,
-        }),
-        &mut ctx,
-    );
+    workspace.event(&TuiEvent::Key(Key::Char('m').into()), &mut ctx);
 
     assert!(matches!(
         ctx.messages(),

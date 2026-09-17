@@ -558,6 +558,27 @@ impl CalendarWorkspace {
         }
     }
 
+    fn handle_calendar_snooze_shortcut(
+        &mut self,
+        event: &TuiEvent,
+        calendar_path: tuicore::TreePath,
+        ctx: &mut EventCtx<AppMsg>,
+    ) -> Option<EventOutcome> {
+        if !keys::TASK_SNOOZE.matches(event) || self.calendar().is_reordering() {
+            return None;
+        }
+        // The calendar day list reserves DataView paging keys even without pagination.
+        let snooze_return_focus = self.calendar_snooze_return_focus(calendar_path.clone());
+        let outcome = self.handle_task_shortcut(
+            EventOutcome::Ignored,
+            event,
+            Some(calendar_path),
+            Some(snooze_return_focus),
+            ctx,
+        );
+        outcome.handled().then_some(outcome)
+    }
+
     fn handle_task_shortcut(
         &mut self,
         outcome: EventOutcome,
@@ -1070,6 +1091,10 @@ impl TuiNode<AppMsg> for CalendarWorkspace {
         if let Some(outcome) = self.handle_task_reference_yank(event, ctx) {
             return outcome;
         }
+        if let Some(outcome) = self.handle_calendar_snooze_shortcut(event, ctx.current_path(), ctx)
+        {
+            return outcome;
+        }
         let previous = self.calendar().is_showing_weekends();
         let outcome = self.calendar_mut().event(event, ctx);
         self.sync_selected_date();
@@ -1104,6 +1129,15 @@ impl TuiNode<AppMsg> for CalendarWorkspace {
             return outcome;
         }
         if let Some(outcome) = self.handle_task_reference_yank(event, ctx) {
+            return outcome;
+        }
+        if !detail_route
+            && let Some(outcome) = self.handle_calendar_snooze_shortcut(
+                event,
+                Self::workspace_path(route, ctx).child(ChildKey::first()),
+                ctx,
+            )
+        {
             return outcome;
         }
         let previous = self.calendar().is_showing_weekends();
@@ -2524,15 +2558,10 @@ mod tests {
             .path
             .clone();
         let route = EventRoute::new(detail_path.clone());
-        let shortcut = |character| {
-            TuiEvent::Key(KeyEvent {
-                code: Key::Char(character),
-                modifiers: KeyModifiers::CONTROL,
-            })
-        };
+        let shortcut = |character| TuiEvent::Key(Key::Char(character).into());
 
         let mut snooze_ctx = EventCtx::default();
-        let snooze = workspace.dispatch_event(&route, &shortcut('z'), &mut snooze_ctx);
+        let snooze = workspace.dispatch_event(&route, &shortcut('n'), &mut snooze_ctx);
         assert!(snooze.handled());
         assert!(matches!(
             snooze_ctx.messages(),
@@ -2559,7 +2588,7 @@ mod tests {
         ));
 
         let mut progress_ctx = EventCtx::default();
-        let progress = workspace.dispatch_event(&route, &shortcut('t'), &mut progress_ctx);
+        let progress = workspace.dispatch_event(&route, &shortcut('m'), &mut progress_ctx);
         assert!(progress.handled());
         assert!(matches!(
             progress_ctx.messages(),
@@ -2600,19 +2629,16 @@ mod tests {
             .clone();
         let route = EventRoute::new(calendar_path.clone());
 
-        for key in ['z', 'x', 'c'] {
+        for key in ['n', 'x', 'c'] {
             let effects = TreeDispatcher::new().dispatch_event(
                 &mut workspace,
                 &route,
-                &TuiEvent::Key(KeyEvent {
-                    code: Key::Char(key),
-                    modifiers: KeyModifiers::CONTROL,
-                }),
+                &TuiEvent::Key(Key::Char(key).into()),
                 AnimationSettings::default(),
             );
             match (key, effects.messages.as_slice()) {
                 (
-                    'z',
+                    'n',
                     [
                         AppMsg::OpenTaskSnooze {
                             return_focus:
@@ -2676,13 +2702,7 @@ mod tests {
         }
         let mut ctx = EventCtx::default();
 
-        workspace.event(
-            &TuiEvent::Key(KeyEvent {
-                code: Key::Char('z'),
-                modifiers: KeyModifiers::CONTROL,
-            }),
-            &mut ctx,
-        );
+        workspace.event(&TuiEvent::Key(Key::Char('n').into()), &mut ctx);
 
         assert!(matches!(
             ctx.messages(),

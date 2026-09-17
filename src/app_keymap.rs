@@ -377,7 +377,7 @@ pub mod keys {
     pub const NOTES_YANK: AppBinding = AppBinding::new_sequence("NOTES_YANK", "yy");
     pub const NOTES_YANK_PROCESS: AppBinding = AppBinding::new_sequence("NOTES_YANK_PROCESS", "yp");
     pub const NOTES_YANK_CLARIFY: AppBinding = AppBinding::new_sequence("NOTES_YANK_CLARIFY", "yc");
-    pub const NOTES_DELETE: AppBinding = AppBinding::new("NOTES_DELETE", "ctrl+x");
+    pub const NOTES_DELETE: AppBinding = AppBinding::new("NOTES_DELETE", "x");
     pub const NOTES_QUICK_MENU: AppBinding = AppBinding::new("NOTES_QUICK_MENU", ".");
     pub const APP_WORKSPACES_TAB: AppBinding = AppBinding::new_sequence("APP_WORKSPACES_TAB", "wo");
     pub const APP_PEOPLE_TAB: AppBinding = AppBinding::new_sequence("APP_PEOPLE_TAB", "pe");
@@ -389,12 +389,12 @@ pub mod keys {
     pub const TASK_LABEL_FILTER: AppBinding = AppBinding::new("TASK_LABEL_FILTER", "shift+a");
     pub const TASK_DELETE: AppBinding = AppBinding::new("TASK_DELETE", "delete");
     pub const TASK_DELETE_BACKSPACE: AppBinding = AppBinding::new("TASK_DELETE_X", "backspace");
-    pub const TASK_DELETE_CTRL_X: AppBinding = AppBinding::new("TASK_DELETE_CTRL_X", "ctrl+x");
+    pub const TASK_DELETE_CTRL_X: AppBinding = AppBinding::new("TASK_DELETE_CTRL_X", "x");
     pub const TASK_QUICK_MENU: AppBinding = AppBinding::new("TASK_QUICK_MENU", ".");
     pub const TASK_MOVE_MODE: AppBinding = AppBinding::new("TASK_MOVE_MODE", "ctrl+m");
-    pub const TASK_SNOOZE: AppBinding = AppBinding::new("TASK_SNOOZE", "ctrl+z");
-    pub const TASK_COMPLETE: AppBinding = AppBinding::new("TASK_COMPLETE", "ctrl+c");
-    pub const TASK_TOGGLE_PROGRESS: AppBinding = AppBinding::new("TASK_TOGGLE_PROGRESS", "ctrl+t");
+    pub const TASK_SNOOZE: AppBinding = AppBinding::new("TASK_SNOOZE", "n");
+    pub const TASK_COMPLETE: AppBinding = AppBinding::new("TASK_COMPLETE", "c");
+    pub const TASK_TOGGLE_PROGRESS: AppBinding = AppBinding::new("TASK_TOGGLE_PROGRESS", "m");
     pub const TASK_AGENT_YANK: AppBinding = AppBinding::new_sequence("TASK_AGENT_YANK", "ye");
     pub const TASK_AGENT_YANK_CLARIFY: AppBinding =
         AppBinding::new_sequence("TASK_AGENT_YANK_CLARIFY", "yc");
@@ -946,14 +946,15 @@ mod tests {
             ("NOTES_YANK", "yy"),
             ("NOTES_YANK_PROCESS", "yp"),
             ("NOTES_YANK_CLARIFY", "yc"),
-            ("TASK_SNOOZE", "ctrl+z"),
-            ("TASK_COMPLETE", "ctrl+c"),
-            ("TASK_TOGGLE_PROGRESS", "ctrl+t"),
+            ("NOTES_DELETE", "x"),
+            ("TASK_SNOOZE", "n"),
+            ("TASK_COMPLETE", "c"),
+            ("TASK_TOGGLE_PROGRESS", "m"),
             ("TASK_AGENT_YANK", "ye"),
             ("TASK_AGENT_YANK_CLARIFY", "yc"),
             ("TASK_LINK_OPEN_BACKGROUND", "ctrl+enter"),
             ("TASK_LINK_TOGGLE_TITLE", "space"),
-            ("TASK_DELETE_CTRL_X", "ctrl+x"),
+            ("TASK_DELETE_CTRL_X", "x"),
             ("TASK_DELETE", "delete"),
             ("TASK_DELETE_X", "backspace"),
             ("MANAGEMENT_DELETE_X", "ctrl+x"),
@@ -964,7 +965,7 @@ mod tests {
         }
         assert_eq!(
             keymap.binding("TASK_SNOOZE").unwrap().spec.unwrap().label(),
-            "⌃z"
+            "n"
         );
     }
 
@@ -1087,26 +1088,15 @@ mod tests {
 
     #[test]
     fn task_action_and_complete_flow_bindings_cannot_shadow_runtime_quit() {
-        for (name, key) in [
-            (
-                "TASK_TOGGLE_PROGRESS",
-                KeyEvent {
-                    code: Key::Char('t'),
-                    modifiers: KeyModifiers::CONTROL,
-                },
-            ),
-            (
-                "TASK_COMPLETE",
-                KeyEvent {
-                    code: Key::Char('c'),
-                    modifiers: KeyModifiers::CONTROL,
-                },
-            ),
-            ("COMPLETE_DONE", KeyEvent::from(Key::Char('d'))),
-            ("DIALOG_CANCEL", KeyEvent::from(Key::Char('c'))),
+        for name in [
+            "TASK_TOGGLE_PROGRESS",
+            "TASK_COMPLETE",
+            "COMPLETE_DONE",
+            "DIALOG_CANCEL",
         ] {
-            let keymap = AppKeymap::from_overrides(std::iter::empty::<(String, String)>()).unwrap();
-            let runtime = tuicore::RuntimeKeyBindings::new().with_quit([KeySpec::from(key)]);
+            let keymap = AppKeymap::from_overrides([(name.into(), "ctrl+q".into())]).unwrap();
+            let runtime =
+                tuicore::RuntimeKeyBindings::new().with_quit([parse_key("ctrl+q").unwrap()]);
 
             let error = keymap.validate_runtime_quit(&runtime).unwrap_err();
 

@@ -1577,10 +1577,11 @@ mod tests {
     }
 
     #[test]
-    fn quick_menu_opens_only_for_a_focused_non_editing_note() {
+    fn focused_note_action_keys_remain_text_while_editing() {
         let mut workspace = NotesWorkspace::<String>::new()
             .note_source(note_source(1))
-            .on_quick_menu(|note_id| note_id);
+            .on_quick_menu(|note_id| note_id)
+            .on_delete(|note_id| format!("delete {note_id}"));
         let area = Rect::new(0, 0, 120, 15);
         let mut layout = LayoutCtx::new();
         workspace.layout(area, &mut layout);
@@ -1606,14 +1607,12 @@ mod tests {
             &mut EventCtx::default(),
         );
         let mut editing = EventCtx::default();
-        workspace.dispatch_event(
-            &route,
-            &TuiEvent::Key(KeyEvent::from(Key::Char('.'))),
-            &mut editing,
-        );
+        for key in ['.', 'x'] {
+            workspace.dispatch_event(&route, &TuiEvent::Key(Key::Char(key).into()), &mut editing);
+        }
 
         assert!(editing.messages().is_empty());
-        assert_eq!(workspace.notes[0].borrow().as_str(), ".");
+        assert_eq!(workspace.notes[0].borrow().as_str(), ".x");
     }
 
     #[test]
@@ -1960,7 +1959,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_x_on_focused_note_emits_its_id_for_confirmation() {
+    fn x_on_focused_note_emits_its_id_for_confirmation() {
         let mut workspace = NotesWorkspace::<String>::new()
             .note_source(note_source(2))
             .on_delete(|id| id);
@@ -1978,10 +1977,7 @@ mod tests {
 
         workspace.dispatch_event(
             &EventRoute::new(target.path),
-            &TuiEvent::Key(KeyEvent {
-                code: Key::Char('x'),
-                modifiers: KeyModifiers::CONTROL,
-            }),
+            &TuiEvent::Key(Key::Char('x').into()),
             &mut ctx,
         );
 
