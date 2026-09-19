@@ -1,6 +1,6 @@
 [package]
 name = "tuitodo"
-version = "0.28.5"
+version = "0.28.6"
 edition = "2024"
 default-run = "tuido"
 description = "Keyboard-first task manager with optional MCP access"
