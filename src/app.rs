@@ -2809,7 +2809,6 @@ impl App {
             self.focus_bulk_result(calendar_origin, ctx);
             return;
         };
-        let was_backlog = task.state == TaskState::Backlog;
         let was_snoozed = task.state == TaskState::Snoozed;
         let state = toggled_task_progress_state(task.state);
         let patch = TaskPatch::State(state);
@@ -2825,11 +2824,18 @@ impl App {
             self.finish_transient_selection_without_persistence(None);
             return;
         }
-        self.context
-            .coordinator
-            .borrow_mut()
-            .submit(PersistenceCommand::PatchTask(task_id.clone(), patch));
-        if was_backlog || was_snoozed {
+        let persistence = if task.state == TaskState::Todo {
+            PersistenceCommand::BulkPatchTasks {
+                before: vec![task.clone()],
+                patch,
+                expected_revisions: Default::default(),
+                selection_invocation: None,
+            }
+        } else {
+            PersistenceCommand::PatchTask(task_id.clone(), patch)
+        };
+        self.context.coordinator.borrow_mut().submit(persistence);
+        if was_snoozed {
             *self.pending_task_view.borrow_mut() = Some(TaskView::Active);
         }
         if was_snoozed && !calendar_origin {

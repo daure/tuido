@@ -646,7 +646,7 @@ fn direct_progress_transition_updates_state_persists_and_notifies() {
 }
 
 #[test]
-fn promoting_backlog_task_changes_task_filter_to_active() {
+fn promoting_backlog_task_keeps_task_filter_at_backlog() {
     let (_runtime, context, store) = test_context(WorkspaceSnapshot {
         tasks: vec![task_with("task-1", "Shortcut task", TaskState::Backlog)],
         people: Vec::new(),
@@ -654,17 +654,18 @@ fn promoting_backlog_task_changes_task_filter_to_active() {
         tags: Vec::new(),
     });
     let mut app = App::new(context.store, context.coordinator);
+    *app.pending_task_view.borrow_mut() = Some(TaskView::Backlog);
     let mut ctx = EventCtx::default();
 
     app.toggle_task_progress("task-1".into(), &mut ctx);
 
     assert_eq!(store.borrow().state().tasks[0].state, TaskState::Todo);
-    assert_eq!(*app.pending_task_view.borrow(), Some(TaskView::Active));
+    assert_eq!(*app.pending_task_view.borrow(), Some(TaskView::Backlog));
     let area = Rect::new(0, 0, 120, 40);
     app.layout(area, &mut LayoutCtx::new());
     let text = rendered_text(&app, area);
-    assert!(text.contains(" Active"));
-    assert!(text.contains("Shortcut task"));
+    assert!(text.contains(" Backlog"));
+    assert!(!text.contains("Shortcut task"));
 }
 
 #[test]
