@@ -3397,7 +3397,10 @@ fn detail_focused_yanks_prefer_transient_task_group() {
     let detail_path = layout
         .focus_targets()
         .iter()
-        .find(|target| target.path.keys().first() == Some(&ChildKey::second()))
+        .find(|target| {
+            target.id.as_str() == "field"
+                && target.path.keys().iter().any(|key| key.as_str() == "state")
+        })
         .expect("detail control should be focusable")
         .path
         .clone();
@@ -3455,7 +3458,10 @@ fn clarify_yank_copies_selected_task_command_from_detail_view() {
     let detail_path = layout
         .focus_targets()
         .iter()
-        .find(|target| target.path.keys().first() == Some(&ChildKey::second()))
+        .find(|target| {
+            target.id.as_str() == "field"
+                && target.path.keys().iter().any(|key| key.as_str() == "state")
+        })
         .expect("detail control should be focusable")
         .path
         .clone();

@@ -4145,6 +4145,92 @@ fn title_blur_during_description_hotkey_preserves_description_focus() {
 }
 
 #[test]
+fn yanking_detail_title_and_description_copies_their_content() {
+    let mut task = test_task();
+    task.title = "Copy this title".to_string();
+    task.description = "Copy this description".to_string();
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![task],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut workspace = TaskWorkspace::new(context);
+    let mut layout = LayoutCtx::new();
+    workspace.layout(Rect::new(0, 0, 120, 40), &mut layout);
+    let title = layout
+        .focus_targets()
+        .iter()
+        .find(|target| {
+            target.id.as_str() == "input"
+                && target.path.keys().iter().any(|key| key.as_str() == "title")
+        })
+        .expect("title should be focusable");
+    let description = layout
+        .focus_targets()
+        .iter()
+        .find(|target| {
+            target.id.as_str() == "textarea"
+                && target
+                    .path
+                    .keys()
+                    .iter()
+                    .any(|key| key.as_str() == "description")
+        })
+        .expect("description should be focusable");
+    let mut dispatcher = TreeDispatcher::new();
+
+    for (target, expected) in [
+        (title, "Copy this title"),
+        (description, "Copy this description"),
+    ] {
+        let effects = dispatcher.dispatch_event(
+            &mut workspace,
+            &EventRoute::new(target.path.clone()),
+            &TuiEvent::Yank,
+            AnimationSettings::default(),
+        );
+
+        assert_eq!(effects.clipboard.as_deref(), Some(expected));
+    }
+}
+
+#[test]
+fn yanking_task_link_copies_its_url() {
+    let mut task = test_task();
+    task.links = vec![TaskLink::new("https://example.com/copied".to_string())];
+    let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+        tasks: vec![task],
+        people: Vec::new(),
+        workspaces: Vec::new(),
+        tags: Vec::new(),
+    });
+    let mut workspace = TaskWorkspace::new(context);
+    let mut layout = LayoutCtx::new();
+    workspace.layout(Rect::new(0, 0, 120, 80), &mut layout);
+    let links = layout
+        .focus_targets()
+        .iter()
+        .find(|target| {
+            target.id.as_str() == "data-view"
+                && target.path.keys().iter().any(|key| key.as_str() == "links")
+        })
+        .expect("links should be focusable");
+
+    let effects = TreeDispatcher::new().dispatch_event(
+        &mut workspace,
+        &EventRoute::new(links.path.clone()),
+        &TuiEvent::Yank,
+        AnimationSettings::default(),
+    );
+
+    assert_eq!(
+        effects.clipboard.as_deref(),
+        Some("https://example.com/copied")
+    );
+}
+
+#[test]
 fn save_failure_and_recovery_preserve_focused_task_description_state() {
     let (_runtime, context, store) = test_context(WorkspaceSnapshot {
         tasks: vec![test_task()],

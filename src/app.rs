@@ -5446,6 +5446,18 @@ impl TuiNode<AppMsg> for TaskWorkspace {
         if let Some(outcome) = self.handle_task_agent_yank(event, ctx) {
             return outcome;
         }
+        if matches!(event, TuiEvent::Yank)
+            && route
+                .path
+                .keys()
+                .iter()
+                .any(|key| matches!(key.as_str(), "title" | "description" | "links"))
+        {
+            let outcome = self.layout.dispatch_event(route, event, ctx);
+            if outcome.handled() {
+                return outcome;
+            }
+        }
         if let Some(outcome) = self.handle_task_reference_yank(event, ctx) {
             return outcome;
         }
