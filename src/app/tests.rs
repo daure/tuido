@@ -104,6 +104,55 @@ fn home_hotkey_requests_all_workspace_startup_resets() {
 }
 
 #[test]
+fn home_hotkey_types_capital_h_in_task_fields_while_editing() {
+    for (field, expected) in [("title", "OriginalH"), ("description", "Existing detailH")] {
+        for modifiers in [KeyModifiers::SHIFT, KeyModifiers::NONE] {
+            let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
+                tasks: vec![test_task()],
+                people: Vec::new(),
+                workspaces: Vec::new(),
+                tags: Vec::new(),
+            });
+            let mut app = App::new(context.store, context.coordinator);
+            let area = Rect::new(0, 0, 120, 50);
+            let mut layout = LayoutCtx::new();
+            app.layout(area, &mut layout);
+            let target = layout
+                .focus_targets()
+                .iter()
+                .find(|target| target.path.keys().iter().any(|key| key.as_str() == field))
+                .expect("task field should be focusable")
+                .clone();
+            app.dispatch_focus(&target, true, &mut FocusCtx::default());
+            let route = EventRoute::new(target.path);
+            for key in [Key::Enter, Key::End] {
+                app.dispatch_event(&route, &TuiEvent::Key(key.into()), &mut EventCtx::default());
+            }
+            let mut ctx = EventCtx::default();
+
+            let outcome = app.dispatch_event(
+                &route,
+                &TuiEvent::Key(KeyEvent {
+                    code: Key::Char('H'),
+                    modifiers,
+                }),
+                &mut ctx,
+            );
+
+            assert!(outcome.handled());
+            assert!(
+                rendered_text(&app, area).contains(expected),
+                "{field}: {modifiers:?}"
+            );
+            assert!(ctx.focus_request().is_none());
+            assert!(!app.return_to_active_tasks.get());
+            assert!(!app.calendar_home_reset.get());
+            assert!(!app.notes_home_reset.get());
+        }
+    }
+}
+
+#[test]
 fn home_reset_replaces_remembered_note_focus_with_the_first_note() {
     let (_runtime, context, _store) = test_context(WorkspaceSnapshot {
         tasks: Vec::new(),
@@ -999,9 +1048,14 @@ fn creating_a_note_enters_inline_editing() {
     dispatcher.dispatch_event(
         &mut app,
         &route,
-        &TuiEvent::Key(KeyEvent::from(Key::Char('x'))),
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('H'),
+            modifiers: KeyModifiers::SHIFT,
+        }),
         AnimationSettings::default(),
     );
+    assert_eq!(app.active_tab.get(), NOTES_TAB_INDEX);
+    assert!(!app.return_to_active_tasks.get());
     let effects = dispatcher.dispatch_event(
         &mut app,
         &route,
@@ -1011,7 +1065,7 @@ fn creating_a_note_enters_inline_editing() {
 
     assert!(matches!(
         effects.messages.as_slice(),
-        [AppMsg::PatchNote(NoteChange { id, content, .. })] if id == &pending_id && content == "x"
+        [AppMsg::PatchNote(NoteChange { id, content, .. })] if id == &pending_id && content == "H"
     ));
 }
 

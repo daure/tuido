@@ -2258,7 +2258,7 @@ fn snooze_dialog_renders_search_and_options_through_modal_portals() {
         .map(|cell| cell.symbol())
         .collect::<String>();
 
-    assert!(text.contains("Search..."));
+    assert!(text.contains("Search…"));
     assert!(text.contains("Tomorrow"));
     assert!(text.contains("This weekend"));
     assert!(text.contains("Pick date & time"));
@@ -3562,7 +3562,7 @@ fn created_task_state_hotkey_focuses_open_dropdown() {
         focus.current().map(|target| target.id.as_str()),
         Some("input")
     );
-    assert!(rendered_text(&workspace, area).contains("Search..."));
+    assert!(rendered_text(&workspace, area).contains("Search…"));
 }
 
 #[test]

@@ -3328,17 +3328,6 @@ impl TuiNode<AppMsg> for App {
             ctx.stop_propagation();
             return EventOutcome::Handled;
         }
-        if keys::APP_RETURN_TO_ACTIVE_TASKS.matches(event) {
-            self.return_to_active_tasks.set(true);
-            self.calendar_home_reset.set(true);
-            self.notes_home_reset.set(true);
-            self.active_tab.set(TASKS_TAB_INDEX);
-            ctx.focus(initial_task_table_focus_request());
-            ctx.stop_propagation();
-            ctx.request_layout();
-            ctx.request_redraw();
-            return EventOutcome::Handled;
-        }
         let outcome = self.root.dispatch_event(route, event, ctx);
         self.redirect_initial_tab_focus(ctx);
         if ctx
@@ -3351,6 +3340,17 @@ impl TuiNode<AppMsg> for App {
         }
         if outcome.handled() {
             return outcome;
+        }
+        if keys::APP_RETURN_TO_ACTIVE_TASKS.matches(event) {
+            self.return_to_active_tasks.set(true);
+            self.calendar_home_reset.set(true);
+            self.notes_home_reset.set(true);
+            self.active_tab.set(TASKS_TAB_INDEX);
+            ctx.focus(initial_task_table_focus_request());
+            ctx.stop_propagation();
+            ctx.request_layout();
+            ctx.request_redraw();
+            return EventOutcome::Handled;
         }
         if task_create_hotkey {
             self.task_creation_return_focus = Some(self.task_creation_origin(route));
