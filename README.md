@@ -1,13 +1,13 @@
 # Tuido
 
-Keyboard-first task management for the terminal and coding agents.
+MCP-driven task management with a keyboard-first terminal UI.
 
 [![Release](https://img.shields.io/github/v/release/daure/tuido)](https://github.com/daure/tuido/releases/latest)
 [![Build](https://github.com/daure/tuido/actions/workflows/release.yml/badge.svg)](https://github.com/daure/tuido/actions/workflows/release.yml)
 
 [Install](#install) · [Get started](#get-started) · [MCP](#connect-an-agent) · [Reference](docs/reference.md)
 
-Manage tasks and notes in the TUI or through [Model Context Protocol](https://modelcontextprotocol.io/) (MCP). Both use the same database: local SQLite by default, or Postgres.
+Agents use [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) to query, create, update, and delete tasks, notes, spaces, tags, and people. They can also manage task checklists, links, relations, and workflow states. The TUI and agents share the same database: local SQLite by default, or Postgres.
 
 ## Features
 
