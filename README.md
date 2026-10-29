@@ -15,6 +15,20 @@ Manage tasks and notes in the TUI or through [Model Context Protocol](https://mo
 - Spaces, tags, and people to organize work.
 - Notes for context that is not yet a task.
 
+## Screenshots
+
+![Task list alongside the selected task's details and editable fields](docs/screenshots/tasks.png)
+
+<sub>Tasks — browse your backlog and edit task details, priority, size, and state.</sub>
+
+![Month calendar with a snoozed task scheduled for November](docs/screenshots/calendar.png)
+
+<sub>Calendar — see snoozed tasks in a month view.</sub>
+
+![Markdown note with headings and project ideas in the Notes view](docs/screenshots/notes.png)
+
+<sub>Notes — capture project context and ideas in Markdown.</sub>
+
 ## Install
 
 **Ubuntu 24.04+, x86_64.** Use a [Nerd Font](https://www.nerdfonts.com/) for icons.
